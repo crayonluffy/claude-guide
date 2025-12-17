@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Claude Proxy Guide</title>
+  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
+  <meta name="description" content="Guide to running Claude via GCloud Proxy">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
+  
+  <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+  
+  <style>
+    /* Custom tweaks for Light Theme */
+    :root {
+      --theme-color: #42b983; /* Vue Green */
+    }
+    /* Make code blocks look sharper */
+    .markdown-section pre > code {
+      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
+      font-size: 0.9rem;
+    }
+    /* Copy Button Styling for Light Mode */
+    .docsify-copy-code-button {
+      background: #f8f8f8;
+      color: #666;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      transition: all 0.2s;
+    }
+    .docsify-copy-code-button:hover {
+      background: #42b983; /* Green on hover */
+      color: white;
+      border-color: #42b983;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">Loading Guide...</div>
+
+  <script>
+    window.$docsify = {
+      name: 'Claude Proxy Guide',
+      repo: '', 
+      
+      auto2top: true,
+      loadSidebar: false,
+      subMaxLevel: 3,
+      
+      search: {
+        placeholder: 'Search commands...',
+        noData: 'No results!',
+        depth: 2
+      },
+
+      copyCode: {
+        buttonText : 'Copy',
+        errorText  : 'Error',
+        successText: 'Copied!'
+      }
+    }
+  </script>
+  
+  <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
+  
+  <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
+  
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-powershell.min.js"></script>
+</body>
+</html>
