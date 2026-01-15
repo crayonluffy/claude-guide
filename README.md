@@ -41,10 +41,13 @@ npm install -g @anthropic-ai/claude-code
 
 ```bash
 # Set environment variables for this session ONLY
-export http_proxy=[http://127.0.0.1:8080](http://127.0.0.1:8080)
-export HTTP_PROXY=[http://127.0.0.1:8080](http://127.0.0.1:8080)
-export https_proxy=[http://127.0.0.1:8080](http://127.0.0.1:8080)
-export HTTPS_PROXY=[http://127.0.0.1:8080](http://127.0.0.1:8080)
+export http_proxy=http://127.0.0.1:8080
+export HTTP_PROXY=http://127.0.0.1:8080
+export https_proxy=http://127.0.0.1:8080
+export HTTPS_PROXY=http://127.0.0.1:8080
+
+# Verify connectivity (Optional but recommended)
+curl ipinfo.io
 
 # Launch
 claude
