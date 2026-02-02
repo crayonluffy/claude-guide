@@ -11,6 +11,20 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 
 Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell windows** open.
 
+### Screenshots
+
+**Step 1 - SSH Tunnel:**
+
+![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
+
+**Step 2 - Bridge:**
+
+![Step 2 - Bridge](images/step2-bridge.png)
+
+**Step 3 - Run Claude:**
+
+![Step 3 - Run Claude](images/step3-run-claude.png)
+
 ---
 
 ### For joelaw
