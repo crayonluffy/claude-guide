@@ -7,7 +7,37 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 
 ---
 
-##  Mac / Linux Users
+## 🔑 Quick Connect Commands
+
+Copy your SSH command below. Replace `YOUR_SERVER_IP` with the actual server IP.
+
+### For joelaw
+
+**Mac/Linux:**
+```bash
+ssh -i ~/.ssh/id_ed25519 -D 1080 -N -C joelaw@YOUR_SERVER_IP
+```
+
+**Windows (PowerShell):**
+```powershell
+ssh -i C:\Users\joelaw\.ssh\id_ed25519 -D 1080 -N -C joelaw@YOUR_SERVER_IP
+```
+
+### For michael
+
+**Mac/Linux:**
+```bash
+ssh -i ~/.ssh/id_ed25519 -D 1080 -N -C michael@YOUR_SERVER_IP
+```
+
+**Windows (PowerShell):**
+```powershell
+ssh -i C:\Users\michael\.ssh\id_ed25519 -D 1080 -N -C michael@YOUR_SERVER_IP
+```
+
+---
+
+##  Mac / Linux Users
 
 ### 1. The Tunnel (Keep Terminal Open)
 Run this to create a local SOCKS proxy at port `1080` that tunnels through your VM.
@@ -88,10 +118,10 @@ npm install -g @anthropic-ai/claude-code
 
 ```powershell
 # Set environment variables for this session ONLY
-$env:http_proxy="[http://127.0.0.1:8080]"
-$env:HTTP_PROXY="[http://127.0.0.1:8080]"
-$env:https_proxy="[http://127.0.0.1:8080]"
-$env:HTTPS_PROXY="[http://127.0.0.1:8080]"
+$env:http_proxy="http://127.0.0.1:8080"
+$env:HTTP_PROXY="http://127.0.0.1:8080"
+$env:https_proxy="http://127.0.0.1:8080"
+$env:HTTPS_PROXY="http://127.0.0.1:8080"
 
 # Verify connectivity (Optional but recommended)
 curl ipinfo.io
