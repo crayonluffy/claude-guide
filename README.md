@@ -7,32 +7,64 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 
 ---
 
-## 🔑 Quick Connect Commands
+## 🔑 Quick Start for joelaw & michael (Windows)
 
-Copy your SSH command below. Replace `YOUR_SERVER_IP` with the actual server IP.
+Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell windows** open.
+
+---
 
 ### For joelaw
 
-**Mac/Linux:**
-```bash
-ssh -i ~/.ssh/id_ed25519 -D 1080 -N -C joelaw@YOUR_SERVER_IP
-```
-
-**Windows (PowerShell):**
+**Window 1 - SSH Tunnel (keep open):**
 ```powershell
 ssh -i C:\Users\joelaw\.ssh\id_ed25519 -D 1080 -N -C joelaw@YOUR_SERVER_IP
 ```
 
-### For michael
-
-**Mac/Linux:**
-```bash
-ssh -i ~/.ssh/id_ed25519 -D 1080 -N -C michael@YOUR_SERVER_IP
+**Window 2 - Bridge (keep open):**
+```powershell
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
 ```
 
-**Windows (PowerShell):**
+**Window 3 - Run Claude:**
+```powershell
+$env:http_proxy="http://127.0.0.1:8080"
+$env:HTTP_PROXY="http://127.0.0.1:8080"
+$env:https_proxy="http://127.0.0.1:8080"
+$env:HTTPS_PROXY="http://127.0.0.1:8080"
+
+# Verify connectivity (Optional)
+curl ipinfo.io
+
+# Launch
+claude
+```
+
+---
+
+### For michael
+
+**Window 1 - SSH Tunnel (keep open):**
 ```powershell
 ssh -i C:\Users\michael\.ssh\id_ed25519 -D 1080 -N -C michael@YOUR_SERVER_IP
+```
+
+**Window 2 - Bridge (keep open):**
+```powershell
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
+```
+
+**Window 3 - Run Claude:**
+```powershell
+$env:http_proxy="http://127.0.0.1:8080"
+$env:HTTP_PROXY="http://127.0.0.1:8080"
+$env:https_proxy="http://127.0.0.1:8080"
+$env:HTTPS_PROXY="http://127.0.0.1:8080"
+
+# Verify connectivity (Optional)
+curl ipinfo.io
+
+# Launch
+claude
 ```
 
 ---
