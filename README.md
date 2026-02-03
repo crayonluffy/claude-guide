@@ -7,7 +7,7 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 
 ---
 
-## 🔑 Quick Start for joelaw & michael (Windows)
+## 🔑 Quick Start for joelaw, michael & alvin (Windows)
 
 Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell windows** open.
 
@@ -72,6 +72,40 @@ icacls C:\Users\michael\.ssh\michael /grant:r "michael:R"
 **Window 1 - SSH Tunnel (keep open):**
 ```powershell
 ssh -i C:\Users\michael\.ssh\michael -D 1080 -N -C michael@YOUR_SERVER_IP
+```
+
+**Window 2 - Bridge (keep open):**
+```powershell
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
+```
+
+**Window 3 - Run Claude:**
+```powershell
+$env:http_proxy="http://127.0.0.1:8080"
+$env:HTTP_PROXY="http://127.0.0.1:8080"
+$env:https_proxy="http://127.0.0.1:8080"
+$env:HTTPS_PROXY="http://127.0.0.1:8080"
+
+# Verify connectivity (Optional)
+curl ipinfo.io
+
+# Launch
+claude
+```
+
+---
+
+### For alvin
+
+**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
+```cmd
+icacls C:\Users\alvin\.ssh\alvin /inheritance:r
+icacls C:\Users\alvin\.ssh\alvin /grant:r "alvin:R"
+```
+
+**Window 1 - SSH Tunnel (keep open):**
+```powershell
+ssh -i C:\Users\alvin\.ssh\alvin -D 1080 -N -C alvin@YOUR_SERVER_IP
 ```
 
 **Window 2 - Bridge (keep open):**
