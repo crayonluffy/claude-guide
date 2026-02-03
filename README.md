@@ -29,9 +29,15 @@ Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell wind
 
 ### For joelaw
 
+**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
+```cmd
+icacls C:\Users\joelaw\.ssh\joelaw /inheritance:r
+icacls C:\Users\joelaw\.ssh\joelaw /grant:r "joelaw:R"
+```
+
 **Window 1 - SSH Tunnel (keep open):**
 ```powershell
-ssh -i C:\Users\joelaw\.ssh\id_ed25519 -D 1080 -N -C joelaw@YOUR_SERVER_IP
+ssh -i C:\Users\joelaw\.ssh\joelaw -D 1080 -N -C joelaw@YOUR_SERVER_IP
 ```
 
 **Window 2 - Bridge (keep open):**
@@ -57,9 +63,15 @@ claude
 
 ### For michael
 
+**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
+```cmd
+icacls C:\Users\michael\.ssh\michael /inheritance:r
+icacls C:\Users\michael\.ssh\michael /grant:r "michael:R"
+```
+
 **Window 1 - SSH Tunnel (keep open):**
 ```powershell
-ssh -i C:\Users\michael\.ssh\id_ed25519 -D 1080 -N -C michael@YOUR_SERVER_IP
+ssh -i C:\Users\michael\.ssh\michael -D 1080 -N -C michael@YOUR_SERVER_IP
 ```
 
 **Window 2 - Bridge (keep open):**
