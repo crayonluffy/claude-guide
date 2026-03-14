@@ -7,9 +7,9 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 
 ---
 
-## 🔑 Quick Start for joelaw, michael & alvin (Windows)
+## 🔑 Quick Start (Windows)
 
-Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell windows** open.
+Replace `YOUR_SERVER_IP` with the actual server IP, `YOUR_USERNAME` with your Windows username, and `YOUR_KEY_FILENAME` with your SSH key filename. You need **3 PowerShell windows** open.
 
 ### Screenshots
 
@@ -27,85 +27,19 @@ Replace `YOUR_SERVER_IP` with the actual server IP. You need **3 PowerShell wind
 
 ---
 
-### For joelaw
-
 **⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
-```cmd
-icacls C:\Users\joelaw\.ssh\joelaw /inheritance:r
-icacls C:\Users\joelaw\.ssh\joelaw /grant:r "joelaw:R"
+```powershell
+$keyPath = "C:\Users\YOUR_USERNAME\.ssh\YOUR_KEY_FILENAME"
+
+icacls $keyPath /inheritance:r
+icacls $keyPath /grant:r "$($env:USERNAME):R"
+icacls $keyPath /remove "SYSTEM"
+icacls $keyPath /remove "Administrators"
 ```
 
 **Window 1 - SSH Tunnel (keep open):**
 ```powershell
-ssh -i C:\Users\joelaw\.ssh\joelaw -D 1080 -N -C joelaw@YOUR_SERVER_IP
-```
-
-**Window 2 - Bridge (keep open):**
-```powershell
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**Window 3 - Run Claude:**
-```powershell
-$env:http_proxy="http://127.0.0.1:8080"
-$env:HTTP_PROXY="http://127.0.0.1:8080"
-$env:https_proxy="http://127.0.0.1:8080"
-$env:HTTPS_PROXY="http://127.0.0.1:8080"
-
-# Verify connectivity (Optional)
-curl ipinfo.io
-
-# Launch
-claude
-```
-
----
-
-### For michael
-
-**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
-```cmd
-icacls C:\Users\michael\.ssh\michael /inheritance:r
-icacls C:\Users\michael\.ssh\michael /grant:r "michael:R"
-```
-
-**Window 1 - SSH Tunnel (keep open):**
-```powershell
-ssh -i C:\Users\michael\.ssh\michael -D 1080 -N -C michael@YOUR_SERVER_IP
-```
-
-**Window 2 - Bridge (keep open):**
-```powershell
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**Window 3 - Run Claude:**
-```powershell
-$env:http_proxy="http://127.0.0.1:8080"
-$env:HTTP_PROXY="http://127.0.0.1:8080"
-$env:https_proxy="http://127.0.0.1:8080"
-$env:HTTPS_PROXY="http://127.0.0.1:8080"
-
-# Verify connectivity (Optional)
-curl ipinfo.io
-
-# Launch
-claude
-```
-
----
-
-### For alvin
-
-**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
-```cmd
-icacls C:\Users\alvin\.ssh\alvin /inheritance:r
-icacls C:\Users\alvin\.ssh\alvin /grant:r "alvin:R"
-```
-
-**Window 1 - SSH Tunnel (keep open):**
-```powershell
-ssh -i C:\Users\alvin\.ssh\alvin -D 1080 -N -C alvin@YOUR_SERVER_IP
+ssh -i C:\Users\YOUR_USERNAME\.ssh\YOUR_KEY_FILENAME -D 1080 -N -C YOUR_USERNAME@YOUR_SERVER_IP
 ```
 
 **Window 2 - Bridge (keep open):**
