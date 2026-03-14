@@ -59,6 +59,9 @@ curl ipinfo.io
 
 # Launch
 claude
+
+# Launch (skip permission prompts)
+claude --dangerously-skip-permissions
 ```
 
 ---
@@ -107,6 +110,9 @@ curl ipinfo.io
 
 # Launch
 claude
+
+# Launch (skip permission prompts)
+claude --dangerously-skip-permissions
 ```
 
 -----
@@ -154,4 +160,7 @@ curl ipinfo.io
 
 # Launch
 claude
+
+# Launch (skip permission prompts)
+claude --dangerously-skip-permissions
 ```
