@@ -164,3 +164,99 @@ claude
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
 ```
+
+---
+
+## 📖 Useful Claude Code Commands & Tips
+
+### CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `claude` | Start interactive session |
+| `claude "query"` | Start session with initial prompt |
+| `claude -c` | Continue most recent conversation |
+| `claude -r` | Resume a previous session |
+| `claude -p "query"` | Non-interactive mode (print and exit) |
+| `claude --model sonnet` | Use a specific model (`sonnet`, `opus`, `haiku`) |
+| `claude --effort high` | Set effort level (`low`, `medium`, `high`, `max`, `auto`) |
+| `claude --dangerously-skip-permissions` | Skip all permission prompts |
+| `claude --max-turns 5` | Limit agentic turns (print mode) |
+| `claude --verbose` | Enable verbose logging |
+| `claude update` | Update to latest version |
+| `claude --version` | Show version number |
+
+### Slash Commands (Inside Interactive Mode)
+
+| Command | Purpose |
+|---------|---------|
+| `/help` | Show help and available commands |
+| `/clear` | Clear conversation history |
+| `/compact` | Compact conversation to free context |
+| `/model` | Change AI model |
+| `/effort` | Set effort level |
+| `/config` | Open settings interface |
+| `/status` | Show version, model, account info |
+| `/doctor` | Diagnose installation issues |
+| `/diff` | Review uncommitted code changes |
+| `/cost` | Show token usage statistics |
+| `/context` | Visualize context window usage |
+| `/memory` | Edit project CLAUDE.md |
+| `/vim` | Toggle Vim editing mode |
+| `/init` | Initialize project with CLAUDE.md |
+| `/export` | Export conversation as text |
+| `/copy` | Copy last response to clipboard |
+| `/resume` | Resume a previous session |
+| `/fork` | Branch current conversation |
+| `/rewind` | Undo bad edits and restore previous code |
+| `/plan` | Enter plan mode (analysis without execution) |
+| `/bug` | Submit feedback about Claude Code |
+
+### Keyboard Shortcuts
+
+| Shortcut | Description |
+|----------|-------------|
+| `Ctrl+C` | Cancel current generation |
+| `Ctrl+D` | Exit Claude Code |
+| `Ctrl+L` | Clear terminal screen |
+| `Shift+Tab` | Toggle permission modes |
+| `Esc + Esc` | Rewind conversation |
+| `\ + Enter` | New line in input |
+| `Ctrl+G` | Open prompt in external editor |
+| `Alt+P` | Switch model |
+| `Alt+T` | Toggle extended thinking |
+
+### Configuration
+
+**Settings file locations:**
+- **User:** `~/.claude/settings.json` (applies to all projects)
+- **Project:** `.claude/settings.json` (shared with team)
+- **Local:** `.claude/settings.local.json` (personal, gitignored)
+
+**Example `settings.json`:**
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "permissions": {
+    "allow": ["Bash(npm run test *)", "Read"],
+    "deny": ["Bash(curl *)"]
+  },
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
+}
+```
+
+**CLAUDE.md** — Create at project root to give Claude persistent context about your project (coding standards, architecture, common commands, etc.). It loads automatically when Claude starts.
+
+### Tips
+
+- Use `/compact` when context gets full to summarize and free up space
+- Use `claude -p "query" | command` to pipe Claude output into other tools
+- Pipe files into Claude: `cat logs.txt | claude -p "summarize errors"`
+- Use `/rewind` or `Esc+Esc` to undo bad changes
+- Use `/diff` to review all changes before committing
+- Name sessions with `claude -n "feature-name"` for easy resuming later
+- Use `/plan` mode to analyze code safely without making changes
+- Run `/doctor` if something isn't working right
