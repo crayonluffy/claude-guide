@@ -55,10 +55,7 @@ $env:https_proxy="http://127.0.0.1:8080"
 $env:HTTPS_PROXY="http://127.0.0.1:8080"
 
 # Verify connectivity (Optional)
-curl ipinfo.io
-
-# Launch
-claude
+curl.exe ipinfo.io
 
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
@@ -106,10 +103,7 @@ export https_proxy=http://127.0.0.1:8080
 export HTTPS_PROXY=http://127.0.0.1:8080
 
 # Verify connectivity (Optional but recommended)
-curl ipinfo.io
-
-# Launch
-claude
+curl.exe ipinfo.io
 
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
@@ -156,10 +150,7 @@ $env:https_proxy="http://127.0.0.1:8080"
 $env:HTTPS_PROXY="http://127.0.0.1:8080"
 
 # Verify connectivity (Optional but recommended)
-curl ipinfo.io
-
-# Launch
-claude
+curl.exe ipinfo.io
 
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
