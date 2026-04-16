@@ -103,7 +103,7 @@ export https_proxy=http://127.0.0.1:8080
 export HTTPS_PROXY=http://127.0.0.1:8080
 
 # Verify connectivity (Optional but recommended)
-curl.exe ipinfo.io
+curl ipinfo.io
 
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
