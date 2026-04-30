@@ -63,7 +63,40 @@ claude --dangerously-skip-permissions
 
 ---
 
-##  Mac / Linux Users
+## ⚡ Quick Start (Mac / Linux)
+
+How traffic flows once everything is running:
+
+```
+┌────────┐  http     ┌────────┐  socks    ┌────────┐  ssh     ┌────────┐
+│ claude │──:8080───▶│ bridge │──:1080───▶│ tunnel │─────────▶│ GCP VM │──▶ API
+└────────┘           └────────┘           └────────┘          └────────┘
+```
+
+Open **three terminals** and run one command in each:
+
+**① Tunnel** — opens a SOCKS proxy on `:1080`
+```bash
+ssh -i ~/.ssh/your_ssh_key -D 1080 -N -C username@gcloud_vm_ip
+```
+
+**② Bridge** — converts HTTP `:8080` → SOCKS `:1080`
+```bash
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
+```
+
+**③ Claude** — sets proxy env vars and launches
+```bash
+export HTTPS_PROXY=http://127.0.0.1:8080
+export NO_PROXY="172.16.199.0/24,172.16.209.0/24,localhost,127.0.0.1"
+claude
+```
+
+> First time? Run `npm install -g @anthropic-ai/claude-code` once before step ③. Windows users: see the [PowerShell section](#-windows-users-powershell) below.
+
+---
+
+##  Mac / Linux Users
 
 ### 1. The Tunnel (Keep Terminal Open)
 Run this to create a local SOCKS proxy at port `1080` that tunnels through your VM.
@@ -101,12 +134,24 @@ export http_proxy=http://127.0.0.1:8080
 export HTTP_PROXY=http://127.0.0.1:8080
 export https_proxy=http://127.0.0.1:8080
 export HTTPS_PROXY=http://127.0.0.1:8080
+export NO_PROXY="172.16.199.0/24,172.16.209.0/24,localhost,127.0.0.1"
 
 # Verify connectivity (Optional but recommended)
 curl ipinfo.io
 
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
+```
+
+### 4\. (Optional) Open Chrome Through the Proxy — Mac
+
+Launches a separate Chrome instance routed through the local HTTP proxy, using a dedicated profile so it doesn't interfere with your normal browsing session.
+
+```bash
+open -n -a "Google Chrome" --args \
+  --proxy-server="http://127.0.0.1:8080" \
+  --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
+  --profile-directory="Default"
 ```
 
 -----
