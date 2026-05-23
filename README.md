@@ -213,7 +213,55 @@ proxy-status    # show what's running
 
 Same idea, written for **zsh** (macOS default) or **bash** (most Linux). SSH is native (we background it with `ssh -f`), there's no execution-policy step, and ports are detected with `lsof`.
 
-**Setup (run once):**
+**Step 1 — Install your SSH key + create the `jpvpn` alias (run once).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste. It moves the key into `~/.ssh`, locks it (`chmod 600`), writes an `~/.ssh/config` alias, and on macOS adds it to the Keychain so you aren't asked for the passphrase.
+
+```bash
+# Fill in your VM details once - everything else is automatic:
+SERVER_IP="YOUR_SERVER_IP"     # the VM's IP or hostname
+SSH_USER="YOUR_SSH_USER"       # the SSH username on the VM
+ALIAS="jpvpn"                  # the shortcut you'll type: ssh jpvpn
+
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+
+# Find the newest private key in ~/Downloads (a file whose first line is a key header)
+key=""
+for f in "$HOME"/Downloads/*; do
+  [ -f "$f" ] || continue
+  case "$f" in *.pub) continue ;; esac
+  if head -n1 "$f" 2>/dev/null | grep -q "BEGIN .*PRIVATE KEY"; then
+    if [ -z "$key" ] || [ "$f" -nt "$key" ]; then key="$f"; fi
+  fi
+done
+
+if [ -z "$key" ]; then
+  echo "[Err] No private key found in ~/Downloads - download it there first."
+else
+  dest="$HOME/.ssh/$(basename "$key")"
+  mv "$key" "$dest" && chmod 600 "$dest"
+  echo "[OK] Key installed and locked: $dest"
+
+  cfg="$HOME/.ssh/config"
+  if grep -qiE "^Host[[:space:]]+$ALIAS([[:space:]]|$)" "$cfg" 2>/dev/null; then
+    echo "[Info] Alias '$ALIAS' already in $cfg - leaving it."
+  else
+    {
+      printf '\nHost %s\n' "$ALIAS"
+      printf '    HostName %s\n' "$SERVER_IP"
+      printf '    User %s\n' "$SSH_USER"
+      printf '    IdentityFile %s\n' "$dest"
+      printf '    AddKeysToAgent yes\n'
+      [ "$(uname)" = "Darwin" ] && printf '    UseKeychain yes\n'
+    } >> "$cfg"
+    chmod 600 "$cfg"
+    echo "[OK] SSH alias created - connect with: ssh $ALIAS"
+  fi
+
+  # macOS: store the passphrase in the Keychain so you aren't prompted each time
+  [ "$(uname)" = "Darwin" ] && ssh-add --apple-use-keychain "$dest" 2>/dev/null
+fi
+```
+
+**Step 2 — Install the `cc` profile.**
 
 ```bash
 # 1. Download the script to ~/.claude-proxy.sh
@@ -223,30 +271,28 @@ curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scrip
 echo 'source ~/.claude-proxy.sh' >> ~/.zshrc      # macOS (zsh)
 # echo 'source ~/.claude-proxy.sh' >> ~/.bashrc   # Linux (bash)
 
-# 3. Edit ~/.claude-proxy.sh and set CLAUDE_SSH_KEY / USER / HOST
-nano ~/.claude-proxy.sh      # or: code ~/.claude-proxy.sh
-
-# 4. Reload your shell
+# 3. Reload your shell
 source ~/.zshrc      # or: source ~/.bashrc
 
-# 5. First connection: accept the host key once
-ssh <your-ssh-user>@<your-gcp-hostname>
+# 4. First connection: accept the host key once
+ssh jpvpn
 ```
 
 📄 The full script lives in the repo: [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file.
 
-Edit the **Settings block** near the top:
+It already points at the `jpvpn` alias from Step 1, so there's nothing to re-enter — the **Settings block** just confirms:
 
 ```bash
-# Fill these in - or set CLAUDE_SSH_HOST to an ~/.ssh/config alias and blank USER/KEY.
-export CLAUDE_SSH_HOST="<your-gcp-hostname>"   # a host/IP, OR an ~/.ssh/config alias
-export CLAUDE_SSH_USER="<your-ssh-user>"       # leave blank if CLAUDE_SSH_HOST is an alias
-export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"  # leave blank if CLAUDE_SSH_HOST is an alias
+export CLAUDE_SSH_HOST="jpvpn"   # the alias from Step 1 (or a raw host/IP)
+export CLAUDE_SSH_USER=""        # leave blank when CLAUDE_SSH_HOST is a config alias
+export CLAUDE_SSH_KEY=""         # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
 export CLAUDE_SOCKS_PORT=1080
 export CLAUDE_HTTP_PORT=8080
 # Append corporate intranet ranges to CLAUDE_NO_PROXY if needed.
 ```
+
+> Not using an alias? Fill in `CLAUDE_SSH_KEY`, `CLAUDE_SSH_USER`, and `CLAUDE_SSH_HOST` explicitly instead.
 
 **Daily usage:**
 
@@ -257,27 +303,13 @@ cc-stop         # stop tunnel + bridge + clear env vars
 proxy-status    # show what's running
 ```
 
-**macOS extras (recommended)** — store your key passphrase in the Keychain so you're not prompted each time:
-
-```bash
-ssh-add --apple-use-keychain ~/.ssh/<your-key>
-```
-
-Add this to `~/.ssh/config` so the key loads from the Keychain automatically on macOS:
-
-```
-Host *
-    AddKeysToAgent yes
-    UseKeychain yes
-```
-
 **Troubleshooting (macOS / Linux):**
 
 | Symptom | Fix |
 |---------|-----|
 | `lsof: command not found` (Linux) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
 | Bridge never comes up | Check the log: `cat /tmp/claude-bridge.log`. Usually missing Node.js (`npx`) — install from [nodejs.org](https://nodejs.org/). |
-| SSH keeps asking for the passphrase | Run the `ssh-add --apple-use-keychain` step above (macOS), or `ssh-add ~/.ssh/<your-key>` (Linux). |
+| SSH keeps asking for the passphrase | Step 1 adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
 | `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
 | Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
 
@@ -285,23 +317,17 @@ Host *
 
 ### 🔁 Cross-Platform Tips
 
-**1. Use `~/.ssh/config` for a clean SSH alias.** Instead of repeating `-i`, `-p`, and
-`user@host`, define the connection once (the Windows Step 1 above does this for you):
+**1. Your `jpvpn` alias lives in `~/.ssh/config`.** Step 1 created it — that's why `ssh jpvpn`
+and `cc` need no key path, user, or host. Edit that file if your server IP or user changes:
 
 ```
 Host jpvpn
-    HostName <your-gcp-hostname>
+    HostName <your-host-or-ip>
     User <your-ssh-user>
-    Port 22
     IdentityFile ~/.ssh/<your-key>
-    # macOS only:
     AddKeysToAgent yes
-    UseKeychain yes
+    UseKeychain yes      # macOS only
 ```
-
-Now `ssh jpvpn` just works. In the profile you can set the host to the alias
-(`SSH_HOST = "jpvpn"` / `CLAUDE_SSH_HOST="jpvpn"`) and drop the `-i`, `-p`, and user from the
-SSH command — ssh reads them straight from the config.
 
 **2. VS Code integrated terminal.** Both profiles load automatically in VS Code's terminal because
 it launches your default shell — so `cc` works there too. On Windows, make sure VS Code's default

@@ -5,10 +5,10 @@
 # ============================================================
 # Settings - EDIT THESE
 # ============================================================
-# Fill these in. Or: set CLAUDE_SSH_HOST to an ~/.ssh/config alias and leave USER/KEY blank.
-export CLAUDE_SSH_HOST="<your-gcp-hostname>"   # a host/IP, OR an ~/.ssh/config alias
-export CLAUDE_SSH_USER="<your-ssh-user>"       # leave blank if CLAUDE_SSH_HOST is a config alias
-export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"  # leave blank if CLAUDE_SSH_HOST is a config alias
+# If you ran "Step 1" you already have an ~/.ssh/config alias - just point at it.
+export CLAUDE_SSH_HOST="jpvpn"   # an ~/.ssh/config alias, OR a raw host/IP
+export CLAUDE_SSH_USER=""        # leave blank when CLAUDE_SSH_HOST is a config alias
+export CLAUDE_SSH_KEY=""         # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
 export CLAUDE_SOCKS_PORT=1080
 export CLAUDE_HTTP_PORT=8080
