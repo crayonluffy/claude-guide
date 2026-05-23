@@ -138,7 +138,7 @@ if (-not $key) {
         Add-Content -Path $configPath -Value $entry -Encoding ascii
         Write-Host "[OK] SSH alias created - connect with: ssh $Alias" -ForegroundColor Green
     }
-    Write-Host "Note this key path for Step 2: $dest" -ForegroundColor Cyan
+    Write-Host "Done. The '$Alias' alias is ready - now install the cc profile (Step 2)." -ForegroundColor Cyan
 }
 ```
 
@@ -162,17 +162,19 @@ notepad $PROFILE     # or:  code $PROFILE
 . $PROFILE
 ```
 
-Edit the **Settings block** at the top — `SSH_KEY` is the path Step 1 printed:
+The profile reads the connection from your `jpvpn` alias (Step 1), so the **Settings block** just points at it — no key/user/host to re-enter:
 
 ```powershell
-$script:SSH_KEY     = "C:\Users\<your-username>\.ssh\<your-key>"
-$script:SSH_USER    = "<your-ssh-user>"
-$script:SSH_HOST    = "<your-gcp-hostname>"
+$script:SSH_HOST    = "jpvpn"   # the alias from Step 1 (or a raw host/IP)
+$script:SSH_USER    = ""        # leave blank when SSH_HOST is a config alias
+$script:SSH_KEY     = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_PORT    = 22
 $script:SOCKS_PORT  = 1080
 $script:HTTP_PORT   = 8080
 # Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
 ```
+
+> Not using an alias? Fill in `SSH_KEY`, `SSH_USER`, and `SSH_HOST` explicitly instead — the profile uses them when they're set.
 
 📄 The full profile lives in the repo: [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file.
 
@@ -236,9 +238,10 @@ ssh <your-ssh-user>@<your-gcp-hostname>
 Edit the **Settings block** near the top:
 
 ```bash
-export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"
-export CLAUDE_SSH_USER="<your-ssh-user>"
-export CLAUDE_SSH_HOST="<your-gcp-hostname>"
+# Fill these in - or set CLAUDE_SSH_HOST to an ~/.ssh/config alias and blank USER/KEY.
+export CLAUDE_SSH_HOST="<your-gcp-hostname>"   # a host/IP, OR an ~/.ssh/config alias
+export CLAUDE_SSH_USER="<your-ssh-user>"       # leave blank if CLAUDE_SSH_HOST is an alias
+export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"  # leave blank if CLAUDE_SSH_HOST is an alias
 export CLAUDE_SSH_PORT=22
 export CLAUDE_SOCKS_PORT=1080
 export CLAUDE_HTTP_PORT=8080

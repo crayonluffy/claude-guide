@@ -10,9 +10,11 @@
 # ============================================================
 # Settings - EDIT THESE
 # ============================================================
-$script:SSH_KEY     = "C:\Users\<your-username>\.ssh\<your-key>"
-$script:SSH_USER    = "<your-ssh-user>"
-$script:SSH_HOST    = "<your-gcp-hostname>"
+# If you ran the "Step 1" setup, you already have an ~/.ssh/config alias -
+# just point SSH_HOST at it and leave SSH_USER / SSH_KEY blank.
+$script:SSH_HOST    = "jpvpn"   # an ~/.ssh/config alias, OR a raw host/IP
+$script:SSH_USER    = ""        # leave blank when SSH_HOST is a config alias
+$script:SSH_KEY     = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_PORT    = 22
 $script:SOCKS_PORT  = 1080
 $script:HTTP_PORT   = 8080
@@ -52,19 +54,20 @@ function tunnel-start {
         return
     }
 
-    Write-Host "[SSH] Starting tunnel to $($script:SSH_USER)@$($script:SSH_HOST)..." -ForegroundColor Cyan
+    Write-Host "[SSH] Starting tunnel to $($script:SSH_HOST)..." -ForegroundColor Cyan
 
     $sshArgs = @(
-        "-i", $script:SSH_KEY,
         "-D", $script:SOCKS_PORT,
         "-N",
         "-C",
         "-o", "ServerAliveInterval=60",
         "-o", "ServerAliveCountMax=3",
-        "-o", "ExitOnForwardFailure=yes",
-        "-p", $script:SSH_PORT,
-        "$($script:SSH_USER)@$($script:SSH_HOST)"
+        "-o", "ExitOnForwardFailure=yes"
     )
+    # Explicit key/port/user are optional - leave SSH_KEY/SSH_USER blank to use an ~/.ssh/config alias
+    if ($script:SSH_KEY)  { $sshArgs += @("-i", $script:SSH_KEY, "-p", "$($script:SSH_PORT)") }
+    if ($script:SSH_USER) { $sshArgs += "$($script:SSH_USER)@$($script:SSH_HOST)" }
+    else                  { $sshArgs += $script:SSH_HOST }
 
     $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -WindowStyle Hidden
     $global:SSH_TUNNEL_PID = $proc.Id

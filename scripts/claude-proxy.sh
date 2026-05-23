@@ -5,9 +5,10 @@
 # ============================================================
 # Settings - EDIT THESE
 # ============================================================
-export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"
-export CLAUDE_SSH_USER="<your-ssh-user>"
-export CLAUDE_SSH_HOST="<your-gcp-hostname>"
+# Fill these in. Or: set CLAUDE_SSH_HOST to an ~/.ssh/config alias and leave USER/KEY blank.
+export CLAUDE_SSH_HOST="<your-gcp-hostname>"   # a host/IP, OR an ~/.ssh/config alias
+export CLAUDE_SSH_USER="<your-ssh-user>"       # leave blank if CLAUDE_SSH_HOST is a config alias
+export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"  # leave blank if CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
 export CLAUDE_SOCKS_PORT=1080
 export CLAUDE_HTTP_PORT=8080
@@ -33,15 +34,15 @@ tunnel-start() {
         return
     fi
 
-    echo "[SSH] Starting tunnel to $CLAUDE_SSH_USER@$CLAUDE_SSH_HOST..."
-    ssh -i "$CLAUDE_SSH_KEY" \
-        -D "$CLAUDE_SOCKS_PORT" \
-        -N -C -f \
-        -o ServerAliveInterval=60 \
-        -o ServerAliveCountMax=3 \
-        -o ExitOnForwardFailure=yes \
-        -p "$CLAUDE_SSH_PORT" \
-        "$CLAUDE_SSH_USER@$CLAUDE_SSH_HOST"
+    echo "[SSH] Starting tunnel to $CLAUDE_SSH_HOST..."
+    local args=(-D "$CLAUDE_SOCKS_PORT" -N -C -f
+        -o ServerAliveInterval=60
+        -o ServerAliveCountMax=3
+        -o ExitOnForwardFailure=yes)
+    # Explicit key/port/user are optional - leave CLAUDE_SSH_KEY/USER blank to use an ~/.ssh/config alias
+    [ -n "$CLAUDE_SSH_KEY" ] && args+=(-i "$CLAUDE_SSH_KEY" -p "$CLAUDE_SSH_PORT")
+    if [ -n "$CLAUDE_SSH_USER" ]; then args+=("$CLAUDE_SSH_USER@$CLAUDE_SSH_HOST"); else args+=("$CLAUDE_SSH_HOST"); fi
+    ssh "${args[@]}"
 
     local attempts=0
     while ! _port_in_use "$CLAUDE_SOCKS_PORT" && [ $attempts -lt 10 ]; do
