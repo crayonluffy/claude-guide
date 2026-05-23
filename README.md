@@ -99,13 +99,13 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 
 ### 🪟 Windows
 
-**Step 1 — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh gcp-vpn`.
+**Step 1 — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh jpvpn`.
 
 ```powershell
 # Fill in your VM details once - everything else is automatic:
 $ServerIp = "YOUR_SERVER_IP"     # the VM's IP or hostname
 $SshUser  = "YOUR_SSH_USER"      # the SSH username on the VM
-$Alias    = "gcp-vpn"            # the shortcut you'll type: ssh gcp-vpn
+$Alias    = "jpvpn"            # the shortcut you'll type: ssh jpvpn
 
 $downloads = Join-Path $HOME 'Downloads'
 $sshDir    = Join-Path $HOME '.ssh'
@@ -183,7 +183,7 @@ $script:HTTP_PORT   = 8080
 > - Keep the profile **ASCII-only** (the published script already is) so any editor is safe.
 
 > **First connection:** SSH will prompt `Are you sure you want to continue connecting (yes/no)?`
-> the first time. The background tunnel can't answer that prompt, so run `ssh gcp-vpn` (or
+> the first time. The background tunnel can't answer that prompt, so run `ssh jpvpn` (or
 > `ssh <user>@<host>`) **once** interactively to accept the host key, then use `cc`.
 
 **Daily usage:**
@@ -201,7 +201,7 @@ proxy-status    # show what's running
 |---------|-----|
 | `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
 | Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
-| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh gcp-vpn` once interactively, type `yes`, then retry. |
+| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh jpvpn` once interactively, type `yes`, then retry. |
 | `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
 | Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
 
@@ -286,7 +286,7 @@ Host *
 `user@host`, define the connection once (the Windows Step 1 above does this for you):
 
 ```
-Host gcp-vpn
+Host jpvpn
     HostName <your-gcp-hostname>
     User <your-ssh-user>
     Port 22
@@ -296,8 +296,8 @@ Host gcp-vpn
     UseKeychain yes
 ```
 
-Now `ssh gcp-vpn` just works. In the profile you can set the host to the alias
-(`SSH_HOST = "gcp-vpn"` / `CLAUDE_SSH_HOST="gcp-vpn"`) and drop the `-i`, `-p`, and user from the
+Now `ssh jpvpn` just works. In the profile you can set the host to the alias
+(`SSH_HOST = "jpvpn"` / `CLAUDE_SSH_HOST="jpvpn"`) and drop the `-i`, `-p`, and user from the
 SSH command — ssh reads them straight from the config.
 
 **2. VS Code integrated terminal.** Both profiles load automatically in VS Code's terminal because
@@ -365,11 +365,11 @@ Prefer not to install a profile, or want to run/debug one piece at a time? These
 <details>
 <summary>🪟 Windows — 3 PowerShell windows</summary>
 
-Requires the SSH key + `gcp-vpn` alias from **Step 1** above.
+Requires the SSH key + `jpvpn` alias from **Step 1** above.
 
 **Window 1 — SSH tunnel (keep open):**
 ```powershell
-ssh gcp-vpn -D 1080 -N -C
+ssh jpvpn -D 1080 -N -C
 ```
 
 **Window 2 — bridge (keep open):**
