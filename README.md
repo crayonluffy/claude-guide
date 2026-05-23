@@ -1,6 +1,14 @@
-# Claude via GCloud VM Proxy Guide
+# Claude via VM Proxy Guide
 
-A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google Cloud VM proxy.
+A minimal, copy-paste guide to connecting Anthropic's `claude` CLI through an SSH tunnel to a remote VM / proxy.
+
+**How traffic flows once everything is running:**
+
+```
+┌────────┐  http     ┌────────┐  socks    ┌────────┐  ssh     ┌──────────┐
+│ claude │──:8080───▶│ bridge │──:1080───▶│ tunnel │─────────▶│ VM/proxy │──▶ API
+└────────┘           └────────┘           └────────┘          └──────────┘
+```
 
 ### ⚠️ Prerequisites
 * **Install Node.js:** [nodejs.org](https://nodejs.org/) (This installs `npm` and `npx` automatically).
@@ -71,14 +79,6 @@ claude --dangerously-skip-permissions
 ---
 
 ## ⚡ Quick Start (Mac / Linux)
-
-How traffic flows once everything is running:
-
-```
-┌────────┐  http     ┌────────┐  socks    ┌────────┐  ssh     ┌────────┐
-│ claude │──:8080───▶│ bridge │──:1080───▶│ tunnel │─────────▶│ GCP VM │──▶ API
-└────────┘           └────────┘           └────────┘          └────────┘
-```
 
 Open **three terminals** and run one command in each:
 
