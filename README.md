@@ -12,9 +12,11 @@ flowchart LR
     vm --> api([Anthropic API])
 ```
 
+After a one-time setup you just type **`cc`** and all of that happens automatically.
+
 ## ⚠️ Prerequisites
 
-You need **Node.js** installed (it ships with `npm` and `npx`). Pick the method for your OS:
+You need **Node.js** (it ships with `npm` and `npx`) and the **Claude Code CLI**.
 
 **🍎 macOS — Homebrew**
 
@@ -56,28 +58,48 @@ winget install OpenJS.NodeJS.LTS
 
 > NodeSource only ships **Linux** (apt/dnf) packages — there's no Windows build there, so use the installer or `winget` above.
 
-**Verify** the install on any OS:
+**Then install the Claude Code CLI** (any OS):
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+Verify everything:
 
 ```bash
 node --version
 npm --version
+claude --version
 ```
 
-> **Two ways to connect:**
-> - 🐣 **New here?** Follow the **Quick Start** below: open a couple of windows, copy-paste, done.
-> - ⚡ **Tired of opening 3 windows every time?** Jump to **[One-Command Setup](#one-command-setup)** for a single `cc` command that starts the tunnel, the bridge, and Claude for you.
+---
+
+## 🚀 One-Command Setup — `cc` :id=one-command-setup
+
+Set up a shell profile **once**, then a single **`cc`** command:
+
+1. starts the **SSH tunnel** in the background (SOCKS5 on `127.0.0.1:1080`),
+2. starts the **HTTP-to-SOCKS bridge** in the background (HTTP on `127.0.0.1:8080`),
+3. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables,
+4. verifies your external IP, then launches **Claude**.
+
+It reuses anything already running instead of starting duplicates, and `cc-stop` tears it all back down.
+
+| Command | What it does |
+|---------|--------------|
+| `cc` | One-shot: tunnel + bridge + env vars + launch Claude (`--dangerously-skip-permissions`) |
+| `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
+| `cc-stop` | Stop tunnel + bridge and clear the proxy env vars |
+| `proxy-status` | Show what's running and your current external IP |
+| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
+| `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
+| `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
 
 ---
 
-## 🔑 Quick Start (Windows)
+### 🪟 Windows
 
-Run the **First Time Setup** below once — it installs your downloaded key and creates a `gcp-vpn` SSH alias. After that the three windows just use `gcp-vpn`, so there's no key path or `user@host` to type. You need **3 PowerShell windows** open.
-
----
-
-**⚠️ First Time Setup - Install Key + Create SSH Alias (run once, no admin):**
-
-Download your key (any filename) into your **Downloads** folder. Fill in your VM's IP and SSH user in the first two lines, then paste the whole block **once**. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias — so from then on you just type `ssh gcp-vpn` (no key path, no `user@host`).
+**Step 1 — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh gcp-vpn`.
 
 ```powershell
 # Fill in your VM details once - everything else is automatic:
@@ -116,241 +138,11 @@ if (-not $key) {
         Add-Content -Path $configPath -Value $entry -Encoding ascii
         Write-Host "[OK] SSH alias created - connect with: ssh $Alias" -ForegroundColor Green
     }
-    Write-Host "Start the tunnel with:  ssh $Alias -D 1080 -N -C" -ForegroundColor Cyan
+    Write-Host "Note this key path for Step 2: $dest" -ForegroundColor Cyan
 }
 ```
 
-**Window 1 - SSH Tunnel (keep open):**
-```powershell
-ssh gcp-vpn -D 1080 -N -C
-```
-
-**Window 2 - Bridge (keep open):**
-```powershell
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**Window 3 - Run Claude:**
-```powershell
-$env:http_proxy="http://127.0.0.1:8080"
-$env:HTTP_PROXY="http://127.0.0.1:8080"
-$env:https_proxy="http://127.0.0.1:8080"
-$env:HTTPS_PROXY="http://127.0.0.1:8080"
-
-# Verify connectivity (Optional)
-curl.exe ipinfo.io
-
-# Launch (skip permission prompts)
-claude --dangerously-skip-permissions
-```
-
-<details>
-<summary>📸 Screenshots — click to expand</summary>
-
-**Step 1 — SSH Tunnel**
-
-![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
-
-**Step 2 — Bridge**
-
-![Step 2 - Bridge](images/step2-bridge.png)
-
-**Step 3 — Run Claude**
-
-![Step 3 - Run Claude](images/step3-run-claude.png)
-
-</details>
-
----
-
-## ⚡ Quick Start (Mac / Linux)
-
-Open **three terminals** and run one command in each:
-
-**① Tunnel** — opens a SOCKS proxy on `:1080`
-```bash
-ssh -i ~/.ssh/your_ssh_key -D 1080 -N -C username@gcloud_vm_ip
-```
-
-**② Bridge** — converts HTTP `:8080` → SOCKS `:1080`
-```bash
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**③ Claude** — sets proxy env vars and launches
-```bash
-export HTTPS_PROXY=http://127.0.0.1:8080
-export NO_PROXY="172.16.199.0/24,172.16.209.0/24,localhost,127.0.0.1"
-claude
-```
-
-> First time? Run `npm install -g @anthropic-ai/claude-code` once before step ③. Windows users: see the [PowerShell section](#-windows-users-powershell) below.
-
----
-
-##  Mac / Linux Users
-
-### 1. The Tunnel (Keep Terminal Open)
-Run this to create a local SOCKS proxy at port `1080` that tunnels through your VM.
-```bash
-# -D 1080: Listen locally on port 1080
-# -N: Do not execute remote commands (just forward ports)
-# -C: Compress data for speed
-ssh -i ~/.ssh/your_ssh_key -D 1080 -N -C username@gcloud_vm_ip
-````
-
-### 2\. The Bridge (Keep Terminal Open)
-
-Run this to convert the SOCKS proxy (`1080`) to an HTTP proxy (`8080`) so `npm` and `claude` can use it.
-
-```bash
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-### 3\. Install & Run
-
-Run these commands in a **new** terminal window.
-
-**Step A: Configure NPM & Install**
-
-```bash
-# Install Claude Code globally
-npm install -g @anthropic-ai/claude-code
-```
-
-**Step B: Run Claude**
-
-```bash
-# Set environment variables for this session ONLY
-export http_proxy=http://127.0.0.1:8080
-export HTTP_PROXY=http://127.0.0.1:8080
-export https_proxy=http://127.0.0.1:8080
-export HTTPS_PROXY=http://127.0.0.1:8080
-export NO_PROXY="172.16.199.0/24,172.16.209.0/24,localhost,127.0.0.1"
-
-# Verify connectivity (Optional but recommended)
-curl ipinfo.io
-
-# Launch (skip permission prompts)
-claude --dangerously-skip-permissions
-```
-
-### 4\. (Optional) Open Chrome Through the Proxy — Mac
-
-Launches a separate Chrome instance routed through the local HTTP proxy, using a dedicated profile so it doesn't interfere with your normal browsing session.
-
-```bash
-open -n -a "Google Chrome" --args \
-  --proxy-server="http://127.0.0.1:8080" \
-  --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
-  --profile-directory="Default"
-```
-
------
-
-## ⊞ Windows Users (PowerShell)
-
-### 1\. The Tunnel (Keep PowerShell Open)
-
-Run this to create a local SOCKS proxy at port `1080`.
-
-```powershell
-ssh -i C:\path\to\key -D 1080 -N -C username@gcloud_vm_ip
-```
-
-### 2\. The Bridge (Keep PowerShell Open)
-
-Run this to convert the SOCKS proxy (`1080`) to an HTTP proxy (`8080`).
-
-```powershell
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-### 3\. Install & Run
-
-Run these commands in a **new** PowerShell window.
-
-**Step A: Configure NPM & Install**
-
-```powershell
-# Install Claude Code globally
-npm install -g @anthropic-ai/claude-code
-```
-
-**Step B: Run Claude**
-
-```powershell
-# Set environment variables for this session ONLY
-$env:http_proxy="http://127.0.0.1:8080"
-$env:HTTP_PROXY="http://127.0.0.1:8080"
-$env:https_proxy="http://127.0.0.1:8080"
-$env:HTTPS_PROXY="http://127.0.0.1:8080"
-
-# Verify connectivity (Optional but recommended)
-curl.exe ipinfo.io
-
-# Launch (skip permission prompts)
-claude --dangerously-skip-permissions
-```
-
-### 4\. (Optional) Open Chrome Through the Proxy — Windows
-
-Launches a separate Chrome instance routed through the SSH tunnel (SOCKS5 on `127.0.0.1:1080`), using a dedicated profile so it doesn't touch your normal browsing session. Only the **tunnel** needs to be running for this — the HTTP bridge isn't required for the browser.
-
-**Option A — Edit a shortcut (easiest):**
-
-1. Copy an existing Chrome shortcut (or right-click the desktop → **New → Shortcut**).
-2. Right-click it → **Properties**, and set the **Target** to:
-
-```
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
-```
-
-3. Rename it something like **Chrome (VPN)** and launch it whenever the tunnel is up.
-
-**Option B — One-liner from PowerShell:**
-
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
-```
-
-> - If Chrome is installed elsewhere, the path may be `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`.
-> - `--user-data-dir` keeps this profile (logins, cookies, history) isolated from your normal Chrome.
-> - To also route **DNS** through the tunnel (avoid DNS leaks), append `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"`.
-
----
-
-## ⚡ One-Command Setup (Profile Automation) :id=one-command-setup
-
-The Quick Start above works, but opening three windows every time gets old. Instead, drop a
-**shell profile** in place once and then just type **`cc`**. One command:
-
-1. Starts the **SSH tunnel** in the background (SOCKS5 on `127.0.0.1:1080`)
-2. Starts the **HTTP-to-SOCKS bridge** in the background (HTTP on `127.0.0.1:8080`)
-3. Sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables
-4. Verifies your external IP, then launches **Claude**
-
-It's smart about repeats: if the tunnel or bridge is already running it reuses it instead of
-starting a duplicate. `cc-stop` tears everything back down.
-
-| Command | What it does |
-|---------|--------------|
-| `cc` | One-shot: tunnel + bridge + env vars + launch Claude (`--dangerously-skip-permissions`) |
-| `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
-| `cc-stop` | Stop tunnel + bridge and clear the proxy env vars |
-| `proxy-status` | Show what's running and your current external IP |
-| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
-| `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
-| `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
-
----
-
-### 🪟 Windows PowerShell
-
-Your profile lives at `$PROFILE` — usually
-`C:\Users\<your-username>\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`.
-
-**Setup (run once):**
+**Step 2 — Install the `cc` profile.** Your PowerShell profile lives at `$PROFILE` (usually `C:\Users\<you>\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`).
 
 ```powershell
 # 1. Allow your own scripts to run (per-user, safe)
@@ -363,29 +155,14 @@ Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/crayo
 # 3. Unblock it (only needed if Windows flagged the file as web content)
 Unblock-File -Path $PROFILE
 
-# 4. Open it and edit the Settings block (SSH key path, user, host)
+# 4. Open it and edit the Settings block
 notepad $PROFILE     # or:  code $PROFILE
 
 # 5. Reload the profile into the current window
 . $PROFILE
 ```
 
-Step 4 opens the profile so you can **edit the `Settings` block** at the top — your SSH key path,
-user, and host. Save, then run step 5 to reload.
-
-> **⚠️ Encoding gotcha (Traditional Chinese Windows):** Notepad on a zh-TW system often saves as
-> **Big5 / CP950**, which corrupts the script and produces parse errors. To avoid this:
-> - Edit the profile in **VS Code** or **Notepad++** and explicitly save as **UTF-8**, or
-> - Write it from PowerShell with UTF-8: `Get-Content .\profile.ps1 | Set-Content -Path $PROFILE -Encoding UTF8`, or
-> - Keep the profile **ASCII-only** (the published script already is) so any editor is safe.
-
-> **First connection:** SSH will prompt `Are you sure you want to continue connecting (yes/no)?`
-> the first time. The background tunnel can't answer that prompt, so run
-> `ssh <your-ssh-user>@<your-gcp-hostname>` **once** interactively to accept the host key, then use `cc`.
-
-📄 **The full profile lives in the repo:** [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file into `$PROFILE` — or open it on GitHub and copy it in by hand (save as **UTF-8**).
-
-You only need to edit the **Settings block** near the top:
+Edit the **Settings block** at the top — `SSH_KEY` is the path Step 1 printed:
 
 ```powershell
 $script:SSH_KEY     = "C:\Users\<your-username>\.ssh\<your-key>"
@@ -397,7 +174,17 @@ $script:HTTP_PORT   = 8080
 # Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
 ```
 
-The script defines `cc`, `cc-safe`, `cc-stop`, `proxy-status` and the other commands listed in the table above.
+📄 The full profile lives in the repo: [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file.
+
+> **⚠️ Encoding gotcha (Traditional Chinese Windows):** Notepad on a zh-TW system often saves as
+> **Big5 / CP950**, which corrupts the script and produces parse errors. To avoid this:
+> - Edit the profile in **VS Code** or **Notepad++** and explicitly save as **UTF-8**, or
+> - Write it from PowerShell with UTF-8: `Get-Content .\profile.ps1 | Set-Content -Path $PROFILE -Encoding UTF8`, or
+> - Keep the profile **ASCII-only** (the published script already is) so any editor is safe.
+
+> **First connection:** SSH will prompt `Are you sure you want to continue connecting (yes/no)?`
+> the first time. The background tunnel can't answer that prompt, so run `ssh gcp-vpn` (or
+> `ssh <user>@<host>`) **once** interactively to accept the host key, then use `cc`.
 
 **Daily usage:**
 
@@ -414,7 +201,7 @@ proxy-status    # show what's running
 |---------|-----|
 | `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
 | Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
-| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh <your-ssh-user>@<your-gcp-hostname>` once interactively, type `yes`, then retry. |
+| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh gcp-vpn` once interactively, type `yes`, then retry. |
 | `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
 | Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
 
@@ -422,9 +209,7 @@ proxy-status    # show what's running
 
 ### 🍎 macOS / 🐧 Linux
 
-The same idea, written for **zsh** (macOS default) or **bash** (most Linux). Differences from
-Windows: SSH is native (we background it with `ssh -f`), there's no execution-policy step, and we
-detect ports with `lsof` instead of `Get-NetTCPConnection`.
+Same idea, written for **zsh** (macOS default) or **bash** (most Linux). SSH is native (we background it with `ssh -f`), there's no execution-policy step, and ports are detected with `lsof`.
 
 **Setup (run once):**
 
@@ -446,12 +231,9 @@ source ~/.zshrc      # or: source ~/.bashrc
 ssh <your-ssh-user>@<your-gcp-hostname>
 ```
 
-> You can paste the script directly into `~/.zshrc` instead of using a separate file — keeping it
-> in `~/.claude-proxy.sh` just makes it tidier and easy to share.
+📄 The full script lives in the repo: [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file.
 
-📄 **The full script lives in the repo:** [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file.
-
-You only need to edit the **Settings block** near the top:
+Edit the **Settings block** near the top:
 
 ```bash
 export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"
@@ -472,10 +254,9 @@ cc-stop         # stop tunnel + bridge + clear env vars
 proxy-status    # show what's running
 ```
 
-**macOS extras (recommended):**
+**macOS extras (recommended)** — store your key passphrase in the Keychain so you're not prompted each time:
 
 ```bash
-# Store your key passphrase in the macOS Keychain so you're not prompted every time:
 ssh-add --apple-use-keychain ~/.ssh/<your-key>
 ```
 
@@ -502,7 +283,7 @@ Host *
 ### 🔁 Cross-Platform Tips
 
 **1. Use `~/.ssh/config` for a clean SSH alias.** Instead of repeating `-i`, `-p`, and
-`user@host`, define the connection once:
+`user@host`, define the connection once (the Windows Step 1 above does this for you):
 
 ```
 Host gcp-vpn
@@ -541,6 +322,114 @@ terminal profile is **PowerShell** (Command Palette → *Terminal: Select Defaul
       cc @args
   }
   ```
+
+---
+
+## 🌐 (Optional) Browse Through the Proxy
+
+Once a tunnel is up (via `cc` or the manual steps), you can route a **separate** Chrome profile through it without touching your normal browsing session.
+
+**🪟 Windows** — uses the SSH tunnel directly (SOCKS5 on `127.0.0.1:1080`); only the tunnel needs to be running.
+
+Option A — copy a Chrome shortcut, right-click → **Properties**, and set the **Target** to:
+
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+Option B — run it from PowerShell:
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+> - If Chrome is installed elsewhere, the path may be `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`.
+> - `--user-data-dir` keeps this profile (logins, cookies, history) isolated from your normal Chrome.
+> - To also route **DNS** through the tunnel (avoid DNS leaks), append `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"`.
+
+**🍎 macOS** — uses the HTTP bridge on `127.0.0.1:8080`:
+
+```bash
+open -n -a "Google Chrome" --args \
+  --proxy-server="http://127.0.0.1:8080" \
+  --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
+  --profile-directory="Default"
+```
+
+---
+
+## 🧰 Manual Setup (no profile)
+
+Prefer not to install a profile, or want to run/debug one piece at a time? These are the exact steps `cc` automates — keep each window/terminal open.
+
+<details>
+<summary>🪟 Windows — 3 PowerShell windows</summary>
+
+Requires the SSH key + `gcp-vpn` alias from **Step 1** above.
+
+**Window 1 — SSH tunnel (keep open):**
+```powershell
+ssh gcp-vpn -D 1080 -N -C
+```
+
+**Window 2 — bridge (keep open):**
+```powershell
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
+```
+
+**Window 3 — run Claude:**
+```powershell
+$env:http_proxy="http://127.0.0.1:8080"
+$env:HTTP_PROXY="http://127.0.0.1:8080"
+$env:https_proxy="http://127.0.0.1:8080"
+$env:HTTPS_PROXY="http://127.0.0.1:8080"
+
+# Verify connectivity (optional)
+curl.exe ipinfo.io
+
+# Launch (skip permission prompts)
+claude --dangerously-skip-permissions
+```
+
+**Screenshots**
+
+![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
+
+![Step 2 - Bridge](images/step2-bridge.png)
+
+![Step 3 - Run Claude](images/step3-run-claude.png)
+
+</details>
+
+<details>
+<summary>🍎 macOS / 🐧 Linux — 3 terminals</summary>
+
+**Terminal 1 — tunnel (keep open):**
+```bash
+ssh -i ~/.ssh/<your-key> -D 1080 -N -C <your-ssh-user>@<your-gcp-hostname>
+```
+
+**Terminal 2 — bridge (keep open):**
+```bash
+npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
+```
+
+**Terminal 3 — run Claude:**
+```bash
+export http_proxy=http://127.0.0.1:8080
+export HTTP_PROXY=http://127.0.0.1:8080
+export https_proxy=http://127.0.0.1:8080
+export HTTPS_PROXY=http://127.0.0.1:8080
+export NO_PROXY="localhost,127.0.0.1"   # add your corp intranet ranges here if needed
+
+# Verify connectivity (optional)
+curl ipinfo.io
+
+# Launch (skip permission prompts)
+claude --dangerously-skip-permissions
+```
+
+</details>
 
 ---
 
