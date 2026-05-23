@@ -71,15 +71,20 @@ npm --version
 
 ## 🔑 Quick Start (Windows)
 
-Replace `YOUR_SERVER_IP` with the actual server IP, `YOUR_USERNAME` with your Windows username, and `YOUR_KEY_FILENAME` with your SSH key filename. You need **3 PowerShell windows** open.
+Run the **First Time Setup** below once — it installs your downloaded key and creates a `gcp-vpn` SSH alias. After that the three windows just use `gcp-vpn`, so there's no key path or `user@host` to type. You need **3 PowerShell windows** open.
 
 ---
 
-**⚠️ First Time Setup - Install Your Downloaded Key (no admin, no filename to type):**
+**⚠️ First Time Setup - Install Key + Create SSH Alias (run once, no admin):**
 
-Download your key (any filename) into your **Downloads** folder, then paste this **once**. It finds the private key, moves it into `~/.ssh`, and locks the file down — Windows OpenSSH refuses keys other accounts can read.
+Download your key (any filename) into your **Downloads** folder. Fill in your VM's IP and SSH user in the first two lines, then paste the whole block **once**. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias — so from then on you just type `ssh gcp-vpn` (no key path, no `user@host`).
 
 ```powershell
+# Fill in your VM details once - everything else is automatic:
+$ServerIp = "YOUR_SERVER_IP"     # the VM's IP or hostname
+$SshUser  = "YOUR_SSH_USER"      # the SSH username on the VM
+$Alias    = "gcp-vpn"            # the shortcut you'll type: ssh gcp-vpn
+
 $downloads = Join-Path $HOME 'Downloads'
 $sshDir    = Join-Path $HOME '.ssh'
 New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
@@ -93,6 +98,7 @@ $key = Get-ChildItem -File $downloads -ErrorAction SilentlyContinue |
 if (-not $key) {
     Write-Host "[Err] No private key found in $downloads - download it there first." -ForegroundColor Red
 } else {
+    # 1. Move the key into ~/.ssh and lock it down (OpenSSH rejects keys others can read)
     $dest = Join-Path $sshDir $key.Name
     Move-Item -LiteralPath $key.FullName -Destination $dest -Force
     icacls $dest /inheritance:r | Out-Null
@@ -100,13 +106,23 @@ if (-not $key) {
     icacls $dest /remove "SYSTEM" | Out-Null
     icacls $dest /remove "Administrators" | Out-Null
     Write-Host "[OK] Key installed and locked: $dest" -ForegroundColor Green
-    Write-Host "     Use that path as your -i key in the commands below." -ForegroundColor DarkGray
+
+    # 2. Add an SSH alias so you never type the key path or user@host again
+    $configPath = Join-Path $sshDir 'config'
+    if ((Test-Path $configPath) -and (Select-String -Path $configPath -Pattern "^Host\s+$Alias\b" -Quiet)) {
+        Write-Host "[Info] Alias '$Alias' already in $configPath - leaving it." -ForegroundColor Yellow
+    } else {
+        $entry = "`nHost $Alias`n    HostName $ServerIp`n    User $SshUser`n    IdentityFile `"$dest`"`n"
+        Add-Content -Path $configPath -Value $entry -Encoding ascii
+        Write-Host "[OK] SSH alias created - connect with: ssh $Alias" -ForegroundColor Green
+    }
+    Write-Host "Start the tunnel with:  ssh $Alias -D 1080 -N -C" -ForegroundColor Cyan
 }
 ```
 
 **Window 1 - SSH Tunnel (keep open):**
 ```powershell
-ssh -i C:\Users\YOUR_USERNAME\.ssh\YOUR_KEY_FILENAME -D 1080 -N -C YOUR_USERNAME@YOUR_SERVER_IP
+ssh gcp-vpn -D 1080 -N -C
 ```
 
 **Window 2 - Bridge (keep open):**
