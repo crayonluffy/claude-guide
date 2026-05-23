@@ -120,35 +120,24 @@ function bridge-start {
         return
     }
 
-    # Two separate log files: Start-Process refuses to send stdout and stderr to
-    # the SAME path. Without a log, npx fails inside a hidden window and you only
-    # ever see "failed to start" with no reason - which is the whole mystery here.
-    $script:BRIDGE_OUT_LOG = Join-Path $env:TEMP "claude-bridge.out.log"
-    $script:BRIDGE_ERR_LOG = Join-Path $env:TEMP "claude-bridge.err.log"
-
-    # Launch npx *through* cmd.exe instead of calling npx.cmd directly:
-    #   * cmd.exe is a real .exe, so UseShellExecute=$false (required to redirect
-    #     output) is happy - you cannot CreateProcess a .cmd batch file directly.
-    #   * cmd's PATHEXT resolves the right "npx.cmd"; calling the extensionless
-    #     bash-shim "npx" via ShellExecute throws "system cannot find all the
-    #     information required".
-    # "npx http-proxy-to-socks" is correct: npx auto-runs the package's single
-    # bin ("hpts"). --yes skips the first-run install prompt (no stdin to answer
-    # it). None of the args contain spaces, so no extra quoting is needed.
+    # Launch npx *through* cmd.exe rather than pointing Start-Process at npx
+    # directly. Start-Process uses ShellExecute, which "opens" a file by its
+    # association: the extensionless "npx" shim and "npx.ps1" have no run verb,
+    # so Windows opened them in Notepad instead of executing - the bridge never
+    # started. cmd.exe is a real .exe and resolves "npx" -> "npx.cmd" via PATHEXT,
+    # so it actually runs. "npx http-proxy-to-socks" is correct: npx auto-runs
+    # the package's single bin ("hpts"); --yes skips the first-run install prompt.
     $bridgeArgs = @(
         "/c", "npx", "--yes", "http-proxy-to-socks",
         "-p", "$($script:HTTP_PORT)",
         "-s", "127.0.0.1:$($script:SOCKS_PORT)"
     )
 
-    # -NoNewWindow (not -WindowStyle Hidden) so the redirect params are allowed
-    # and no console pops up. -PassThru returns the cmd.exe wrapper pid;
-    # bridge-stop's "taskkill /T" walks down to the real node child.
+    # -WindowStyle Hidden keeps cmd.exe off-screen. -PassThru returns the cmd.exe
+    # wrapper pid; bridge-stop's "taskkill /T" walks down to the real node child.
     try {
         $proc = Start-Process -FilePath $env:ComSpec -ArgumentList $bridgeArgs `
-            -NoNewWindow -PassThru `
-            -RedirectStandardOutput $script:BRIDGE_OUT_LOG `
-            -RedirectStandardError  $script:BRIDGE_ERR_LOG -ErrorAction Stop
+            -WindowStyle Hidden -PassThru -ErrorAction Stop
     } catch {
         Write-Host "[Err] Failed to launch HTTP bridge via npx: $($_.Exception.Message)" -ForegroundColor Red
         return
@@ -170,16 +159,9 @@ function bridge-start {
     if (Test-Port -Port $script:HTTP_PORT) {
         Write-Host "[OK]  HTTP bridge up on 127.0.0.1:$($script:HTTP_PORT) (PID: $($proc.Id))" -ForegroundColor Green
     } else {
-        Write-Host "[Err] HTTP bridge failed to start within 30s. npx said:" -ForegroundColor Red
-        foreach ($f in @($script:BRIDGE_ERR_LOG, $script:BRIDGE_OUT_LOG)) {
-            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
-                Get-Content $f -Tail 15 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
-            }
-        }
-        Write-Host "      (full logs: $script:BRIDGE_OUT_LOG , $script:BRIDGE_ERR_LOG)" -ForegroundColor DarkGray
-        Write-Host "      Common cause: your direct network blocks the npm registry, so the" -ForegroundColor DarkGray
-        Write-Host "      package can't download. Run 'npx --yes http-proxy-to-socks -p $($script:HTTP_PORT) -s 127.0.0.1:$($script:SOCKS_PORT)'" -ForegroundColor DarkGray
-        Write-Host "      once in a normal window to see the real error / cache the package." -ForegroundColor DarkGray
+        Write-Host "[Err] HTTP bridge failed to start within 30s." -ForegroundColor Red
+        Write-Host "      Run this in a normal (visible) window to see the real error / cache the package:" -ForegroundColor DarkGray
+        Write-Host "        npx --yes http-proxy-to-socks -p $($script:HTTP_PORT) -s 127.0.0.1:$($script:SOCKS_PORT)" -ForegroundColor DarkGray
     }
 }
 
