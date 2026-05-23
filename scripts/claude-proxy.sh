@@ -223,3 +223,31 @@ proxy-status() {
     curl -s --max-time 5 ipinfo.io
     echo ""
 }
+
+# ============================================================
+# Help / command list
+# ============================================================
+
+cc-help() {
+    echo ""
+    echo "=== Claude + SSH Tunnel Quick Commands ==="
+    echo "  cc              - Tunnel + bridge + launch Claude (skip permissions)"
+    echo "  cc-safe         - Same but keeps permission prompts"
+    echo "  cc-stop         - Stop everything"
+    echo ""
+    echo "  tunnel-start    - Start SSH tunnel only"
+    echo "  tunnel-stop     - Stop SSH tunnel"
+    echo "  bridge-start    - Start HTTP bridge only"
+    echo "  bridge-stop     - Stop HTTP bridge"
+    echo ""
+    echo "  proxy-on        - Set env vars (HTTPS_PROXY etc.)"
+    echo "  proxy-off       - Clear env vars"
+    echo "  proxy-status    - Show full status"
+    echo ""
+    echo "  cc-help         - Show this list again"
+    echo ""
+}
+
+# Show the available commands when this script is sourced.
+# (Comment out the next line if you don't want it on every new shell.)
+cc-help

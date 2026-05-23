@@ -94,6 +94,7 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
 | `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
+| `cc-help` | Print this command list (it also prints when a new shell/profile loads) |
 
 ---
 
@@ -203,6 +204,8 @@ bridge-start    # start only the HTTP bridge
 bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
+
+cc-help         # print this list again (it also prints when you open a shell)
 ```
 
 **Troubleshooting (Windows):**
@@ -317,6 +320,8 @@ bridge-start    # start only the HTTP bridge
 bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
+
+cc-help         # print this list again (it also prints when you open a shell)
 ```
 
 **Troubleshooting (macOS / Linux):**

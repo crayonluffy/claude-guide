@@ -287,21 +287,28 @@ function proxy-status {
 }
 
 # ============================================================
-# Welcome banner
+# Help / command list
 # ============================================================
 
-Write-Host ""
-Write-Host "=== Claude + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
-Write-Host "  cc              - Tunnel + bridge + launch Claude (skip permissions)" -ForegroundColor DarkGray
-Write-Host "  cc-safe         - Same but normal mode" -ForegroundColor DarkGray
-Write-Host "  cc-stop         - Stop everything" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  tunnel-start    - Start SSH tunnel only" -ForegroundColor DarkGray
-Write-Host "  tunnel-stop     - Stop SSH tunnel" -ForegroundColor DarkGray
-Write-Host "  bridge-start    - Start HTTP bridge only" -ForegroundColor DarkGray
-Write-Host "  bridge-stop     - Stop HTTP bridge" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "  proxy-on        - Set env vars (HTTPS_PROXY etc.)" -ForegroundColor DarkGray
-Write-Host "  proxy-off       - Clear env vars" -ForegroundColor DarkGray
-Write-Host "  proxy-status    - Show full status" -ForegroundColor DarkGray
-Write-Host ""
+function cc-help {
+    Write-Host ""
+    Write-Host "=== Claude + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
+    Write-Host "  cc              - Tunnel + bridge + launch Claude (skip permissions)" -ForegroundColor DarkGray
+    Write-Host "  cc-safe         - Same but keeps permission prompts" -ForegroundColor DarkGray
+    Write-Host "  cc-stop         - Stop everything" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  tunnel-start    - Start SSH tunnel only" -ForegroundColor DarkGray
+    Write-Host "  tunnel-stop     - Stop SSH tunnel" -ForegroundColor DarkGray
+    Write-Host "  bridge-start    - Start HTTP bridge only" -ForegroundColor DarkGray
+    Write-Host "  bridge-stop     - Stop HTTP bridge" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  proxy-on        - Set env vars (HTTPS_PROXY etc.)" -ForegroundColor DarkGray
+    Write-Host "  proxy-off       - Clear env vars" -ForegroundColor DarkGray
+    Write-Host "  proxy-status    - Show full status" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+# Show the available commands when this profile loads
+cc-help
