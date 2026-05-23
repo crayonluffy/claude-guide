@@ -229,6 +229,7 @@ cc-help         # print this list again (it also prints when you open a shell)
 | SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh jpvpn` once interactively, type `yes`, then retry. |
 | `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
 | Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
+| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 
 ---
 
@@ -356,6 +357,7 @@ cc-help         # print this list again (it also prints when you open a shell)
 | SSH keeps asking for the passphrase | Step 1 adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
 | `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
 | Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
+| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)` |
 
 ---
 
