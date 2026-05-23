@@ -112,30 +112,43 @@ function bridge-start {
 
     Write-Host "[HTTP] Starting bridge on 127.0.0.1:$($script:HTTP_PORT)..." -ForegroundColor Cyan
 
-    # Resolve an explicit launcher. Bare "npx" is ambiguous: PATHEXT makes
-    # ShellExecute pick npx.cmd, but the extensionless bash-shim "npx" is listed
-    # first by PATH search and has no Windows file association -> launch can throw
-    # a generic "system cannot find all the information required" error.
-    $npx = (Get-Command npx.cmd -ErrorAction SilentlyContinue).Source
-    if (-not $npx) { $npx = (Get-Command npx -ErrorAction SilentlyContinue).Source }
-    if (-not $npx) {
-        Write-Host "[Err] npx not found on PATH - is Node.js installed?" -ForegroundColor Red
+    # npx ships with Node.js. Bail early with a clear message if it is missing,
+    # rather than letting cmd.exe fail with a cryptic "'npx' is not recognized".
+    if (-not (Get-Command npx     -ErrorAction SilentlyContinue) -and
+        -not (Get-Command npx.cmd -ErrorAction SilentlyContinue)) {
+        Write-Host "[Err] npx not found on PATH - install Node.js from https://nodejs.org/" -ForegroundColor Red
         return
     }
 
-    # --yes: never block on the "Ok to proceed?" install prompt. A hidden window
-    # has no stdin, so an unanswered prompt is what makes the launch fail on the
-    # first run (before the package is cached). Ports are cast to strings because
-    # -ArgumentList expects strings, not integers.
+    # Two separate log files: Start-Process refuses to send stdout and stderr to
+    # the SAME path. Without a log, npx fails inside a hidden window and you only
+    # ever see "failed to start" with no reason - which is the whole mystery here.
+    $script:BRIDGE_OUT_LOG = Join-Path $env:TEMP "claude-bridge.out.log"
+    $script:BRIDGE_ERR_LOG = Join-Path $env:TEMP "claude-bridge.err.log"
+
+    # Launch npx *through* cmd.exe instead of calling npx.cmd directly:
+    #   * cmd.exe is a real .exe, so UseShellExecute=$false (required to redirect
+    #     output) is happy - you cannot CreateProcess a .cmd batch file directly.
+    #   * cmd's PATHEXT resolves the right "npx.cmd"; calling the extensionless
+    #     bash-shim "npx" via ShellExecute throws "system cannot find all the
+    #     information required".
+    # "npx http-proxy-to-socks" is correct: npx auto-runs the package's single
+    # bin ("hpts"). --yes skips the first-run install prompt (no stdin to answer
+    # it). None of the args contain spaces, so no extra quoting is needed.
     $bridgeArgs = @(
-        "--yes",
-        "http-proxy-to-socks",
+        "/c", "npx", "--yes", "http-proxy-to-socks",
         "-p", "$($script:HTTP_PORT)",
         "-s", "127.0.0.1:$($script:SOCKS_PORT)"
     )
 
+    # -NoNewWindow (not -WindowStyle Hidden) so the redirect params are allowed
+    # and no console pops up. -PassThru returns the cmd.exe wrapper pid;
+    # bridge-stop's "taskkill /T" walks down to the real node child.
     try {
-        $proc = Start-Process -FilePath $npx -ArgumentList $bridgeArgs -PassThru -WindowStyle Hidden -ErrorAction Stop
+        $proc = Start-Process -FilePath $env:ComSpec -ArgumentList $bridgeArgs `
+            -NoNewWindow -PassThru `
+            -RedirectStandardOutput $script:BRIDGE_OUT_LOG `
+            -RedirectStandardError  $script:BRIDGE_ERR_LOG -ErrorAction Stop
     } catch {
         Write-Host "[Err] Failed to launch HTTP bridge via npx: $($_.Exception.Message)" -ForegroundColor Red
         return
@@ -146,9 +159,10 @@ function bridge-start {
     }
     $global:HTTP_BRIDGE_PID = $proc.Id
 
-    # Wait for bridge to be ready
+    # The FIRST run downloads the package, which can take well over 5s - the old
+    # timeout cried failure while npx was still working. Wait up to 30s.
     $attempts = 0
-    while (-not (Test-Port -Port $script:HTTP_PORT) -and $attempts -lt 10) {
+    while (-not (Test-Port -Port $script:HTTP_PORT) -and $attempts -lt 60) {
         Start-Sleep -Milliseconds 500
         $attempts++
     }
@@ -156,7 +170,16 @@ function bridge-start {
     if (Test-Port -Port $script:HTTP_PORT) {
         Write-Host "[OK]  HTTP bridge up on 127.0.0.1:$($script:HTTP_PORT) (PID: $($proc.Id))" -ForegroundColor Green
     } else {
-        Write-Host "[Err] HTTP bridge failed to start within 5s" -ForegroundColor Red
+        Write-Host "[Err] HTTP bridge failed to start within 30s. npx said:" -ForegroundColor Red
+        foreach ($f in @($script:BRIDGE_ERR_LOG, $script:BRIDGE_OUT_LOG)) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+                Get-Content $f -Tail 15 | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+            }
+        }
+        Write-Host "      (full logs: $script:BRIDGE_OUT_LOG , $script:BRIDGE_ERR_LOG)" -ForegroundColor DarkGray
+        Write-Host "      Common cause: your direct network blocks the npm registry, so the" -ForegroundColor DarkGray
+        Write-Host "      package can't download. Run 'npx --yes http-proxy-to-socks -p $($script:HTTP_PORT) -s 127.0.0.1:$($script:SOCKS_PORT)'" -ForegroundColor DarkGray
+        Write-Host "      once in a normal window to see the real error / cache the package." -ForegroundColor DarkGray
     }
 }
 
