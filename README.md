@@ -12,7 +12,7 @@ flowchart LR
     vm --> api([Anthropic API])
 ```
 
-### ⚠️ Prerequisites
+## ⚠️ Prerequisites
 
 You need **Node.js** installed (it ships with `npm` and `npx`). Pick the method for your OS:
 
@@ -75,14 +75,33 @@ Replace `YOUR_SERVER_IP` with the actual server IP, `YOUR_USERNAME` with your Wi
 
 ---
 
-**⚠️ First Time Setup - Fix Key Permissions (Run as Administrator):**
-```powershell
-$keyPath = "C:\Users\YOUR_USERNAME\.ssh\YOUR_KEY_FILENAME"
+**⚠️ First Time Setup - Install Your Downloaded Key (no admin, no filename to type):**
 
-icacls $keyPath /inheritance:r
-icacls $keyPath /grant:r "$($env:USERNAME):R"
-icacls $keyPath /remove "SYSTEM"
-icacls $keyPath /remove "Administrators"
+Download your key (any filename) into your **Downloads** folder, then paste this **once**. It finds the private key, moves it into `~/.ssh`, and locks the file down — Windows OpenSSH refuses keys other accounts can read.
+
+```powershell
+$downloads = Join-Path $HOME 'Downloads'
+$sshDir    = Join-Path $HOME '.ssh'
+New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+# Find the newest private key in Downloads (a small file whose first line is a key header)
+$key = Get-ChildItem -File $downloads -ErrorAction SilentlyContinue |
+    Where-Object { $_.Extension -ne '.pub' -and $_.Length -lt 100KB } |
+    Where-Object { (Get-Content $_.FullName -TotalCount 1 -ErrorAction SilentlyContinue) -match 'BEGIN .*PRIVATE KEY' } |
+    Sort-Object LastWriteTime -Descending | Select-Object -First 1
+
+if (-not $key) {
+    Write-Host "[Err] No private key found in $downloads - download it there first." -ForegroundColor Red
+} else {
+    $dest = Join-Path $sshDir $key.Name
+    Move-Item -LiteralPath $key.FullName -Destination $dest -Force
+    icacls $dest /inheritance:r | Out-Null
+    icacls $dest /grant:r "$($env:USERNAME):R" | Out-Null
+    icacls $dest /remove "SYSTEM" | Out-Null
+    icacls $dest /remove "Administrators" | Out-Null
+    Write-Host "[OK] Key installed and locked: $dest" -ForegroundColor Green
+    Write-Host "     Use that path as your -i key in the commands below." -ForegroundColor DarkGray
+}
 ```
 
 **Window 1 - SSH Tunnel (keep open):**
