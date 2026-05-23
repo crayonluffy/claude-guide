@@ -4,10 +4,12 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI through an SS
 
 **How traffic flows once everything is running:**
 
-```
-┌────────┐  http     ┌────────┐  socks    ┌────────┐  ssh     ┌──────────┐
-│ claude │──:8080───▶│ bridge │──:1080───▶│ tunnel │─────────▶│ VM/proxy │──▶ API
-└────────┘           └────────┘           └────────┘          └──────────┘
+```mermaid
+flowchart LR
+    claude([claude]) -->|HTTP :8080| bridge([bridge])
+    bridge -->|SOCKS :1080| tunnel([tunnel])
+    tunnel -->|SSH| vm([VM / proxy])
+    vm --> api([Anthropic API])
 ```
 
 ### ⚠️ Prerequisites
