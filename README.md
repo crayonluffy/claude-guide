@@ -5,25 +5,15 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI to a Google C
 ### ⚠️ Prerequisites
 * **Install Node.js:** [nodejs.org](https://nodejs.org/) (This installs `npm` and `npx` automatically).
 
+> **Two ways to connect:**
+> - 🐣 **New here?** Follow the **Quick Start** below: open a couple of windows, copy-paste, done.
+> - ⚡ **Tired of opening 3 windows every time?** Jump to **[One-Command Setup](#one-command-setup)** for a single `cc` command that starts the tunnel, the bridge, and Claude for you.
+
 ---
 
 ## 🔑 Quick Start (Windows)
 
 Replace `YOUR_SERVER_IP` with the actual server IP, `YOUR_USERNAME` with your Windows username, and `YOUR_KEY_FILENAME` with your SSH key filename. You need **3 PowerShell windows** open.
-
-### Screenshots
-
-**Step 1 - SSH Tunnel:**
-
-![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
-
-**Step 2 - Bridge:**
-
-![Step 2 - Bridge](images/step2-bridge.png)
-
-**Step 3 - Run Claude:**
-
-![Step 3 - Run Claude](images/step3-run-claude.png)
 
 ---
 
@@ -60,6 +50,23 @@ curl.exe ipinfo.io
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
 ```
+
+<details>
+<summary>📸 Screenshots — click to expand</summary>
+
+**Step 1 — SSH Tunnel**
+
+![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
+
+**Step 2 — Bridge**
+
+![Step 2 - Bridge](images/step2-bridge.png)
+
+**Step 3 — Run Claude**
+
+![Step 3 - Run Claude](images/step3-run-claude.png)
+
+</details>
 
 ---
 
@@ -200,6 +207,230 @@ curl.exe ipinfo.io
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
 ```
+
+---
+
+## ⚡ One-Command Setup (Profile Automation) :id=one-command-setup
+
+The Quick Start above works, but opening three windows every time gets old. Instead, drop a
+**shell profile** in place once and then just type **`cc`**. One command:
+
+1. Starts the **SSH tunnel** in the background (SOCKS5 on `127.0.0.1:1080`)
+2. Starts the **HTTP-to-SOCKS bridge** in the background (HTTP on `127.0.0.1:8080`)
+3. Sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables
+4. Verifies your external IP, then launches **Claude**
+
+It's smart about repeats: if the tunnel or bridge is already running it reuses it instead of
+starting a duplicate. `cc-stop` tears everything back down.
+
+| Command | What it does |
+|---------|--------------|
+| `cc` | One-shot: tunnel + bridge + env vars + launch Claude (`--dangerously-skip-permissions`) |
+| `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
+| `cc-stop` | Stop tunnel + bridge and clear the proxy env vars |
+| `proxy-status` | Show what's running and your current external IP |
+| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
+| `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
+| `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
+
+---
+
+### 🪟 Windows PowerShell
+
+Your profile lives at `$PROFILE` — usually
+`C:\Users\<your-username>\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`.
+
+**Setup (run once):**
+
+```powershell
+# 1. Allow your own scripts to run (per-user, safe)
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+
+# 2. Download the profile straight into $PROFILE
+if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/Microsoft.PowerShell_profile.ps1" -OutFile $PROFILE
+
+# 3. Unblock it (only needed if Windows flagged the file as web content)
+Unblock-File -Path $PROFILE
+
+# 4. Open it and edit the Settings block (SSH key path, user, host)
+notepad $PROFILE     # or:  code $PROFILE
+
+# 5. Reload the profile into the current window
+. $PROFILE
+```
+
+Step 4 opens the profile so you can **edit the `Settings` block** at the top — your SSH key path,
+user, and host. Save, then run step 5 to reload.
+
+> **⚠️ Encoding gotcha (Traditional Chinese Windows):** Notepad on a zh-TW system often saves as
+> **Big5 / CP950**, which corrupts the script and produces parse errors. To avoid this:
+> - Edit the profile in **VS Code** or **Notepad++** and explicitly save as **UTF-8**, or
+> - Write it from PowerShell with UTF-8: `Get-Content .\profile.ps1 | Set-Content -Path $PROFILE -Encoding UTF8`, or
+> - Keep the profile **ASCII-only** (the published script already is) so any editor is safe.
+
+> **First connection:** SSH will prompt `Are you sure you want to continue connecting (yes/no)?`
+> the first time. The background tunnel can't answer that prompt, so run
+> `ssh <your-ssh-user>@<your-gcp-hostname>` **once** interactively to accept the host key, then use `cc`.
+
+📄 **The full profile lives in the repo:** [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file into `$PROFILE` — or open it on GitHub and copy it in by hand (save as **UTF-8**).
+
+You only need to edit the **Settings block** near the top:
+
+```powershell
+$script:SSH_KEY     = "C:\Users\<your-username>\.ssh\<your-key>"
+$script:SSH_USER    = "<your-ssh-user>"
+$script:SSH_HOST    = "<your-gcp-hostname>"
+$script:SSH_PORT    = 22
+$script:SOCKS_PORT  = 1080
+$script:HTTP_PORT   = 8080
+# Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
+```
+
+The script defines `cc`, `cc-safe`, `cc-stop`, `proxy-status` and the other commands listed in the table above.
+
+**Daily usage:**
+
+```powershell
+cc              # one-shot: tunnel + bridge + Claude
+cc-safe         # without --dangerously-skip-permissions
+cc-stop         # stop tunnel + bridge + clear env vars
+proxy-status    # show what's running
+```
+
+**Troubleshooting (Windows):**
+
+| Symptom | Fix |
+|---------|-----|
+| `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
+| Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
+| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh <your-ssh-user>@<your-gcp-hostname>` once interactively, type `yes`, then retry. |
+| `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
+| Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
+
+---
+
+### 🍎 macOS / 🐧 Linux
+
+The same idea, written for **zsh** (macOS default) or **bash** (most Linux). Differences from
+Windows: SSH is native (we background it with `ssh -f`), there's no execution-policy step, and we
+detect ports with `lsof` instead of `Get-NetTCPConnection`.
+
+**Setup (run once):**
+
+```bash
+# 1. Download the script to ~/.claude-proxy.sh
+curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/claude-proxy.sh -o ~/.claude-proxy.sh
+
+# 2. Source it from your shell rc so it loads in every new shell
+echo 'source ~/.claude-proxy.sh' >> ~/.zshrc      # macOS (zsh)
+# echo 'source ~/.claude-proxy.sh' >> ~/.bashrc   # Linux (bash)
+
+# 3. Edit ~/.claude-proxy.sh and set CLAUDE_SSH_KEY / USER / HOST
+nano ~/.claude-proxy.sh      # or: code ~/.claude-proxy.sh
+
+# 4. Reload your shell
+source ~/.zshrc      # or: source ~/.bashrc
+
+# 5. First connection: accept the host key once
+ssh <your-ssh-user>@<your-gcp-hostname>
+```
+
+> You can paste the script directly into `~/.zshrc` instead of using a separate file — keeping it
+> in `~/.claude-proxy.sh` just makes it tidier and easy to share.
+
+📄 **The full script lives in the repo:** [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file.
+
+You only need to edit the **Settings block** near the top:
+
+```bash
+export CLAUDE_SSH_KEY="$HOME/.ssh/<your-key>"
+export CLAUDE_SSH_USER="<your-ssh-user>"
+export CLAUDE_SSH_HOST="<your-gcp-hostname>"
+export CLAUDE_SSH_PORT=22
+export CLAUDE_SOCKS_PORT=1080
+export CLAUDE_HTTP_PORT=8080
+# Append corporate intranet ranges to CLAUDE_NO_PROXY if needed.
+```
+
+**Daily usage:**
+
+```bash
+cc              # one-shot: tunnel + bridge + Claude
+cc-safe         # without --dangerously-skip-permissions
+cc-stop         # stop tunnel + bridge + clear env vars
+proxy-status    # show what's running
+```
+
+**macOS extras (recommended):**
+
+```bash
+# Store your key passphrase in the macOS Keychain so you're not prompted every time:
+ssh-add --apple-use-keychain ~/.ssh/<your-key>
+```
+
+Add this to `~/.ssh/config` so the key loads from the Keychain automatically on macOS:
+
+```
+Host *
+    AddKeysToAgent yes
+    UseKeychain yes
+```
+
+**Troubleshooting (macOS / Linux):**
+
+| Symptom | Fix |
+|---------|-----|
+| `lsof: command not found` (Linux) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
+| Bridge never comes up | Check the log: `cat /tmp/claude-bridge.log`. Usually missing Node.js (`npx`) — install from [nodejs.org](https://nodejs.org/). |
+| SSH keeps asking for the passphrase | Run the `ssh-add --apple-use-keychain` step above (macOS), or `ssh-add ~/.ssh/<your-key>` (Linux). |
+| `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
+| Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
+
+---
+
+### 🔁 Cross-Platform Tips
+
+**1. Use `~/.ssh/config` for a clean SSH alias.** Instead of repeating `-i`, `-p`, and
+`user@host`, define the connection once:
+
+```
+Host gcp-vpn
+    HostName <your-gcp-hostname>
+    User <your-ssh-user>
+    Port 22
+    IdentityFile ~/.ssh/<your-key>
+    # macOS only:
+    AddKeysToAgent yes
+    UseKeychain yes
+```
+
+Now `ssh gcp-vpn` just works. In the profile you can set the host to the alias
+(`SSH_HOST = "gcp-vpn"` / `CLAUDE_SSH_HOST="gcp-vpn"`) and drop the `-i`, `-p`, and user from the
+SSH command — ssh reads them straight from the config.
+
+**2. VS Code integrated terminal.** Both profiles load automatically in VS Code's terminal because
+it launches your default shell — so `cc` works there too. On Windows, make sure VS Code's default
+terminal profile is **PowerShell** (Command Palette → *Terminal: Select Default Profile*).
+
+**3. Per-project overrides.** If different projects need different proxies (or none):
+
+- **macOS / Linux:** use [`direnv`](https://direnv.net/). Drop an `.envrc` in a project to set or
+  unset proxy vars on entry:
+  ```bash
+  # .envrc  (run `direnv allow` once)
+  export HTTPS_PROXY=http://127.0.0.1:8080
+  # or, to disable the proxy in this project:
+  # unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+  ```
+- **Windows:** add a small wrapper that dot-sources a per-directory override before launching, e.g.
+  drop a `.\.claude-proxy.local.ps1` in the project and load it from a custom function:
+  ```powershell
+  function ccp {
+      if (Test-Path .\.claude-proxy.local.ps1) { . .\.claude-proxy.local.ps1 }
+      cc @args
+  }
+  ```
 
 ---
 
