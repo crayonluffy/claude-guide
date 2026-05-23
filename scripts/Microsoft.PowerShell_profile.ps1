@@ -69,7 +69,16 @@ function tunnel-start {
     if ($script:SSH_USER) { $sshArgs += "$($script:SSH_USER)@$($script:SSH_HOST)" }
     else                  { $sshArgs += $script:SSH_HOST }
 
-    $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -WindowStyle Hidden
+    try {
+        $proc = Start-Process -FilePath "ssh" -ArgumentList $sshArgs -PassThru -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+        Write-Host "[Err] Failed to launch ssh: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+    if (-not $proc) {
+        Write-Host "[Err] ssh process did not start" -ForegroundColor Red
+        return
+    }
     $global:SSH_TUNNEL_PID = $proc.Id
 
     # Wait for tunnel to be ready
@@ -103,13 +112,38 @@ function bridge-start {
 
     Write-Host "[HTTP] Starting bridge on 127.0.0.1:$($script:HTTP_PORT)..." -ForegroundColor Cyan
 
+    # Resolve an explicit launcher. Bare "npx" is ambiguous: PATHEXT makes
+    # ShellExecute pick npx.cmd, but the extensionless bash-shim "npx" is listed
+    # first by PATH search and has no Windows file association -> launch can throw
+    # a generic "system cannot find all the information required" error.
+    $npx = (Get-Command npx.cmd -ErrorAction SilentlyContinue).Source
+    if (-not $npx) { $npx = (Get-Command npx -ErrorAction SilentlyContinue).Source }
+    if (-not $npx) {
+        Write-Host "[Err] npx not found on PATH - is Node.js installed?" -ForegroundColor Red
+        return
+    }
+
+    # --yes: never block on the "Ok to proceed?" install prompt. A hidden window
+    # has no stdin, so an unanswered prompt is what makes the launch fail on the
+    # first run (before the package is cached). Ports are cast to strings because
+    # -ArgumentList expects strings, not integers.
     $bridgeArgs = @(
+        "--yes",
         "http-proxy-to-socks",
-        "-p", $script:HTTP_PORT,
+        "-p", "$($script:HTTP_PORT)",
         "-s", "127.0.0.1:$($script:SOCKS_PORT)"
     )
 
-    $proc = Start-Process -FilePath "npx" -ArgumentList $bridgeArgs -PassThru -WindowStyle Hidden
+    try {
+        $proc = Start-Process -FilePath $npx -ArgumentList $bridgeArgs -PassThru -WindowStyle Hidden -ErrorAction Stop
+    } catch {
+        Write-Host "[Err] Failed to launch HTTP bridge via npx: $($_.Exception.Message)" -ForegroundColor Red
+        return
+    }
+    if (-not $proc) {
+        Write-Host "[Err] HTTP bridge process did not start" -ForegroundColor Red
+        return
+    }
     $global:HTTP_BRIDGE_PID = $proc.Id
 
     # Wait for bridge to be ready
@@ -228,18 +262,28 @@ function tunnel-stop {
 }
 
 function bridge-stop {
+    $killed = $false
+
+    # Start-Process returns the npx.cmd WRAPPER pid; the real listener is its node
+    # child. Kill the whole tree (/T) or the child is orphaned and keeps port 8080.
     if ($global:HTTP_BRIDGE_PID) {
-        Stop-Process -Id $global:HTTP_BRIDGE_PID -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] HTTP bridge stopped (PID: $global:HTTP_BRIDGE_PID)" -ForegroundColor Green
+        taskkill /PID $global:HTTP_BRIDGE_PID /T /F 2>$null | Out-Null
         $global:HTTP_BRIDGE_PID = $null
+        $killed = $true
+    }
+
+    # Belt and suspenders: free the port even if the pid was stale, untracked,
+    # or the tree-kill missed a re-parented child.
+    $conn = Get-NetTCPConnection -LocalPort $script:HTTP_PORT -State Listen -ErrorAction SilentlyContinue
+    if ($conn) {
+        $conn.OwningProcess | Select-Object -Unique | ForEach-Object { taskkill /PID $_ /T /F 2>$null | Out-Null }
+        $killed = $true
+    }
+
+    if ($killed) {
+        Write-Host "[OK] HTTP bridge stopped (port $($script:HTTP_PORT) released)" -ForegroundColor Green
     } else {
-        $conn = Get-NetTCPConnection -LocalPort $script:HTTP_PORT -ErrorAction SilentlyContinue
-        if ($conn) {
-            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-            Write-Host "[OK] Killed process on port $($script:HTTP_PORT)" -ForegroundColor Green
-        } else {
-            Write-Host "[Info] No HTTP bridge running" -ForegroundColor Yellow
-        }
+        Write-Host "[Info] No HTTP bridge running" -ForegroundColor Yellow
     }
 }
 
