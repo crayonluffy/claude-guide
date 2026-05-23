@@ -379,6 +379,8 @@ terminal profile is **PowerShell** (Command Palette → *Terminal: Select Defaul
 
 Once a tunnel is up (via `cc` or the manual steps), you can route a **separate** Chrome profile through it without touching your normal browsing session.
 
+**Easiest:** with the profile installed, just run **`chrome-proxy`** — it's built into the `cc` profile on both Windows and macOS/Linux. The manual commands below do exactly the same thing if you'd rather not use the profile.
+
 **🪟 Windows** — uses the SSH tunnel directly (SOCKS5 on `127.0.0.1:1080`); only the tunnel needs to be running.
 
 Option A — copy a Chrome shortcut, right-click → **Properties**, and set the **Target** to:

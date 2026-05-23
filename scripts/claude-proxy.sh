@@ -225,6 +225,34 @@ proxy-status() {
 }
 
 # ============================================================
+# Launch Chrome through the proxy (separate, isolated profile)
+# ============================================================
+
+chrome-proxy() {
+    local url="http://127.0.0.1:$CLAUDE_HTTP_PORT"
+    _port_in_use "$CLAUDE_HTTP_PORT" || echo "[Warn] HTTP bridge (port $CLAUDE_HTTP_PORT) not running - run 'cc' first."
+
+    if [ "$(uname)" = "Darwin" ]; then
+        open -n -a "Google Chrome" --args \
+            --proxy-server="$url" \
+            --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
+            --profile-directory="Default"
+    else
+        local bin
+        bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
+        if [ -z "$bin" ]; then
+            echo "[Err] Chrome/Chromium not found on PATH"
+            return 1
+        fi
+        nohup "$bin" \
+            --proxy-server="$url" \
+            --user-data-dir="$HOME/.config/google-chrome-vpn" \
+            --no-first-run >/dev/null 2>&1 &
+    fi
+    echo "[OK] Chrome launched through $url (separate profile)"
+}
+
+# ============================================================
 # Help / command list
 # ============================================================
 
@@ -243,6 +271,8 @@ cc-help() {
     echo "  proxy-on        - Set env vars (HTTPS_PROXY etc.)"
     echo "  proxy-off       - Clear env vars"
     echo "  proxy-status    - Show full status"
+    echo ""
+    echo "  chrome-proxy    - Open Chrome via the proxy (separate profile)"
     echo ""
     echo "  cc-help         - Show this list again"
     echo ""

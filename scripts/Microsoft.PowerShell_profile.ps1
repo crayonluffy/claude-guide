@@ -287,6 +287,20 @@ function proxy-status {
 }
 
 # ============================================================
+# Launch Chrome through the proxy (separate, isolated profile)
+# ============================================================
+
+function chrome-proxy {
+    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+    if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
+    if (-not (Test-Path $chrome)) { Write-Host "[Err] Chrome not found" -ForegroundColor Red; return }
+    if (-not (Test-Port -Port $script:SOCKS_PORT)) {
+        Write-Host "[Warn] SSH tunnel (port $($script:SOCKS_PORT)) not running - run 'cc' first." -ForegroundColor Yellow
+    }
+    & $chrome --proxy-server="socks5://127.0.0.1:$($script:SOCKS_PORT)" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+}
+
+# ============================================================
 # Help / command list
 # ============================================================
 
@@ -305,6 +319,8 @@ function cc-help {
     Write-Host "  proxy-on        - Set env vars (HTTPS_PROXY etc.)" -ForegroundColor DarkGray
     Write-Host "  proxy-off       - Clear env vars" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show full status" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  chrome-proxy    - Open Chrome via the proxy (separate profile)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
