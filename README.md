@@ -107,11 +107,43 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 ```
 
-That's the whole setup. The two steps below are the **manual fallback** — use them only if you'd rather edit and paste the blocks yourself.
+That's the whole setup — head straight to **Daily usage** below. Prefer to set it up by hand? See **Manual setup (fallback)** at the end of this section.
 
----
+**Daily usage:**
 
-**Step 1 (manual fallback) — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh jpvpn`.
+```powershell
+cc              # one-shot: tunnel + bridge + env vars + launch Claude
+cc-safe         # same, but keeps Claude's permission prompts
+cc-stop         # stop tunnel + bridge + clear env vars
+proxy-status    # show what's running + your current external IP
+
+# Manage the pieces individually if you need to:
+tunnel-start    # start only the SSH tunnel
+tunnel-stop     # stop the SSH tunnel
+bridge-start    # start only the HTTP bridge
+bridge-stop     # stop the HTTP bridge
+proxy-on        # set the proxy env vars only
+proxy-off       # clear the proxy env vars only
+
+chrome-proxy    # open Chrome routed through the proxy (separate profile)
+cc-help         # print this list again (it also prints when you open a shell)
+```
+
+**Troubleshooting (Windows):**
+
+| Symptom | Fix |
+|---------|-----|
+| `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
+| Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
+| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh jpvpn` once interactively, type `yes`, then retry. |
+| `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
+| Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
+| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
+
+<details>
+<summary><b>Manual setup (fallback)</b> — set things up by hand instead of using the wizard above.</summary>
+
+**Step 1 — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh jpvpn`.
 
 ```powershell
 # Fill in your VM details once - everything else is automatic:
@@ -200,9 +232,25 @@ $script:HTTP_PORT   = 8080
 > the first time. The background tunnel can't answer that prompt, so run `ssh jpvpn` (or
 > `ssh <user>@<host>`) **once** interactively to accept the host key, then use `cc`.
 
+</details>
+
+---
+
+### 🍎 macOS / 🐧 Linux
+
+Same idea, written for **zsh** (macOS default) or **bash** (most Linux). SSH is native (we background it with `ssh -f`), there's no execution-policy step, and ports are detected with `lsof`.
+
+**Quick setup (recommended) — one interactive command.** Download your private key into your **Downloads** folder, then paste this into your terminal. It prompts for your server, user, and alias, then installs and locks the key, writes the `~/.ssh/config` alias (and macOS Keychain entry), installs the `cc` profile, and tests the connection:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
+```
+
+That's the whole setup — head straight to **Daily usage** below. Prefer to set it up by hand? See **Manual setup (fallback)** at the end of this section.
+
 **Daily usage:**
 
-```powershell
+```bash
 cc              # one-shot: tunnel + bridge + env vars + launch Claude
 cc-safe         # same, but keeps Claude's permission prompts
 cc-stop         # stop tunnel + bridge + clear env vars
@@ -220,34 +268,21 @@ chrome-proxy    # open Chrome routed through the proxy (separate profile)
 cc-help         # print this list again (it also prints when you open a shell)
 ```
 
-**Troubleshooting (Windows):**
+**Troubleshooting (macOS / Linux):**
 
 | Symptom | Fix |
 |---------|-----|
-| `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
-| Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
-| SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh jpvpn` once interactively, type `yes`, then retry. |
-| `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
-| Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
-| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
+| `lsof: command not found` (Linux) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
+| Bridge never comes up | Check the log: `cat /tmp/claude-bridge.log`. Usually missing Node.js (`npx`) — install from [nodejs.org](https://nodejs.org/). |
+| SSH keeps asking for the passphrase | Step 1 adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
+| `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
+| Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
+| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)` |
 
----
+<details>
+<summary><b>Manual setup (fallback)</b> — set things up by hand instead of using the wizard above.</summary>
 
-### 🍎 macOS / 🐧 Linux
-
-Same idea, written for **zsh** (macOS default) or **bash** (most Linux). SSH is native (we background it with `ssh -f`), there's no execution-policy step, and ports are detected with `lsof`.
-
-**Quick setup (recommended) — one interactive command.** Download your private key into your **Downloads** folder, then paste this into your terminal. It prompts for your server, user, and alias, then installs and locks the key, writes the `~/.ssh/config` alias (and macOS Keychain entry), installs the `cc` profile, and tests the connection:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
-```
-
-That's the whole setup. The two steps below are the **manual fallback** — use them only if you'd rather edit and paste the blocks yourself.
-
----
-
-**Step 1 (manual fallback) — Install your SSH key + create the `jpvpn` alias (run once).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste. It moves the key into `~/.ssh`, locks it (`chmod 600`), writes an `~/.ssh/config` alias, and on macOS adds it to the Keychain so you aren't asked for the passphrase.
+**Step 1 — Install your SSH key + create the `jpvpn` alias (run once).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste. It moves the key into `~/.ssh`, locks it (`chmod 600`), writes an `~/.ssh/config` alias, and on macOS adds it to the Keychain so you aren't asked for the passphrase.
 
 ```bash
 # Fill in your VM details once - everything else is automatic:
@@ -328,36 +363,7 @@ export CLAUDE_HTTP_PORT=8080
 
 > Not using an alias? Fill in `CLAUDE_SSH_KEY`, `CLAUDE_SSH_USER`, and `CLAUDE_SSH_HOST` explicitly instead.
 
-**Daily usage:**
-
-```bash
-cc              # one-shot: tunnel + bridge + env vars + launch Claude
-cc-safe         # same, but keeps Claude's permission prompts
-cc-stop         # stop tunnel + bridge + clear env vars
-proxy-status    # show what's running + your current external IP
-
-# Manage the pieces individually if you need to:
-tunnel-start    # start only the SSH tunnel
-tunnel-stop     # stop the SSH tunnel
-bridge-start    # start only the HTTP bridge
-bridge-stop     # stop the HTTP bridge
-proxy-on        # set the proxy env vars only
-proxy-off       # clear the proxy env vars only
-
-chrome-proxy    # open Chrome routed through the proxy (separate profile)
-cc-help         # print this list again (it also prints when you open a shell)
-```
-
-**Troubleshooting (macOS / Linux):**
-
-| Symptom | Fix |
-|---------|-----|
-| `lsof: command not found` (Linux) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
-| Bridge never comes up | Check the log: `cat /tmp/claude-bridge.log`. Usually missing Node.js (`npx`) — install from [nodejs.org](https://nodejs.org/). |
-| SSH keeps asking for the passphrase | Step 1 adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
-| `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
-| Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
-| Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)` |
+</details>
 
 ---
 
