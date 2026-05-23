@@ -101,7 +101,17 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 
 ### 🪟 Windows
 
-**Step 1 — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh jpvpn`.
+**Quick setup (recommended) — one interactive command.** Download your private key into your **Downloads** folder, then paste this into PowerShell. It prompts for your server, user, and alias, then installs and locks the key, writes the `~/.ssh/config` alias, installs the `cc` profile, and tests the connection:
+
+```powershell
+irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
+```
+
+That's the whole setup. The two steps below are the **manual fallback** — use them only if you'd rather edit and paste the blocks yourself.
+
+---
+
+**Step 1 (manual fallback) — Install your SSH key (run once, no admin).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste the whole block. It finds the key, moves it into `~/.ssh`, locks the permissions, and writes an `~/.ssh/config` alias so you can connect with just `ssh jpvpn`.
 
 ```powershell
 # Fill in your VM details once - everything else is automatic:
@@ -226,7 +236,17 @@ cc-help         # print this list again (it also prints when you open a shell)
 
 Same idea, written for **zsh** (macOS default) or **bash** (most Linux). SSH is native (we background it with `ssh -f`), there's no execution-policy step, and ports are detected with `lsof`.
 
-**Step 1 — Install your SSH key + create the `jpvpn` alias (run once).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste. It moves the key into `~/.ssh`, locks it (`chmod 600`), writes an `~/.ssh/config` alias, and on macOS adds it to the Keychain so you aren't asked for the passphrase.
+**Quick setup (recommended) — one interactive command.** Download your private key into your **Downloads** folder, then paste this into your terminal. It prompts for your server, user, and alias, then installs and locks the key, writes the `~/.ssh/config` alias (and macOS Keychain entry), installs the `cc` profile, and tests the connection:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
+```
+
+That's the whole setup. The two steps below are the **manual fallback** — use them only if you'd rather edit and paste the blocks yourself.
+
+---
+
+**Step 1 (manual fallback) — Install your SSH key + create the `jpvpn` alias (run once).** Download your key (any filename) into your **Downloads** folder, fill in the first two lines, then paste. It moves the key into `~/.ssh`, locks it (`chmod 600`), writes an `~/.ssh/config` alias, and on macOS adds it to the Keychain so you aren't asked for the passphrase.
 
 ```bash
 # Fill in your VM details once - everything else is automatic:
