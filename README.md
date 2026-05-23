@@ -367,10 +367,9 @@ export CLAUDE_HTTP_PORT=8080
 
 ---
 
-### 🔁 Cross-Platform Tips
+### 🔁 Changing your server or user later
 
-**1. Your `jpvpn` alias lives in `~/.ssh/config`.** Step 1 created it — that's why `ssh jpvpn`
-and `cc` need no key path, user, or host. Edit that file if your server IP or user changes:
+Your `jpvpn` alias lives in `~/.ssh/config` — that's why `ssh jpvpn` and `cc` need no key path, user, or host. Setup created it; edit that file if your server IP or user changes:
 
 ```
 Host jpvpn
@@ -381,63 +380,14 @@ Host jpvpn
     UseKeychain yes      # macOS only
 ```
 
-**2. VS Code integrated terminal.** Both profiles load automatically in VS Code's terminal because
-it launches your default shell — so `cc` works there too. On Windows, make sure VS Code's default
-terminal profile is **PowerShell** (Command Palette → *Terminal: Select Default Profile*).
-
-**3. Per-project overrides.** If different projects need different proxies (or none):
-
-- **macOS / Linux:** use [`direnv`](https://direnv.net/). Drop an `.envrc` in a project to set or
-  unset proxy vars on entry:
-  ```bash
-  # .envrc  (run `direnv allow` once)
-  export HTTPS_PROXY=http://127.0.0.1:8080
-  # or, to disable the proxy in this project:
-  # unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
-  ```
-- **Windows:** add a small wrapper that dot-sources a per-directory override before launching, e.g.
-  drop a `.\.claude-proxy.local.ps1` in the project and load it from a custom function:
-  ```powershell
-  function ccp {
-      if (Test-Path .\.claude-proxy.local.ps1) { . .\.claude-proxy.local.ps1 }
-      cc @args
-  }
-  ```
-
 ---
 
 ## 🌐 (Optional) Browse Through the Proxy
 
-Once a tunnel is up (via `cc` or the manual steps), you can route a **separate** Chrome profile through it without touching your normal browsing session.
+With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the proxy (Windows via the SOCKS tunnel on `127.0.0.1:1080`; macOS/Linux via the HTTP bridge on `127.0.0.1:8080`), without touching your normal browsing session.
 
-**Easiest:** with the profile installed, just run **`chrome-proxy`** — it's built into the `cc` profile on both Windows and macOS/Linux. The manual commands below do exactly the same thing if you'd rather not use the profile.
-
-**🪟 Windows** — uses the SSH tunnel directly (SOCKS5 on `127.0.0.1:1080`); only the tunnel needs to be running.
-
-Option A — copy a Chrome shortcut, right-click → **Properties**, and set the **Target** to:
-
-```
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
-```
-
-Option B — run it from PowerShell:
-
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
-```
-
-> - If Chrome is installed elsewhere, the path may be `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`.
-> - `--user-data-dir` keeps this profile (logins, cookies, history) isolated from your normal Chrome.
-> - To also route **DNS** through the tunnel (avoid DNS leaks), append `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"`.
-
-**🍎 macOS** — uses the HTTP bridge on `127.0.0.1:8080`:
-
-```bash
-open -n -a "Google Chrome" --args \
-  --proxy-server="http://127.0.0.1:8080" \
-  --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
-  --profile-directory="Default"
-```
+> - The separate `--user-data-dir` keeps this profile's logins, cookies, and history isolated from your everyday Chrome.
+> - To also route **DNS** through the tunnel on Windows (avoid DNS leaks), add `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"` to the `chrome-proxy` command in the profile.
 
 ---
 
@@ -474,14 +424,6 @@ curl.exe ipinfo.io
 claude --dangerously-skip-permissions
 ```
 
-**Screenshots**
-
-![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
-
-![Step 2 - Bridge](images/step2-bridge.png)
-
-![Step 3 - Run Claude](images/step3-run-claude.png)
-
 </details>
 
 <details>
@@ -511,6 +453,14 @@ curl ipinfo.io
 # Launch (skip permission prompts)
 claude --dangerously-skip-permissions
 ```
+
+**Screenshots**
+
+![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
+
+![Step 2 - Bridge](images/step2-bridge.png)
+
+![Step 3 - Run Claude](images/step3-run-claude.png)
 
 </details>
 
