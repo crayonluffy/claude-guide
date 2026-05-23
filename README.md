@@ -490,22 +490,27 @@ claude --dangerously-skip-permissions
 
 ## 📖 Useful Claude Code Commands & Tips
 
+> Verified against Claude Code **v2.1.150** (May 2026). Check yours with `claude --version`, upgrade with `claude update`.
+
 ### CLI Flags
 
 | Flag | Description |
 |------|-------------|
-| `claude` | Start interactive session |
-| `claude "query"` | Start session with initial prompt |
-| `claude -c` | Continue most recent conversation |
-| `claude -r` | Resume a previous session |
-| `claude -p "query"` | Non-interactive mode (print and exit) |
-| `claude --model sonnet` | Use a specific model (`sonnet`, `opus`, `haiku`) |
-| `claude --effort high` | Set effort level (`low`, `medium`, `high`, `max`, `auto`) |
+| `claude` | Start an interactive session |
+| `claude "query"` | Start with an initial prompt |
+| `claude -c` | Continue the most recent conversation |
+| `claude -r` | Resume a previous session (pick from a list) |
+| `claude -p "query"` | Print mode — run non-interactively and exit |
+| `claude --model sonnet` | Pick a model: `sonnet` / `opus` / `haiku`, or a full ID (`claude-opus-4-7`, `claude-sonnet-4-6`) |
+| `claude --effort high` | Effort level: `low`, `medium`, `high`, `xhigh`, `max`, `auto` |
+| `claude --permission-mode plan` | Start in a mode: `default`, `acceptEdits`, `plan`, `bypassPermissions` |
 | `claude --dangerously-skip-permissions` | Skip all permission prompts |
+| `claude -w` / `--worktree` | Run in an isolated git worktree |
+| `claude --agent <name>` | Use a specific subagent for the main thread |
 | `claude --max-turns 5` | Limit agentic turns (print mode) |
 | `claude --verbose` | Enable verbose logging |
-| `claude update` | Update to latest version |
-| `claude --version` | Show version number |
+| `claude update` | Update to the latest version |
+| `claude --version` | Show the version number |
 
 ### Slash Commands (Inside Interactive Mode)
 
@@ -513,39 +518,50 @@ claude --dangerously-skip-permissions
 |---------|---------|
 | `/help` | Show help and available commands |
 | `/clear` | Clear conversation history |
-| `/compact` | Compact conversation to free context |
-| `/model` | Change AI model |
-| `/effort` | Set effort level |
-| `/config` | Open settings interface |
+| `/compact` | Compact the conversation to free context |
+| `/context` | Visualize context-window usage |
+| `/cost` | Show token usage / cost (alias `/usage`) |
+| `/model` | Change the model |
+| `/effort` | Set the effort level |
+| `/fast` | Toggle fast mode (faster Opus output) |
+| `/config` | Open settings (alias `/settings`) |
 | `/status` | Show version, model, account info |
 | `/doctor` | Diagnose installation issues |
-| `/diff` | Review uncommitted code changes |
-| `/cost` | Show token usage statistics |
-| `/context` | Visualize context window usage |
 | `/memory` | Edit project CLAUDE.md |
-| `/vim` | Toggle Vim editing mode |
-| `/init` | Initialize project with CLAUDE.md |
-| `/export` | Export conversation as text |
-| `/copy` | Copy last response to clipboard |
+| `/init` | Initialize the project with a CLAUDE.md |
+| `/diff` | Review uncommitted changes |
+| `/rewind` | Undo edits / restore a checkpoint (also `Esc Esc`) |
+| `/plan` | Enter plan mode (analyze without executing) |
 | `/resume` | Resume a previous session |
-| `/fork` | Branch current conversation |
-| `/rewind` | Undo bad edits and restore previous code |
-| `/plan` | Enter plan mode (analysis without execution) |
-| `/bug` | Submit feedback about Claude Code |
+| `/fork` | Branch the current conversation |
+| `/agents` | Manage subagents & background sessions |
+| `/code-review` | Review the current diff for bugs (`--comment` posts to a PR) |
+| `/ultrareview` | Multi-agent cloud review of the branch (or `/ultrareview <PR#>`) |
+| `/run` · `/verify` | Launch & drive the real app to confirm a change works |
+| `/export` | Export the conversation as text |
+| `/copy` | Copy the last response to the clipboard |
+| `/bug` | Submit feedback (alias `/feedback`) |
+
+> Note: the standalone `/vim` command was removed — set Vim keys via `/config` → editor mode (or `"editorMode": "vim"` in settings.json).
 
 ### Keyboard Shortcuts
 
 | Shortcut | Description |
 |----------|-------------|
-| `Ctrl+C` | Cancel current generation |
+| `Ctrl+C` | Cancel the current generation |
+| `Esc` | Stop Claude mid-response |
 | `Ctrl+D` | Exit Claude Code |
-| `Ctrl+L` | Clear terminal screen |
-| `Shift+Tab` | Toggle permission modes |
-| `Esc + Esc` | Rewind conversation |
-| `\ + Enter` | New line in input |
-| `Ctrl+G` | Open prompt in external editor |
-| `Alt+P` | Switch model |
-| `Alt+T` | Toggle extended thinking |
+| `Ctrl+L` | Clear the terminal screen |
+| `Ctrl+O` | Toggle the transcript view (full tool output) |
+| `Shift+Tab` | Cycle permission modes (default → acceptEdits → plan → …) |
+| `Esc Esc` | Open the rewind / checkpoint menu |
+| `\ + Enter` | New line (also `Shift+Enter`) |
+| `Ctrl+G` | Open the prompt in your `$EDITOR` |
+| `Alt+P` | Switch model (Option+P on macOS) |
+| `Alt+T` | Toggle extended thinking (Option+T on macOS) |
+| `!` | Shell mode — run a command directly |
+| `@` | File-path autocomplete |
+| `/` | Slash-command / skills menu |
 
 ### Configuration
 
@@ -569,15 +585,18 @@ claude --dangerously-skip-permissions
 }
 ```
 
+Current model IDs: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` — or use the aliases `opus` / `sonnet` / `haiku` to always track the latest.
+
 **CLAUDE.md** — Create at project root to give Claude persistent context about your project (coding standards, architecture, common commands, etc.). It loads automatically when Claude starts.
 
 ### Tips
 
-- Use `/compact` when context gets full to summarize and free up space
-- Use `claude -p "query" | command` to pipe Claude output into other tools
-- Pipe files into Claude: `cat logs.txt | claude -p "summarize errors"`
-- Use `/rewind` or `Esc+Esc` to undo bad changes
-- Use `/diff` to review all changes before committing
-- Name sessions with `claude -n "feature-name"` for easy resuming later
-- Use `/plan` mode to analyze code safely without making changes
+- Use `/compact` when context fills up (or rely on auto-compact) to free space
+- Pipe files into Claude: `cat logs.txt | claude -p "summarize the errors"`
+- Use `claude -p "query" | command` to feed Claude's output into other tools
+- `Esc Esc` or `/rewind` to undo changes and restore a checkpoint
+- `/diff` to review everything before committing
+- `claude -w` to work in an isolated git worktree — great for parallel features
+- `/fast` for snappier Opus output; `/effort` to dial reasoning up or down
+- `/plan` to analyze safely without making changes
 - Run `/doctor` if something isn't working right
