@@ -544,6 +544,25 @@ claude --dangerously-skip-permissions
 
 > Note: the standalone `/vim` command was removed — set Vim keys via `/config` → editor mode (or `"editorMode": "vim"` in settings.json).
 
+**Automation & advanced** (newer; several are bundled skills — run `/help` to see what's installed on your version):
+
+| Command | Purpose |
+|---------|---------|
+| `/goal [condition]` | Set a completion condition — Claude keeps working until it's met |
+| `/batch <instruction>` | Split a large change into parallel units, each in its own worktree + PR |
+| `/loop [interval] [cmd]` | Run a prompt/command repeatedly on an interval (or self-paced) |
+| `/schedule` | Create / manage recurring scheduled agents (cron) |
+| `/tasks` | List & manage background tasks |
+| `/background` · `/bg` | Detach the current session as a background agent |
+| `/autofix-pr [prompt]` | Watch a PR and auto-fix on CI failures / review comments |
+| `/teleport` | Pull a claude.ai web session down into your terminal |
+| `/remote-control` · `/rc` | Drive this terminal session from claude.ai |
+| `/ultraplan` | Draft a plan in a cloud session, review it in the browser |
+| `/security-review` | Security-focused review of the pending changes |
+| `/tui [fullscreen]` | Switch the renderer (e.g. flicker-free fullscreen) |
+| `/voice [hold\|tap\|off]` | Toggle voice dictation |
+| `/team-onboarding` | Generate a team onboarding guide from your usage |
+
 ### Keyboard Shortcuts
 
 | Shortcut | Description |
