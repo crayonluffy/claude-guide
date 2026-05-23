@@ -40,8 +40,12 @@
   <script>
     window.$docsify = {
       name: 'Claude Proxy Guide',
-      repo: '', 
-      
+      repo: '',
+
+      // Vercel excludes the reserved filename README.md from static output,
+      // so the build copies README.md -> home.md and docsify loads that.
+      homepage: 'home.md',
+
       auto2top: true,
       loadSidebar: false,
       subMaxLevel: 3,
