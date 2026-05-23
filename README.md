@@ -13,7 +13,55 @@ flowchart LR
 ```
 
 ### ⚠️ Prerequisites
-* **Install Node.js:** [nodejs.org](https://nodejs.org/) (This installs `npm` and `npx` automatically).
+
+You need **Node.js** installed (it ships with `npm` and `npx`). Pick the method for your OS:
+
+**🍎 macOS — Homebrew**
+
+If you don't have [Homebrew](https://brew.sh/) yet, install it first:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Then install Node.js:
+
+```bash
+brew install node
+```
+
+**🐧 Linux — NodeSource**
+
+NodeSource publishes up-to-date apt/dnf packages — see [github.com/nodesource/distributions](https://github.com/nodesource/distributions) for the current version (replace `lts` with e.g. `22.x` if you want a specific release).
+
+```bash
+# Debian / Ubuntu
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt-get install -y nodejs
+```
+
+```bash
+# Fedora / RHEL / Rocky
+curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
+sudo dnf install -y nodejs
+```
+
+**🪟 Windows**
+
+Use the official installer from [nodejs.org](https://nodejs.org/), or install from a terminal with `winget`:
+
+```powershell
+winget install OpenJS.NodeJS.LTS
+```
+
+> NodeSource only ships **Linux** (apt/dnf) packages — there's no Windows build there, so use the installer or `winget` above.
+
+**Verify** the install on any OS:
+
+```bash
+node --version
+npm --version
+```
 
 > **Two ways to connect:**
 > - 🐣 **New here?** Follow the **Quick Start** below: open a couple of windows, copy-paste, done.
