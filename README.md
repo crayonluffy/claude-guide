@@ -191,10 +191,18 @@ $script:HTTP_PORT   = 8080
 **Daily usage:**
 
 ```powershell
-cc              # one-shot: tunnel + bridge + Claude
-cc-safe         # without --dangerously-skip-permissions
+cc              # one-shot: tunnel + bridge + env vars + launch Claude
+cc-safe         # same, but keeps Claude's permission prompts
 cc-stop         # stop tunnel + bridge + clear env vars
-proxy-status    # show what's running
+proxy-status    # show what's running + your current external IP
+
+# Manage the pieces individually if you need to:
+tunnel-start    # start only the SSH tunnel
+tunnel-stop     # stop the SSH tunnel
+bridge-start    # start only the HTTP bridge
+bridge-stop     # stop the HTTP bridge
+proxy-on        # set the proxy env vars only
+proxy-off       # clear the proxy env vars only
 ```
 
 **Troubleshooting (Windows):**
@@ -297,10 +305,18 @@ export CLAUDE_HTTP_PORT=8080
 **Daily usage:**
 
 ```bash
-cc              # one-shot: tunnel + bridge + Claude
-cc-safe         # without --dangerously-skip-permissions
+cc              # one-shot: tunnel + bridge + env vars + launch Claude
+cc-safe         # same, but keeps Claude's permission prompts
 cc-stop         # stop tunnel + bridge + clear env vars
-proxy-status    # show what's running
+proxy-status    # show what's running + your current external IP
+
+# Manage the pieces individually if you need to:
+tunnel-start    # start only the SSH tunnel
+tunnel-stop     # stop the SSH tunnel
+bridge-start    # start only the HTTP bridge
+bridge-stop     # stop the HTTP bridge
+proxy-on        # set the proxy env vars only
+proxy-off       # clear the proxy env vars only
 ```
 
 **Troubleshooting (macOS / Linux):**
