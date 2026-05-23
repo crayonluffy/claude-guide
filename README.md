@@ -208,6 +208,31 @@ curl.exe ipinfo.io
 claude --dangerously-skip-permissions
 ```
 
+### 4\. (Optional) Open Chrome Through the Proxy — Windows
+
+Launches a separate Chrome instance routed through the SSH tunnel (SOCKS5 on `127.0.0.1:1080`), using a dedicated profile so it doesn't touch your normal browsing session. Only the **tunnel** needs to be running for this — the HTTP bridge isn't required for the browser.
+
+**Option A — Edit a shortcut (easiest):**
+
+1. Copy an existing Chrome shortcut (or right-click the desktop → **New → Shortcut**).
+2. Right-click it → **Properties**, and set the **Target** to:
+
+```
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+3. Rename it something like **Chrome (VPN)** and launch it whenever the tunnel is up.
+
+**Option B — One-liner from PowerShell:**
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --proxy-server="socks5://127.0.0.1:1080" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+> - If Chrome is installed elsewhere, the path may be `C:\Program Files (x86)\Google\Chrome\Application\chrome.exe`.
+> - `--user-data-dir` keeps this profile (logins, cookies, history) isolated from your normal Chrome.
+> - To also route **DNS** through the tunnel (avoid DNS leaks), append `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"`.
+
 ---
 
 ## ⚡ One-Command Setup (Profile Automation) :id=one-command-setup
