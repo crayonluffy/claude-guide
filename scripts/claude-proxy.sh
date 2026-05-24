@@ -133,15 +133,14 @@ proxy-off() {
 }
 
 # ============================================================
-# All-in-one: tunnel + bridge + env vars + launch Claude
+# Bring the proxy stack up: tunnel + bridge + env vars + verify
+# (everything 'cc' does EXCEPT launching Claude)
 # ============================================================
 
-cc() {
-    local safe=0
+proxy-up() {
     local no_verify=0
     while [ $# -gt 0 ]; do
         case "$1" in
-            --safe)      safe=1 ;;
             --no-verify) no_verify=1 ;;
         esac
         shift
@@ -173,6 +172,27 @@ cc() {
         ip=$(curl -s --max-time 5 ipinfo.io)
         [ -n "$ip" ] && echo "$ip" | head -5
     fi
+
+    echo "[OK]  Proxy ready in this shell - run 'claude' yourself, or 'cc-stop' to tear it down."
+}
+
+# ============================================================
+# All-in-one: proxy stack + launch Claude
+# ============================================================
+
+cc() {
+    local safe=0
+    local up_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --safe)      safe=1 ;;
+            --no-verify) up_args+=(--no-verify) ;;
+        esac
+        shift
+    done
+
+    # Steps 1-4: bring up tunnel + bridge + env vars + verify
+    proxy-up "${up_args[@]}" || return 1
 
     # Step 5: Launch Claude
     echo "[Launch] Starting Claude..."
@@ -259,10 +279,12 @@ chrome-proxy() {
 cc-help() {
     echo ""
     echo "=== Claude + SSH Tunnel Quick Commands ==="
-    echo "  cc              - Tunnel + bridge + launch Claude (skip permissions)"
-    echo "  cc-safe         - Same but keeps permission prompts"
-    echo "  cc-stop         - Stop everything"
+    echo "  cc              - Turn the proxy ON and launch Claude (skip permissions)"
+    echo "  cc-safe         - Same, but keeps Claude's permission prompts"
+    echo "  proxy-up        - Turn the proxy ON, but DON'T launch Claude"
+    echo "  cc-stop         - Turn the proxy OFF (stop everything)"
     echo ""
+    echo "  -- advanced: manage one piece at a time --"
     echo "  tunnel-start    - Start SSH tunnel only"
     echo "  tunnel-stop     - Stop SSH tunnel"
     echo "  bridge-start    - Start HTTP bridge only"

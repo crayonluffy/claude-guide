@@ -89,6 +89,7 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 |---------|--------------|
 | `cc` | One-shot: tunnel + bridge + env vars + launch Claude (`--dangerously-skip-permissions`) |
 | `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
+| `proxy-up` | Same setup as `cc` (tunnel + bridge + env vars + verify) but stops short of launching Claude |
 | `cc-stop` | Stop tunnel + bridge and clear the proxy env vars |
 | `proxy-status` | Show what's running and your current external IP |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
@@ -114,6 +115,7 @@ That's the whole setup — head straight to **Daily usage** below. Prefer to set
 ```powershell
 cc              # one-shot: tunnel + bridge + env vars + launch Claude
 cc-safe         # same, but keeps Claude's permission prompts
+proxy-up        # same setup as cc, but does NOT launch Claude
 cc-stop         # stop tunnel + bridge + clear env vars
 proxy-status    # show what's running + your current external IP
 
@@ -253,6 +255,7 @@ That's the whole setup — head straight to **Daily usage** below. Prefer to set
 ```bash
 cc              # one-shot: tunnel + bridge + env vars + launch Claude
 cc-safe         # same, but keeps Claude's permission prompts
+proxy-up        # same setup as cc, but does NOT launch Claude
 cc-stop         # stop tunnel + bridge + clear env vars
 proxy-status    # show what's running + your current external IP
 

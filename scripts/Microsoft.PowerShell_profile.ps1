@@ -191,16 +191,17 @@ function proxy-off {
 }
 
 # ============================================================
-# All-in-one: tunnel + bridge + env vars + launch Claude
+# Bring the proxy stack up: tunnel + bridge + env vars + verify
+# (everything 'cc' does EXCEPT launching Claude)
 # ============================================================
 
-function cc {
-    param([switch]$Safe, [switch]$NoVerify)
+function proxy-up {
+    param([switch]$NoVerify)
 
     # Step 1: SSH tunnel
     if (-not (Test-Port -Port $script:SOCKS_PORT)) {
         tunnel-start
-        if (-not (Test-Port -Port $script:SOCKS_PORT)) { return }
+        if (-not (Test-Port -Port $script:SOCKS_PORT)) { return $false }
     } else {
         Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
     }
@@ -208,7 +209,7 @@ function cc {
     # Step 2: HTTP bridge
     if (-not (Test-Port -Port $script:HTTP_PORT)) {
         bridge-start
-        if (-not (Test-Port -Port $script:HTTP_PORT)) { return }
+        if (-not (Test-Port -Port $script:HTTP_PORT)) { return $false }
     } else {
         Write-Host "[OK]  HTTP bridge already running" -ForegroundColor DarkGreen
     }
@@ -231,6 +232,20 @@ function cc {
             Write-Host "[Warn] Could not verify" -ForegroundColor Yellow
         }
     }
+
+    Write-Host "[OK]  Proxy ready in this shell - run 'claude' yourself, or 'cc-stop' to tear it down." -ForegroundColor Green
+    return $true
+}
+
+# ============================================================
+# All-in-one: proxy stack + launch Claude
+# ============================================================
+
+function cc {
+    param([switch]$Safe, [switch]$NoVerify)
+
+    # Steps 1-4: bring up tunnel + bridge + env vars + verify
+    if (-not (proxy-up -NoVerify:$NoVerify)) { return }
 
     # Step 5: Launch Claude
     Write-Host "[Launch] Starting Claude..." -ForegroundColor Cyan
@@ -356,10 +371,12 @@ function chrome-proxy {
 function cc-help {
     Write-Host ""
     Write-Host "=== Claude + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
-    Write-Host "  cc              - Tunnel + bridge + launch Claude (skip permissions)" -ForegroundColor DarkGray
-    Write-Host "  cc-safe         - Same but keeps permission prompts" -ForegroundColor DarkGray
-    Write-Host "  cc-stop         - Stop everything" -ForegroundColor DarkGray
+    Write-Host "  cc              - Turn the proxy ON and launch Claude (skip permissions)" -ForegroundColor DarkGray
+    Write-Host "  cc-safe         - Same, but keeps Claude's permission prompts" -ForegroundColor DarkGray
+    Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch Claude" -ForegroundColor DarkGray
+    Write-Host "  cc-stop         - Turn the proxy OFF (stop everything)" -ForegroundColor DarkGray
     Write-Host ""
+    Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
     Write-Host "  tunnel-start    - Start SSH tunnel only" -ForegroundColor DarkGray
     Write-Host "  tunnel-stop     - Stop SSH tunnel" -ForegroundColor DarkGray
     Write-Host "  bridge-start    - Start HTTP bridge only" -ForegroundColor DarkGray
