@@ -371,23 +371,21 @@ function chrome-proxy {
 function cc-help {
     Write-Host ""
     Write-Host "=== Claude + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
-    Write-Host "  cc              - Turn the proxy ON and launch Claude (skip permissions)" -ForegroundColor DarkGray
+    Write-Host "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)" -ForegroundColor DarkGray
     Write-Host "  cc-safe         - Same, but keeps Claude's permission prompts" -ForegroundColor DarkGray
     Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch Claude" -ForegroundColor DarkGray
     Write-Host "  cc-stop         - Turn the proxy OFF (stop everything)" -ForegroundColor DarkGray
+    Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
-    Write-Host "  tunnel-start    - Start SSH tunnel only" -ForegroundColor DarkGray
-    Write-Host "  tunnel-stop     - Stop SSH tunnel" -ForegroundColor DarkGray
-    Write-Host "  bridge-start    - Start HTTP bridge only" -ForegroundColor DarkGray
-    Write-Host "  bridge-stop     - Stop HTTP bridge" -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  proxy-on        - Set env vars (HTTPS_PROXY etc.)" -ForegroundColor DarkGray
-    Write-Host "  proxy-off       - Clear env vars" -ForegroundColor DarkGray
-    Write-Host "  proxy-status    - Show full status" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start    - Start the SSH tunnel only" -ForegroundColor DarkGray
+    Write-Host "  tunnel-stop     - Stop the SSH tunnel" -ForegroundColor DarkGray
+    Write-Host "  bridge-start    - Start the HTTP bridge only" -ForegroundColor DarkGray
+    Write-Host "  bridge-stop     - Stop the HTTP bridge" -ForegroundColor DarkGray
+    Write-Host "  proxy-on        - Set the proxy env vars only" -ForegroundColor DarkGray
+    Write-Host "  proxy-off       - Clear the proxy env vars only" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  chrome-proxy    - Open Chrome via the proxy (separate profile)" -ForegroundColor DarkGray
-    Write-Host ""
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
 }

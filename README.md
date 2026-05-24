@@ -113,16 +113,17 @@ That's the whole setup — head straight to **Daily usage** below. Prefer to set
 **Daily usage:**
 
 ```powershell
-cc              # one-shot: tunnel + bridge + env vars + launch Claude
+# Everyday — your on/off switch:
+cc              # turn the proxy ON and launch Claude (skips permission prompts)
 cc-safe         # same, but keeps Claude's permission prompts
-proxy-up        # same setup as cc, but does NOT launch Claude
-cc-stop         # stop tunnel + bridge + clear env vars
-proxy-status    # show what's running + your current external IP
+proxy-up        # turn the proxy ON, but DON'T launch Claude
+cc-stop         # turn the proxy OFF (stop everything)
+proxy-status    # show what's running + your external IP
 
-# Manage the pieces individually if you need to:
-tunnel-start    # start only the SSH tunnel
+# Advanced — manage one piece at a time:
+tunnel-start    # start the SSH tunnel only
 tunnel-stop     # stop the SSH tunnel
-bridge-start    # start only the HTTP bridge
+bridge-start    # start the HTTP bridge only
 bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
@@ -253,16 +254,17 @@ That's the whole setup — head straight to **Daily usage** below. Prefer to set
 **Daily usage:**
 
 ```bash
-cc              # one-shot: tunnel + bridge + env vars + launch Claude
+# Everyday — your on/off switch:
+cc              # turn the proxy ON and launch Claude (skips permission prompts)
 cc-safe         # same, but keeps Claude's permission prompts
-proxy-up        # same setup as cc, but does NOT launch Claude
-cc-stop         # stop tunnel + bridge + clear env vars
-proxy-status    # show what's running + your current external IP
+proxy-up        # turn the proxy ON, but DON'T launch Claude
+cc-stop         # turn the proxy OFF (stop everything)
+proxy-status    # show what's running + your external IP
 
-# Manage the pieces individually if you need to:
-tunnel-start    # start only the SSH tunnel
+# Advanced — manage one piece at a time:
+tunnel-start    # start the SSH tunnel only
 tunnel-stop     # stop the SSH tunnel
-bridge-start    # start only the HTTP bridge
+bridge-start    # start the HTTP bridge only
 bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
