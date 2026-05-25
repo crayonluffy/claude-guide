@@ -95,7 +95,7 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
 | `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
-| `chrome-proxy` | Open Chrome routed through the proxy (separate, isolated profile) |
+| `chrome-proxy` | Open Chrome routed through the proxy — auto-starts the tunnel/bridge it needs first (separate, isolated profile) |
 | `cc-help` | Print this command list (it also prints when a new shell/profile loads) |
 
 ---
@@ -391,6 +391,7 @@ Host jpvpn
 
 With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the proxy (Windows via the SOCKS tunnel on `127.0.0.1:1080`; macOS/Linux via the HTTP bridge on `127.0.0.1:8080`), without touching your normal browsing session.
 
+> - You don't have to run `cc` first: `chrome-proxy` checks the pieces Chrome needs (Windows: the tunnel; macOS/Linux: the tunnel + bridge) and **auto-starts whatever is down** before launching. If something can't be started it aborts instead of opening an un-proxied browser.
 > - The separate `--user-data-dir` keeps this profile's logins, cookies, and history isolated from your everyday Chrome.
 > - To also route **DNS** through the tunnel on Windows (avoid DNS leaks), add `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"` to the `chrome-proxy` command in the profile.
 

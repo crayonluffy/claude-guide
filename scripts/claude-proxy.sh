@@ -250,7 +250,42 @@ proxy-status() {
 
 chrome-proxy() {
     local url="http://127.0.0.1:$CLAUDE_HTTP_PORT"
-    _port_in_use "$CLAUDE_HTTP_PORT" || echo "[Warn] HTTP bridge (port $CLAUDE_HTTP_PORT) not running - run 'cc' first."
+
+    # Locate Chrome first, so we don't start the tunnel/bridge only to find it missing.
+    local bin=""
+    if [ "$(uname)" = "Darwin" ]; then
+        [ -d "/Applications/Google Chrome.app" ] || {
+            echo "[Err] Google Chrome not found in /Applications"
+            return 1
+        }
+    else
+        bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
+        [ -n "$bin" ] || { echo "[Err] Chrome/Chromium not found on PATH"; return 1; }
+    fi
+
+    # Chrome (mac/Linux) routes through the HTTP bridge, which needs the SSH tunnel
+    # under it. Ensure both are up (same as 'cc' steps 1-2); bail if either won't start.
+    if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Info] SSH tunnel (port $CLAUDE_SOCKS_PORT) not running - starting it..."
+        tunnel-start
+        _port_in_use "$CLAUDE_SOCKS_PORT" || {
+            echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'cc' to diagnose."
+            return 1
+        }
+    else
+        echo "[OK]  SSH tunnel already running"
+    fi
+
+    if ! _port_in_use "$CLAUDE_HTTP_PORT"; then
+        echo "[Info] HTTP bridge (port $CLAUDE_HTTP_PORT) not running - starting it..."
+        bridge-start
+        _port_in_use "$CLAUDE_HTTP_PORT" || {
+            echo "[Err] HTTP bridge could not be started - Chrome not launched. Run 'cc' to diagnose."
+            return 1
+        }
+    else
+        echo "[OK]  HTTP bridge already running"
+    fi
 
     if [ "$(uname)" = "Darwin" ]; then
         open -n -a "Google Chrome" --args \
@@ -258,12 +293,6 @@ chrome-proxy() {
             --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
             --profile-directory="Default"
     else
-        local bin
-        bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
-        if [ -z "$bin" ]; then
-            echo "[Err] Chrome/Chromium not found on PATH"
-            return 1
-        fi
         nohup "$bin" \
             --proxy-server="$url" \
             --user-data-dir="$HOME/.config/google-chrome-vpn" \
@@ -293,7 +322,7 @@ cc-help() {
     echo "  proxy-on        - Set the proxy env vars only"
     echo "  proxy-off       - Clear the proxy env vars only"
     echo ""
-    echo "  chrome-proxy    - Open Chrome via the proxy (separate profile)"
+    echo "  chrome-proxy    - Open Chrome via the proxy (auto-starts tunnel/bridge, separate profile)"
     echo "  cc-help         - Show this list again"
     echo ""
 }

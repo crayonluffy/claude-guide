@@ -355,12 +355,26 @@ function proxy-status {
 # ============================================================
 
 function chrome-proxy {
+    # Locate Chrome first, so we don't start the tunnel only to find Chrome missing.
     $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
     if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
     if (-not (Test-Path $chrome)) { Write-Host "[Err] Chrome not found" -ForegroundColor Red; return }
+
+    # On Windows, Chrome routes through the SOCKS tunnel directly, so the only thing
+    # it needs is the tunnel (the HTTP bridge / env vars are for the Claude CLI).
+    # Auto-start it if it's down (same as 'cc' step 1); bail if it still won't come up.
     if (-not (Test-Port -Port $script:SOCKS_PORT)) {
-        Write-Host "[Warn] SSH tunnel (port $($script:SOCKS_PORT)) not running - run 'cc' first." -ForegroundColor Yellow
+        Write-Host "[Info] SSH tunnel (port $($script:SOCKS_PORT)) not running - starting it..." -ForegroundColor Yellow
+        tunnel-start
+        if (-not (Test-Port -Port $script:SOCKS_PORT)) {
+            Write-Host "[Err] SSH tunnel could not be started - Chrome not launched. Run 'cc' to diagnose." -ForegroundColor Red
+            return
+        }
+    } else {
+        Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
     }
+
+    Write-Host "[Launch] Opening Chrome via socks5://127.0.0.1:$($script:SOCKS_PORT) (separate profile)..." -ForegroundColor Cyan
     & $chrome --proxy-server="socks5://127.0.0.1:$($script:SOCKS_PORT)" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
 }
 
@@ -385,7 +399,7 @@ function cc-help {
     Write-Host "  proxy-on        - Set the proxy env vars only" -ForegroundColor DarkGray
     Write-Host "  proxy-off       - Clear the proxy env vars only" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  chrome-proxy    - Open Chrome via the proxy (separate profile)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy    - Open Chrome via the proxy (auto-starts tunnel, separate profile)" -ForegroundColor DarkGray
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
 }
