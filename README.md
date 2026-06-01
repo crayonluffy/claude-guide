@@ -459,14 +459,6 @@ curl ipinfo.io
 claude --dangerously-skip-permissions
 ```
 
-**Screenshots**
-
-![Step 1 - SSH Tunnel](images/step1-ssh-tunnel.png)
-
-![Step 2 - Bridge](images/step2-bridge.png)
-
-![Step 3 - Run Claude](images/step3-run-claude.png)
-
 </details>
 
 ---
