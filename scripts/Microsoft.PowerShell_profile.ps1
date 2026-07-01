@@ -249,26 +249,53 @@ function cc-safe { cc -Safe }
 # ============================================================
 
 function tunnel-stop {
-    # One ssh process holds both the -L and -D ports; killing it drops both.
-    if ($global:SSH_TUNNEL_PID) {
-        Stop-Process -Id $global:SSH_TUNNEL_PID -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] SSH tunnel stopped (HTTP + SOCKS, PID: $global:SSH_TUNNEL_PID)" -ForegroundColor Green
+    # Kill EVERY process listening on either forwarded port - not just the one we
+    # tracked - then verify the ports actually freed and report survivors. Returns
+    # $true only if both ports are clear.
+    $ports = @($script:HTTP_PORT, $script:SOCKS_PORT)
+    $procIds = @()
+    foreach ($p in $ports) {
+        $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+        if ($c) { $procIds += ($c.OwningProcess | Select-Object -Unique) }
+    }
+    $procIds = $procIds | Select-Object -Unique
+
+    if (-not $procIds) {
+        Write-Host "[Info] No tunnel running - ports $($script:HTTP_PORT) / $($script:SOCKS_PORT) are already free" -ForegroundColor Yellow
         $global:SSH_TUNNEL_PID = $null
+        return $true
+    }
+
+    foreach ($procId in $procIds) {
+        $name = (Get-Process -Id $procId -ErrorAction SilentlyContinue).ProcessName
+        taskkill /PID $procId /T /F 2>$null | Out-Null
+        Write-Host "[Kill] PID $procId ($name)" -ForegroundColor DarkGray
+    }
+    Start-Sleep -Milliseconds 500
+
+    $survivors = @()
+    foreach ($p in $ports) {
+        if (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue) { $survivors += $p }
+    }
+    $global:SSH_TUNNEL_PID = $null
+
+    if ($survivors.Count -eq 0) {
+        Write-Host "[OK] Tunnel stopped - ports $($script:HTTP_PORT) and $($script:SOCKS_PORT) freed" -ForegroundColor Green
+        return $true
     } else {
-        $conn = Get-NetTCPConnection -LocalPort $script:HTTP_PORT -ErrorAction SilentlyContinue
-        if ($conn) {
-            Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
-            Write-Host "[OK] Killed process on port $($script:HTTP_PORT)" -ForegroundColor Green
-        } else {
-            Write-Host "[Info] No SSH tunnel running" -ForegroundColor Yellow
-        }
+        Write-Host "[Err] Still held: $($survivors -join ', '). Inspect: Get-NetTCPConnection -LocalPort $($script:HTTP_PORT),$($script:SOCKS_PORT) | Select LocalPort,OwningProcess" -ForegroundColor Red
+        return $false
     }
 }
 
 function cc-stop {
-    tunnel-stop
+    $stopped = tunnel-stop
     proxy-off
-    Write-Host "[OK] All proxy services stopped" -ForegroundColor Green
+    if ($stopped) {
+        Write-Host "[OK] All proxy services stopped" -ForegroundColor Green
+    } else {
+        Write-Host "[Err] Env cleared, but the tunnel did NOT fully stop (see above). Run 'proxy-doctor'." -ForegroundColor Red
+    }
 }
 
 # ============================================================
@@ -301,6 +328,77 @@ function proxy-status {
     Write-Host ""
     Write-Host "Current external IP:" -ForegroundColor Cyan
     curl.exe -s --max-time 5 ipinfo.io
+    Write-Host ""
+}
+
+# ============================================================
+# Doctor - check every part and say exactly what's wrong + how to fix it
+# ============================================================
+
+function proxy-doctor {
+    Write-Host ""
+    Write-Host "=== Proxy Doctor ===" -ForegroundColor Cyan
+
+    # --- tunnel / ports ---
+    $httpConn  = Get-NetTCPConnection -LocalPort $script:HTTP_PORT  -State Listen -ErrorAction SilentlyContinue
+    $socksConn = Get-NetTCPConnection -LocalPort $script:SOCKS_PORT -State Listen -ErrorAction SilentlyContinue
+    $httpPids  = @($httpConn.OwningProcess  | Select-Object -Unique)
+    $socksPids = @($socksConn.OwningProcess | Select-Object -Unique)
+
+    if ($httpPids) {
+        Write-Host "[ OK ]  HTTP forward  :$($script:HTTP_PORT) listening (PID $($httpPids -join ','))" -ForegroundColor Green
+    } else {
+        Write-Host "[FAIL] HTTP forward  :$($script:HTTP_PORT) NOT listening - Claude has no proxy. Fix: tunnel-start (or cc)" -ForegroundColor Red
+    }
+    if ($socksPids) {
+        Write-Host "[ OK ]  SOCKS forward :$($script:SOCKS_PORT) listening (PID $($socksPids -join ',')) - Chrome OK" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] SOCKS forward :$($script:SOCKS_PORT) NOT listening - chrome-proxy won't work. Fix: tunnel-start" -ForegroundColor Yellow
+    }
+    if ($httpPids -and $socksPids -and (Compare-Object $httpPids $socksPids)) {
+        Write-Host "[WARN] Ports held by DIFFERENT PIDs - likely a stale process. Fix: cc-stop, then cc" -ForegroundColor Yellow
+    }
+    if ($httpPids.Count -gt 1) {
+        Write-Host "[WARN] Port $($script:HTTP_PORT) has MULTIPLE listeners ($($httpPids -join ',')) - stale process. Fix: cc-stop" -ForegroundColor Yellow
+    }
+
+    # --- shell env ---
+    if ($env:HTTPS_PROXY) {
+        Write-Host "[ OK ]  Env HTTPS_PROXY=$env:HTTPS_PROXY" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Env HTTPS_PROXY not set in THIS shell. Fix: proxy-on (or cc)" -ForegroundColor Yellow
+    }
+
+    # --- Claude settings.json (check it has an env block) ---
+    $settings = $script:CLAUDE_SETTINGS
+    if ($script:SYNC_SETTINGS -ne 1) {
+        Write-Host "[ OK ]  settings.json sync disabled (SYNC_SETTINGS=0)" -ForegroundColor Green
+    } elseif (-not (Test-Path $settings)) {
+        Write-Host "[WARN] $settings does not exist yet (created on first proxy-on)" -ForegroundColor Yellow
+    } else {
+        try {
+            $obj = Get-Content $settings -Raw | ConvertFrom-Json
+            if ($null -eq $obj.env) {
+                Write-Host "[WARN] $settings has no 'env' block yet - proxy-on will add it" -ForegroundColor Yellow
+            } elseif ($obj.env.HTTPS_PROXY) {
+                Write-Host "[ OK ]  settings.json env.HTTPS_PROXY=$($obj.env.HTTPS_PROXY)" -ForegroundColor Green
+            } else {
+                Write-Host "[WARN] settings.json has an 'env' block but no HTTPS_PROXY (proxy currently OFF in config)" -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "[FAIL] $settings is INVALID JSON - sync is skipped. Fix by hand, or restore $settings.bak" -ForegroundColor Red
+        }
+    }
+
+    # --- end-to-end: reach the API through the proxy ---
+    if ($httpPids) {
+        $code = curl.exe -s --max-time 8 -o NUL -w "%{http_code}" -x "http://127.0.0.1:$($script:HTTP_PORT)" https://api.anthropic.com/ 2>$null
+        if ($code -and $code -ne "000") {
+            Write-Host "[ OK ]  api.anthropic.com reachable through the proxy (HTTP $code)" -ForegroundColor Green
+        } else {
+            Write-Host "[FAIL] Proxy up but can't reach api.anthropic.com (code $code). Check the VM's tinyproxy (webproxy-status)." -ForegroundColor Red
+        }
+    }
     Write-Host ""
 }
 
@@ -345,8 +443,9 @@ function cc-help {
     Write-Host "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)" -ForegroundColor DarkGray
     Write-Host "  cc-safe         - Same, but keeps Claude's permission prompts" -ForegroundColor DarkGray
     Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch Claude" -ForegroundColor DarkGray
-    Write-Host "  cc-stop         - Turn the proxy OFF (stop everything)" -ForegroundColor DarkGray
+    Write-Host "  cc-stop         - Turn the proxy OFF (stop everything, reports what it freed)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
+    Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
     Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray

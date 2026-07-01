@@ -140,14 +140,47 @@ tunnel-start() {
 }
 
 tunnel-stop() {
-    # One ssh process holds both the -L and -D ports; killing it drops both.
-    local pid
-    pid=$(lsof -ti:"$CLAUDE_HTTP_PORT")
-    if [ -n "$pid" ]; then
-        kill $pid
-        echo "[OK] SSH tunnel stopped (HTTP + SOCKS)"
+    # Kill EVERY process listening on either forwarded port - not just the one we
+    # think we started. This catches stale tunnels and leftovers from the old
+    # SOCKS+bridge setup (where killing npx orphaned the node child on 8080).
+    local all_pids survivors=() pid cmd port still p
+
+    all_pids=$(
+        { lsof -ti:"$CLAUDE_HTTP_PORT" 2>/dev/null; lsof -ti:"$CLAUDE_SOCKS_PORT" 2>/dev/null; } \
+        | sort -u | sed '/^$/d'
+    )
+
+    if [ -z "$all_pids" ]; then
+        echo "[Info] No tunnel running - ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT are already free"
+        return 0
+    fi
+
+    for pid in $all_pids; do
+        cmd=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
+        kill "$pid" 2>/dev/null
+        echo "[Kill] PID $pid (${cmd:-unknown})"
+    done
+
+    # Verify the ports actually freed; escalate to SIGKILL if a process lingers.
+    sleep 0.5
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        still=$(lsof -ti:"$port" 2>/dev/null)
+        if [ -n "$still" ]; then
+            for p in $still; do kill -9 "$p" 2>/dev/null; done
+            sleep 0.3
+            still=$(lsof -ti:"$port" 2>/dev/null)
+        fi
+        [ -n "$still" ] && survivors+=("$port held by PID(s) $(echo $still | tr '\n' ' ')")
+    done
+
+    if [ ${#survivors[@]} -eq 0 ]; then
+        echo "[OK] Tunnel stopped - ports $CLAUDE_HTTP_PORT and $CLAUDE_SOCKS_PORT freed"
     else
-        echo "[Info] No SSH tunnel running"
+        echo "[Err] Could not free everything (even with SIGKILL):"
+        for p in "${survivors[@]}"; do echo "       $p"; done
+        echo "       Inspect: lsof -i:$CLAUDE_HTTP_PORT -i:$CLAUDE_SOCKS_PORT"
+        echo "       A process you don't own needs sudo; a wedged one may need a re-login."
+        return 1
     fi
 }
 
@@ -244,9 +277,17 @@ cc() {
 cc-safe() { cc --safe; }
 
 cc-stop() {
-    tunnel-stop
+    # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
+    # result so cc-stop never falsely claims success when a port is still held.
+    local rc=0
+    tunnel-stop || rc=1
     proxy-off
-    echo "[OK] All proxy services stopped"
+    if [ $rc -eq 0 ]; then
+        echo "[OK] All proxy services stopped"
+    else
+        echo "[Err] Env cleared, but the tunnel did NOT fully stop (see above). Run 'proxy-doctor' to see what's stuck."
+        return 1
+    fi
 }
 
 # ============================================================
@@ -278,6 +319,100 @@ proxy-status() {
     echo ""
     echo "Current external IP:"
     curl -s --max-time 5 ipinfo.io
+    echo ""
+}
+
+# ============================================================
+# Doctor - check every part and say exactly what's wrong + how to fix it
+# ============================================================
+
+proxy-doctor() {
+    local ok="[ OK ]" warn="[WARN]" bad="[FAIL]"
+    echo ""
+    echo "=== Proxy Doctor ==="
+
+    # --- tools ---
+    if command -v lsof >/dev/null 2>&1; then
+        echo "$ok  lsof installed"
+    else
+        echo "$bad lsof NOT installed - status/teardown can't see ports. Fix: sudo apt install lsof"
+    fi
+    if command -v jq >/dev/null 2>&1; then
+        echo "$ok  jq installed ($(jq --version)) - settings.json sync available"
+    else
+        echo "$warn jq NOT installed - settings.json sync is skipped (shell env vars still work). Fix: sudo apt install jq"
+    fi
+
+    # --- tunnel / ports ---
+    local http_pids socks_pids http_pid socks_pid
+    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" 2>/dev/null)
+    socks_pids=$(lsof -ti:"$CLAUDE_SOCKS_PORT" 2>/dev/null)
+    http_pid=$(echo "$http_pids" | head -1)
+    socks_pid=$(echo "$socks_pids" | head -1)
+
+    if [ -n "$http_pid" ]; then
+        echo "$ok  HTTP forward  :$CLAUDE_HTTP_PORT listening (PID $http_pid $(ps -p $http_pid -o comm= 2>/dev/null | tr -d ' '))"
+    else
+        echo "$bad HTTP forward  :$CLAUDE_HTTP_PORT NOT listening - Claude has no proxy. Fix: tunnel-start (or cc)"
+    fi
+    if [ -n "$socks_pid" ]; then
+        echo "$ok  SOCKS forward :$CLAUDE_SOCKS_PORT listening (PID $socks_pid) - Chrome OK"
+    else
+        echo "$warn SOCKS forward :$CLAUDE_SOCKS_PORT NOT listening - chrome-proxy won't work. Fix: tunnel-start"
+    fi
+    # Both ports should belong to the SAME ssh process. Different PIDs => a stale
+    # leftover (e.g. an old SOCKS+bridge session) is squatting on one of them.
+    if [ -n "$http_pid" ] && [ -n "$socks_pid" ] && [ "$http_pid" != "$socks_pid" ]; then
+        echo "$warn Ports held by DIFFERENT PIDs ($http_pid vs $socks_pid) - likely a stale process. Fix: cc-stop, then cc"
+    fi
+    # More than one PID on a single port is also a leftover.
+    if [ "$(echo "$http_pids" | sed '/^$/d' | wc -l)" -gt 1 ]; then
+        echo "$warn Port $CLAUDE_HTTP_PORT has MULTIPLE listeners ($(echo $http_pids | tr '\n' ' ')) - stale process. Fix: cc-stop"
+    fi
+
+    # --- shell env ---
+    if [ -n "$HTTPS_PROXY" ]; then
+        echo "$ok  Shell env HTTPS_PROXY=$HTTPS_PROXY"
+    else
+        echo "$warn Shell env HTTPS_PROXY not set in THIS shell. Fix: proxy-on (or cc)"
+    fi
+
+    # --- Claude settings.json ---
+    if [ "${CLAUDE_SYNC_SETTINGS:-0}" != "1" ]; then
+        echo "$ok  settings.json sync disabled (CLAUDE_SYNC_SETTINGS=0)"
+    elif [ ! -f "$CLAUDE_SETTINGS" ]; then
+        echo "$warn $CLAUDE_SETTINGS does not exist yet (created on first proxy-on)"
+    elif ! command -v jq >/dev/null 2>&1; then
+        echo "$warn Can't inspect $CLAUDE_SETTINGS without jq"
+    elif ! jq empty "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
+        echo "$bad $CLAUDE_SETTINGS is INVALID JSON - sync is skipped. Fix by hand, or restore ${CLAUDE_SETTINGS}.bak"
+    else
+        # This is the "check json has env" the user asked for.
+        if [ "$(jq 'has("env")' "$CLAUDE_SETTINGS")" != "true" ]; then
+            echo "$warn $CLAUDE_SETTINGS has no \"env\" block yet - proxy-on will add it"
+        else
+            local sp
+            sp=$(jq -r '.env.HTTPS_PROXY // empty' "$CLAUDE_SETTINGS")
+            if [ -n "$sp" ]; then
+                echo "$ok  settings.json env.HTTPS_PROXY=$sp"
+            else
+                echo "$warn settings.json has an \"env\" block but no HTTPS_PROXY (proxy currently OFF in config)"
+            fi
+        fi
+    fi
+
+    # --- end-to-end: can we actually reach the API through the proxy? ---
+    if [ -n "$http_pid" ]; then
+        local code
+        code=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' \
+               -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" https://api.anthropic.com/ 2>/dev/null)
+        if [ -n "$code" ] && [ "$code" != "000" ]; then
+            echo "$ok  api.anthropic.com reachable through the proxy (HTTP $code)"
+        else
+            echo "$bad Proxy up but can't reach api.anthropic.com (curl code ${code:-none})."
+            echo "       Check the VM: run 'webproxy-status' there, confirm tinyproxy is up and allows CONNECT 443."
+        fi
+    fi
     echo ""
 }
 
@@ -357,8 +492,9 @@ cc-help() {
     echo "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)"
     echo "  cc-safe         - Same, but keeps Claude's permission prompts"
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch Claude"
-    echo "  cc-stop         - Turn the proxy OFF (stop everything)"
+    echo "  cc-stop         - Turn the proxy OFF (stop everything, reports what it freed)"
     echo "  proxy-status    - Show what's running + your external IP"
+    echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo ""
     echo "  -- advanced: manage one piece at a time --"
     echo "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)"

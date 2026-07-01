@@ -99,8 +99,9 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 | `cc` | One-shot: tunnel + env vars + launch Claude (`--dangerously-skip-permissions`) |
 | `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
 | `proxy-up` | Same setup as `cc` (tunnel + env vars + verify) but stops short of launching Claude |
-| `cc-stop` | Stop the tunnel and clear the proxy env vars |
+| `cc-stop` | Stop the tunnel and clear the proxy env vars — kills **every** process on both ports, verifies they freed, and says so honestly (won't falsely report success) |
 | `proxy-status` | Show what's running and your current external IP |
+| `proxy-doctor` | Diagnose each part (tunnel, ports, env, `settings.json`, API reachability) and print exactly what's wrong + how to fix it |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel (`-L` HTTP for Claude + `-D` SOCKS5 for Chrome) |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
 | `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy — auto-starts the tunnel it needs first (separate, isolated profile) |
@@ -113,6 +114,14 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 > down tunnel never leaves Claude pointed at a dead proxy. It only touches those three keys
 > and needs [`jq`](https://jqlang.github.io/jq/) (macOS/Linux); if `jq` is missing it skips
 > the file and relies on shell env vars. Set `CLAUDE_SYNC_SETTINGS=0` to turn it off.
+
+> **When something's off, run `proxy-doctor` first.** It checks each part in turn — `jq`/`lsof`
+> present, both tunnel ports listening (and held by the *same* process — a mismatch flags a
+> stale leftover), your shell env vars, whether `settings.json` has an `env` block with the
+> proxy, and finally whether the API is actually reachable *through* the proxy — printing a
+> `[ OK ]` / `[WARN]` / `[FAIL]` line with a concrete fix for each. If a teardown ever looks
+> stuck, `cc-stop` now kills every process on both ports, escalates to `kill -9`, and tells
+> you if anything survived (and how to inspect it) instead of falsely reporting success.
 
 ---
 
