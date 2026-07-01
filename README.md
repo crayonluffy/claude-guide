@@ -6,13 +6,19 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI through an SS
 
 ```mermaid
 flowchart LR
-    claude([claude]) -->|HTTP :8080| bridge([bridge])
-    bridge -->|SOCKS :1080| tunnel([tunnel])
-    tunnel -->|SSH| vm([VM / proxy])
+    claude([claude]) -->|HTTPS_PROXY :8080| tunnel([ssh -L])
+    tunnel -->|SSH| vm([VM tinyproxy :8888])
     vm --> api([Anthropic API])
 ```
 
 After a one-time setup you just type **`cc`** and all of that happens automatically.
+
+> **Server side (one-time):** the VM runs a small HTTP proxy bound to loopback —
+> set it up with [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
+> The client just forwards a local port to it with `ssh -L`, so there's **no
+> SOCKS proxy and no `http-proxy-to-socks` bridge** on your machine anymore.
+> ([Claude Code doesn't support SOCKS proxies](https://code.claude.com/docs/en/network-config.md),
+> so the HTTP proxy lives on the VM instead of being bridged on the client.)
 
 ## ⚠️ Prerequisites
 
@@ -78,24 +84,22 @@ claude --version
 
 Set up a shell profile **once**, then a single **`cc`** command:
 
-1. starts the **SSH tunnel** in the background (SOCKS5 on `127.0.0.1:1080`),
-2. starts the **HTTP-to-SOCKS bridge** in the background (HTTP on `127.0.0.1:8080`),
-3. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables,
-4. verifies your external IP, then launches **Claude**.
+1. starts the **SSH tunnel** in the background (local forward `127.0.0.1:8080` → the VM's HTTP proxy on `:8888`),
+2. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables,
+3. verifies your external IP, then launches **Claude**.
 
 It reuses anything already running instead of starting duplicates, and `cc-stop` tears it all back down.
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | One-shot: tunnel + bridge + env vars + launch Claude (`--dangerously-skip-permissions`) |
+| `cc` | One-shot: tunnel + env vars + launch Claude (`--dangerously-skip-permissions`) |
 | `cc-safe` | Same, but launches plain `claude` (keeps permission prompts) |
-| `proxy-up` | Same setup as `cc` (tunnel + bridge + env vars + verify) but stops short of launching Claude |
-| `cc-stop` | Stop tunnel + bridge and clear the proxy env vars |
+| `proxy-up` | Same setup as `cc` (tunnel + env vars + verify) but stops short of launching Claude |
+| `cc-stop` | Stop the tunnel and clear the proxy env vars |
 | `proxy-status` | Show what's running and your current external IP |
-| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
-| `bridge-start` / `bridge-stop` | Manage just the HTTP bridge |
+| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel (local forward to the VM proxy) |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
-| `chrome-proxy` | Open Chrome routed through the proxy — auto-starts the tunnel/bridge it needs first (separate, isolated profile) |
+| `chrome-proxy` | Open Chrome routed through the proxy — auto-starts the tunnel it needs first (separate, isolated profile) |
 | `cc-help` | Print this command list (it also prints when a new shell/profile loads) |
 
 ---
@@ -123,8 +127,6 @@ proxy-status    # show what's running + your external IP
 # Advanced — manage one piece at a time:
 tunnel-start    # start the SSH tunnel only
 tunnel-stop     # stop the SSH tunnel
-bridge-start    # start the HTTP bridge only
-bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
 
@@ -139,8 +141,7 @@ cc-help         # print this list again (it also prints when you open a shell)
 | `... is not digitally signed` / cannot load profile | Run `Unblock-File -Path $PROFILE`, then confirm `Get-ExecutionPolicy -Scope CurrentUser` is `RemoteSigned`. |
 | Garbled characters / parse errors | The file was saved with the wrong encoding (Big5/CP950). Re-save as **UTF-8** (or keep it ASCII-only). |
 | SSH hangs or `cc` returns immediately with no tunnel | First connection needs the host key accepted. Run `ssh jpvpn` once interactively, type `yes`, then retry. |
-| `npx : The term 'npx' is not recognized` | Install **Node.js** from [nodejs.org](https://nodejs.org/) (gives you `npm` + `npx`). |
-| Tunnel + bridge are up but Claude can't reach the API | Make sure your `NO_PROXY_LIST` does **not** include `api.anthropic.com` — that traffic must go *through* the proxy. |
+| Tunnel comes up but Claude can't reach the API | Confirm the VM runs [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `:8888`), and that `NO_PROXY_LIST` does **not** include `api.anthropic.com`. |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 
 <details>
@@ -212,12 +213,12 @@ notepad $PROFILE     # or:  code $PROFILE
 The profile reads the connection from your `jpvpn` alias (Step 1), so the **Settings block** just points at it — no key/user/host to re-enter:
 
 ```powershell
-$script:SSH_HOST    = "jpvpn"   # the alias from Step 1 (or a raw host/IP)
-$script:SSH_USER    = ""        # leave blank when SSH_HOST is a config alias
-$script:SSH_KEY     = ""        # leave blank when SSH_HOST is a config alias
-$script:SSH_PORT    = 22
-$script:SOCKS_PORT  = 1080
-$script:HTTP_PORT   = 8080
+$script:SSH_HOST          = "jpvpn"   # the alias from Step 1 (or a raw host/IP)
+$script:SSH_USER          = ""        # leave blank when SSH_HOST is a config alias
+$script:SSH_KEY           = ""        # leave blank when SSH_HOST is a config alias
+$script:SSH_PORT          = 22
+$script:HTTP_PORT         = 8080       # local port -> forwarded to the VM proxy
+$script:REMOTE_PROXY_PORT = 8888       # tinyproxy port on the VM (webproxy-manager)
 # Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
 ```
 
@@ -264,8 +265,6 @@ proxy-status    # show what's running + your external IP
 # Advanced — manage one piece at a time:
 tunnel-start    # start the SSH tunnel only
 tunnel-stop     # stop the SSH tunnel
-bridge-start    # start the HTTP bridge only
-bridge-stop     # stop the HTTP bridge
 proxy-on        # set the proxy env vars only
 proxy-off       # clear the proxy env vars only
 
@@ -277,11 +276,12 @@ cc-help         # print this list again (it also prints when you open a shell)
 
 | Symptom | Fix |
 |---------|-----|
-| `lsof: command not found` (Linux) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
-| Bridge never comes up | Check the log: `cat /tmp/claude-bridge.log`. Usually missing Node.js (`npx`) — install from [nodejs.org](https://nodejs.org/). |
+| `lsof: command not found` (Linux / WSL) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
+| Tunnel never comes up | Check the log: `cat /tmp/claude-tunnel.log` (auth error vs. network timeout). Also make sure the VM is running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager). |
 | SSH keeps asking for the passphrase | Step 1 adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
-| `cc` exits before launching Claude | The tunnel/bridge didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
-| Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`. |
+| **WSL:** `cc` returns immediately, no tunnel | A backgrounded `ssh -f` can't answer a passphrase prompt, and WSL has no persistent ssh-agent. The script auto-starts one; if it still fails, run `ssh-add ~/.ssh/<your-key>` once, or enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`). |
+| `cc` exits before launching Claude | The tunnel didn't bind. Accept the host key once with `ssh <user>@<host>`, then retry. |
+| Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`, and that tinyproxy allows CONNECT to 443 (it does by default). |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)` |
 
 <details>
@@ -357,12 +357,12 @@ ssh jpvpn
 It already points at the `jpvpn` alias from Step 1, so there's nothing to re-enter — the **Settings block** just confirms:
 
 ```bash
-export CLAUDE_SSH_HOST="jpvpn"   # the alias from Step 1 (or a raw host/IP)
-export CLAUDE_SSH_USER=""        # leave blank when CLAUDE_SSH_HOST is a config alias
-export CLAUDE_SSH_KEY=""         # leave blank when CLAUDE_SSH_HOST is a config alias
+export CLAUDE_SSH_HOST="jpvpn"          # the alias from Step 1 (or a raw host/IP)
+export CLAUDE_SSH_USER=""               # leave blank when CLAUDE_SSH_HOST is a config alias
+export CLAUDE_SSH_KEY=""                # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
-export CLAUDE_SOCKS_PORT=1080
-export CLAUDE_HTTP_PORT=8080
+export CLAUDE_HTTP_PORT=8080            # local port -> forwarded to the VM proxy
+export CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
 # Append corporate intranet ranges to CLAUDE_NO_PROXY if needed.
 ```
 
@@ -389,11 +389,11 @@ Host jpvpn
 
 ## 🌐 (Optional) Browse Through the Proxy
 
-With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the proxy (Windows via the SOCKS tunnel on `127.0.0.1:1080`; macOS/Linux via the HTTP bridge on `127.0.0.1:8080`), without touching your normal browsing session.
+With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the HTTP proxy on `127.0.0.1:8080` (the SSH tunnel), without touching your normal browsing session. Under WSL it launches **Windows** Chrome, which reaches the WSL-side port via WSL2 localhost forwarding.
 
-> - You don't have to run `cc` first: `chrome-proxy` checks the pieces Chrome needs (Windows: the tunnel; macOS/Linux: the tunnel + bridge) and **auto-starts whatever is down** before launching. If something can't be started it aborts instead of opening an un-proxied browser.
+> - You don't have to run `cc` first: `chrome-proxy` **auto-starts the tunnel** if it's down before launching. If the tunnel can't be started it aborts instead of opening an un-proxied browser.
 > - The separate `--user-data-dir` keeps this profile's logins, cookies, and history isolated from your everyday Chrome.
-> - To also route **DNS** through the tunnel on Windows (avoid DNS leaks), add `--host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"` to the `chrome-proxy` command in the profile.
+> - No DNS-leak workaround needed: with an HTTP proxy, Chrome hands the hostname to the proxy and **DNS is resolved on the VM**, not locally.
 
 ---
 
@@ -402,21 +402,17 @@ With the profile installed, run **`chrome-proxy`** — it opens a **separate** C
 Prefer not to install a profile, or want to run/debug one piece at a time? These are the exact steps `cc` automates — keep each window/terminal open.
 
 <details>
-<summary>🪟 Windows — 3 PowerShell windows</summary>
+<summary>🪟 Windows — 2 PowerShell windows</summary>
 
-Requires the SSH key + `jpvpn` alias from **Step 1** above.
+Requires the SSH key + `jpvpn` alias from **Step 1** above, and the VM running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `127.0.0.1:8888`).
 
 **Window 1 — SSH tunnel (keep open):**
 ```powershell
-ssh jpvpn -D 1080 -N -C
+# Forward local 8080 -> the VM's HTTP proxy on 8888
+ssh jpvpn -N -C -L 8080:127.0.0.1:8888
 ```
 
-**Window 2 — bridge (keep open):**
-```powershell
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**Window 3 — run Claude:**
+**Window 2 — run Claude:**
 ```powershell
 $env:http_proxy="http://127.0.0.1:8080"
 $env:HTTP_PROXY="http://127.0.0.1:8080"
@@ -433,19 +429,17 @@ claude --dangerously-skip-permissions
 </details>
 
 <details>
-<summary>🍎 macOS / 🐧 Linux — 3 terminals</summary>
+<summary>🍎 macOS / 🐧 Linux / WSL — 2 terminals</summary>
+
+Requires the VM running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `127.0.0.1:8888`).
 
 **Terminal 1 — tunnel (keep open):**
 ```bash
-ssh -i ~/.ssh/<your-key> -D 1080 -N -C <your-ssh-user>@<your-gcp-hostname>
+# Forward local 8080 -> the VM's HTTP proxy on 8888
+ssh -i ~/.ssh/<your-key> -N -C -L 8080:127.0.0.1:8888 <your-ssh-user>@<your-gcp-hostname>
 ```
 
-**Terminal 2 — bridge (keep open):**
-```bash
-npx http-proxy-to-socks -p 8080 -s 127.0.0.1:1080
-```
-
-**Terminal 3 — run Claude:**
+**Terminal 2 — run Claude:**
 ```bash
 export http_proxy=http://127.0.0.1:8080
 export HTTP_PROXY=http://127.0.0.1:8080

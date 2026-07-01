@@ -52,6 +52,7 @@ prompt_required "Server IP or hostname"                     SERVER_IP
 prompt_required "SSH username"                              SSH_USER
 prompt_default  "SSH alias (the shortcut you'll type)"      ALIAS    "jpvpn"
 prompt_default  "SSH port"                                  SSH_PORT "22"
+prompt_default  "VM proxy port (tinyproxy on the VM)"       PROXY_PORT "8888"
 
 # --- 2. Find / choose the private key --------------------------------------
 mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
@@ -122,8 +123,9 @@ fi
 PROFILE_DEST="$HOME/.claude-proxy.sh"
 if curl -fsSL "$REPO_RAW/claude-proxy.sh" -o "$PROFILE_DEST"; then
     # Patch the settings block to match the answers above.
-    sed -i.bak -E "s|^export CLAUDE_SSH_HOST=.*|export CLAUDE_SSH_HOST=\"$ALIAS\"|" "$PROFILE_DEST"
-    sed -i.bak -E "s|^export CLAUDE_SSH_PORT=.*|export CLAUDE_SSH_PORT=$SSH_PORT|"   "$PROFILE_DEST"
+    sed -i.bak -E "s|^export CLAUDE_SSH_HOST=.*|export CLAUDE_SSH_HOST=\"$ALIAS\"|"              "$PROFILE_DEST"
+    sed -i.bak -E "s|^export CLAUDE_SSH_PORT=.*|export CLAUDE_SSH_PORT=$SSH_PORT|"                "$PROFILE_DEST"
+    sed -i.bak -E "s|^export CLAUDE_REMOTE_PROXY_PORT=.*|export CLAUDE_REMOTE_PROXY_PORT=$PROXY_PORT|" "$PROFILE_DEST"
     rm -f "$PROFILE_DEST.bak"
     echo "[OK] Profile installed: $PROFILE_DEST"
 

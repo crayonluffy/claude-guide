@@ -33,10 +33,11 @@ Write-Host "=== Claude proxy setup wizard (Windows) ===" -ForegroundColor Cyan
 Write-Host ""
 
 # --- 1. Collect VM details -------------------------------------------------
-$ServerIp = Read-Required "Server IP or hostname"
-$SshUser  = Read-Required "SSH username"
-$Alias    = Read-Default  "SSH alias (the shortcut you'll type)" "jpvpn"
-$SshPort  = Read-Default  "SSH port" "22"
+$ServerIp  = Read-Required "Server IP or hostname"
+$SshUser   = Read-Required "SSH username"
+$Alias     = Read-Default  "SSH alias (the shortcut you'll type)" "jpvpn"
+$SshPort   = Read-Default  "SSH port" "22"
+$ProxyPort = Read-Default  "VM proxy port (tinyproxy on the VM)" "8888"
 
 # --- 2. Find / choose the private key --------------------------------------
 $downloads = Join-Path $HOME 'Downloads'
@@ -110,8 +111,9 @@ Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/Microsoft.PowerShell_profile.p
 Unblock-File -Path $PROFILE
 # Patch the Settings block so the profile matches the answers above.
 $raw = Get-Content $PROFILE -Raw
-$raw = $raw -replace '(?m)^(\$script:SSH_HOST\s*=\s*)"[^"]*"', ('$1"' + $Alias + '"')
-$raw = $raw -replace '(?m)^(\$script:SSH_PORT\s*=\s*)\d+',     ('${1}' + $SshPort)
+$raw = $raw -replace '(?m)^(\$script:SSH_HOST\s*=\s*)"[^"]*"',        ('$1"' + $Alias + '"')
+$raw = $raw -replace '(?m)^(\$script:SSH_PORT\s*=\s*)\d+',           ('${1}' + $SshPort)
+$raw = $raw -replace '(?m)^(\$script:REMOTE_PROXY_PORT\s*=\s*)\d+',  ('${1}' + $ProxyPort)
 Set-Content -Path $PROFILE -Value $raw -Encoding utf8
 Write-Host "[OK] Profile installed: $PROFILE" -ForegroundColor Green
 
