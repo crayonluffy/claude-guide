@@ -1,13 +1,13 @@
 # ============================================================
-# Claude SSH Tunnel (local forward) + HTTP Proxy   (source from ~/.zshrc or ~/.bashrc)
+# Claude SSH Tunnel + HTTP proxy (Claude) + SOCKS5 (Chrome)   (source from ~/.zshrc or ~/.bashrc)
 # ============================================================
-# Traffic flow:
-#   claude --HTTPS_PROXY--> 127.0.0.1:8080 --ssh -L--> VM tinyproxy:8888 --> Anthropic API
+# One SSH connection carries two forwards:
+#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude (HTTPS_PROXY)
+#   -D 1080                 ->  SOCKS5 on the VM              ->  used by Chrome / other apps
 #
-# The VM runs an HTTP proxy bound to loopback (see the webproxy-manager tool:
-# https://github.com/crayonluffy/forge/tree/main/webproxy-manager). This script
-# just forwards a local port to it with `ssh -L`. No SOCKS, no
-# http-proxy-to-socks bridge, no Node dependency for the proxy.
+# Claude Code only speaks HTTP proxies, so it uses the -L forward to the VM's
+# HTTP proxy (see webproxy-manager: https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
+# Chrome is happier on SOCKS5 (full traffic, remote DNS), so it uses the -D forward.
 # ============================================================
 
 # ============================================================
@@ -18,8 +18,16 @@ export CLAUDE_SSH_HOST="jpvpn"          # an ~/.ssh/config alias, OR a raw host/
 export CLAUDE_SSH_USER=""               # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_KEY=""                # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
-export CLAUDE_HTTP_PORT=8080            # local port -> forwarded to the VM's proxy
+export CLAUDE_HTTP_PORT=8080            # local HTTP port -> forwarded to the VM's HTTP proxy (Claude)
 export CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
+export CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
+
+# Also write the proxy into Claude's settings.json while the tunnel is up, so
+# `claude` launched from ANY shell (not just this one) uses it. Removed again on
+# proxy-off / cc-stop, so a down tunnel never leaves Claude pointed at a dead proxy.
+# Needs `jq`; set to 0 to disable and rely on shell env vars only.
+export CLAUDE_SYNC_SETTINGS=1
+export CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
 # Append your company intranet ranges/domains, e.g. ...,172.20.0.0/24,*.mycorp.example
 export CLAUDE_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,*.local,*.internal,*.corp"
@@ -50,8 +58,47 @@ _ensure_ssh_agent() {
     fi
 }
 
+# --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+_claude_settings_proxy_on() {
+    [ "${CLAUDE_SYNC_SETTINGS:-0}" = "1" ] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[Info] jq not found - skipping ~/.claude/settings.json sync (shell env vars still set)"
+        return 0
+    fi
+    local url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
+    mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
+    [ -f "$CLAUDE_SETTINGS" ] || echo '{}' > "$CLAUDE_SETTINGS"
+    cp "$CLAUDE_SETTINGS" "${CLAUDE_SETTINGS}.bak" 2>/dev/null
+    tmp=$(mktemp)
+    if jq --arg url "$url" --arg np "$CLAUDE_NO_PROXY" \
+        '.env = (.env // {}) | .env.HTTPS_PROXY=$url | .env.HTTP_PROXY=$url | .env.NO_PROXY=$np' \
+        "$CLAUDE_SETTINGS" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$CLAUDE_SETTINGS"
+        echo "[OK] Proxy written into $CLAUDE_SETTINGS (env block)"
+    else
+        rm -f "$tmp"
+        echo "[Warn] Could not update $CLAUDE_SETTINGS (invalid JSON?) - left it untouched"
+    fi
+}
+
+_claude_settings_proxy_off() {
+    [ "${CLAUDE_SYNC_SETTINGS:-0}" = "1" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    [ -f "$CLAUDE_SETTINGS" ] || return 0
+    local tmp
+    cp "$CLAUDE_SETTINGS" "${CLAUDE_SETTINGS}.bak" 2>/dev/null
+    tmp=$(mktemp)
+    if jq 'if .env then .env |= del(.HTTPS_PROXY, .HTTP_PROXY, .NO_PROXY) else . end' \
+        "$CLAUDE_SETTINGS" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$CLAUDE_SETTINGS"
+        echo "[OK] Proxy removed from $CLAUDE_SETTINGS"
+    else
+        rm -f "$tmp"
+    fi
+}
+
 # ============================================================
-# 1. SSH tunnel (local forward to the VM's HTTP proxy)
+# 1. SSH tunnel: -L (HTTP proxy for Claude) + -D (SOCKS5 for Chrome)
 # ============================================================
 
 tunnel-start() {
@@ -66,6 +113,7 @@ tunnel-start() {
     echo "[SSH] Starting tunnel to $CLAUDE_SSH_HOST..."
     local args=(-N -f -C
         -L "${CLAUDE_HTTP_PORT}:127.0.0.1:${CLAUDE_REMOTE_PROXY_PORT}"
+        -D "${CLAUDE_SOCKS_PORT}"
         -o ServerAliveInterval=60
         -o ServerAliveCountMax=3
         -o ExitOnForwardFailure=yes
@@ -83,31 +131,33 @@ tunnel-start() {
     done
 
     if _port_in_use "$CLAUDE_HTTP_PORT"; then
-        echo "[OK]  SSH tunnel up: 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT"
+        echo "[OK]  SSH tunnel up:"
+        echo "       HTTP  127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT   (Claude)"
+        echo "       SOCKS 127.0.0.1:$CLAUDE_SOCKS_PORT                                   (Chrome / apps)"
     else
         echo "[Err] SSH tunnel failed to start within 5s (see /tmp/claude-tunnel.log)"
     fi
 }
 
 tunnel-stop() {
+    # One ssh process holds both the -L and -D ports; killing it drops both.
     local pid
     pid=$(lsof -ti:"$CLAUDE_HTTP_PORT")
     if [ -n "$pid" ]; then
         kill $pid
-        echo "[OK] SSH tunnel stopped"
+        echo "[OK] SSH tunnel stopped (HTTP + SOCKS)"
     else
         echo "[Info] No SSH tunnel running"
     fi
 }
 
 # Back-compat stubs: the separate HTTP bridge is gone - the VM runs the proxy now,
-# and 'tunnel-start' forwards straight to it. Kept so old muscle memory / scripts
-# don't error out.
+# and 'tunnel-start' forwards straight to it.
 bridge-start() { echo "[Info] No bridge needed anymore - the VM runs the HTTP proxy; 'tunnel-start' forwards straight to it."; }
 bridge-stop()  { echo "[Info] No bridge to stop - the VM runs the HTTP proxy now. Use 'tunnel-stop'."; }
 
 # ============================================================
-# 2. Proxy env vars
+# 2. Proxy env vars (+ Claude settings.json sync)
 # ============================================================
 
 proxy-on() {
@@ -119,11 +169,13 @@ proxy-on() {
     export no_proxy="$CLAUDE_NO_PROXY"
     export NO_PROXY="$CLAUDE_NO_PROXY"
     echo "[OK] Env vars set: HTTPS_PROXY=$url"
+    _claude_settings_proxy_on
 }
 
 proxy-off() {
     unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
     echo "[OK] Env vars cleared"
+    _claude_settings_proxy_off
 }
 
 # ============================================================
@@ -140,7 +192,7 @@ proxy-up() {
         shift
     done
 
-    # Step 1: SSH tunnel (local forward)
+    # Step 1: SSH tunnel (HTTP + SOCKS forwards)
     if ! _port_in_use "$CLAUDE_HTTP_PORT"; then
         tunnel-start
         _port_in_use "$CLAUDE_HTTP_PORT" || return 1
@@ -148,7 +200,7 @@ proxy-up() {
         echo "[OK]  SSH tunnel already running"
     fi
 
-    # Step 2: Env vars
+    # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
     # Step 3: Verify
@@ -206,9 +258,15 @@ proxy-status() {
     echo "=== Proxy Status ==="
     echo ""
     if _port_in_use "$CLAUDE_HTTP_PORT"; then
-        echo "[ON]  SSH tunnel    : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT"
+        echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude)"
     else
-        echo "[OFF] SSH tunnel    : not running"
+        echo "[OFF] HTTP tunnel   : not running"
+    fi
+
+    if _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[ON]  SOCKS tunnel  : 127.0.0.1:$CLAUDE_SOCKS_PORT (Chrome / apps)"
+    else
+        echo "[OFF] SOCKS tunnel  : not running"
     fi
 
     if [ -n "$HTTPS_PROXY" ]; then
@@ -224,18 +282,18 @@ proxy-status() {
 }
 
 # ============================================================
-# Launch Chrome through the proxy (separate, isolated profile)
+# Launch Chrome through the SOCKS5 proxy (separate, isolated profile)
 # ============================================================
 
 chrome-proxy() {
-    local url="http://127.0.0.1:$CLAUDE_HTTP_PORT"
+    local socks="socks5://127.0.0.1:$CLAUDE_SOCKS_PORT"
 
-    # Chrome routes through the HTTP proxy, which the SSH tunnel exposes. Ensure
-    # the tunnel is up (same as 'cc' step 1); bail if it won't start.
-    if ! _port_in_use "$CLAUDE_HTTP_PORT"; then
-        echo "[Info] SSH tunnel (port $CLAUDE_HTTP_PORT) not running - starting it..."
+    # Chrome routes through the SOCKS5 forward, which the SSH tunnel provides.
+    # Ensure the tunnel is up (same as 'cc' step 1); bail if it won't start.
+    if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Info] SSH tunnel (SOCKS port $CLAUDE_SOCKS_PORT) not running - starting it..."
         tunnel-start
-        _port_in_use "$CLAUDE_HTTP_PORT" || {
+        _port_in_use "$CLAUDE_SOCKS_PORT" || {
             echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'cc' to diagnose."
             return 1
         }
@@ -245,7 +303,7 @@ chrome-proxy() {
 
     if _is_wsl; then
         # WSL has no Linux Chrome; drive Windows Chrome instead. It reaches the
-        # WSL-side forwarded port via WSL2 localhost forwarding (on by default).
+        # WSL-side SOCKS port via WSL2 localhost forwarding (on by default).
         local win_chrome=""
         for c in \
             "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe" \
@@ -253,14 +311,15 @@ chrome-proxy() {
             [ -x "$c" ] && { win_chrome="$c"; break; }
         done
         [ -n "$win_chrome" ] || {
-            echo "[Err] Windows Chrome not found under /mnt/c - launch it manually with --proxy-server=$url"
+            echo "[Err] Windows Chrome not found under /mnt/c - launch it manually with --proxy-server=$socks"
             return 1
         }
         "$win_chrome" \
-            --proxy-server="$url" \
+            --proxy-server="$socks" \
+            --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
             --user-data-dir="C:\\wsl-proxy-profile" \
             --no-first-run >/dev/null 2>&1 &
-        echo "[OK] Windows Chrome launched through $url (separate profile)"
+        echo "[OK] Windows Chrome launched through $socks (separate profile)"
         return
     fi
 
@@ -271,7 +330,8 @@ chrome-proxy() {
             return 1
         }
         open -n -a "Google Chrome" --args \
-            --proxy-server="$url" \
+            --proxy-server="$socks" \
+            --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
             --user-data-dir="$HOME/Library/Application Support/Google/Chrome/Profile 4" \
             --profile-directory="Default"
     else
@@ -279,11 +339,12 @@ chrome-proxy() {
         bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
         [ -n "$bin" ] || { echo "[Err] Chrome/Chromium not found on PATH"; return 1; }
         nohup "$bin" \
-            --proxy-server="$url" \
+            --proxy-server="$socks" \
+            --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
             --user-data-dir="$HOME/.config/google-chrome-vpn" \
             --no-first-run >/dev/null 2>&1 &
     fi
-    echo "[OK] Chrome launched through $url (separate profile)"
+    echo "[OK] Chrome launched through $socks (separate profile)"
 }
 
 # ============================================================
@@ -300,12 +361,12 @@ cc-help() {
     echo "  proxy-status    - Show what's running + your external IP"
     echo ""
     echo "  -- advanced: manage one piece at a time --"
-    echo "  tunnel-start    - Start the SSH tunnel (local forward to the VM proxy)"
+    echo "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)"
     echo "  tunnel-stop     - Stop the SSH tunnel"
-    echo "  proxy-on        - Set the proxy env vars only"
-    echo "  proxy-off       - Clear the proxy env vars only"
+    echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
+    echo "  proxy-off       - Clear proxy env vars + unsync Claude settings.json"
     echo ""
-    echo "  chrome-proxy    - Open Chrome via the proxy (auto-starts the tunnel, separate profile)"
+    echo "  chrome-proxy    - Open Chrome via SOCKS5 (auto-starts the tunnel, separate profile)"
     echo "  cc-help         - Show this list again"
     echo ""
 }
