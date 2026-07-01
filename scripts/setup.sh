@@ -47,6 +47,41 @@ echo ""
 echo "=== Claude proxy setup wizard (macOS / Linux) ==="
 echo ""
 
+# --- 0. Client dependencies ------------------------------------------------
+# jq   - keeps the proxy in sync in ~/.claude/settings.json (settings.json sync)
+# lsof - the cc profile uses it to detect / tear down the tunnel ports
+ensure_deps() {
+    local missing=()
+    command -v jq   >/dev/null 2>&1 || missing+=(jq)
+    command -v lsof >/dev/null 2>&1 || missing+=(lsof)
+    if [ ${#missing[@]} -eq 0 ]; then
+        echo "[OK] Dependencies present: jq, lsof"
+        return
+    fi
+
+    echo "[Deps] Installing: ${missing[*]}"
+    if [ "$(uname)" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            brew install "${missing[@]}"
+        else
+            echo "[Warn] Homebrew not found - install manually: brew install ${missing[*]}"
+        fi
+    elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update -qq && sudo apt-get install -y "${missing[@]}"
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y "${missing[@]}"
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm "${missing[@]}"
+    else
+        echo "[Warn] No known package manager - install these manually: ${missing[*]}"
+    fi
+
+    # Re-check; jq is only a soft dep (sync is skipped without it), so warn, don't abort.
+    command -v jq   >/dev/null 2>&1 || echo "[Warn] jq still missing - settings.json sync will be skipped (shell env vars still work)."
+    command -v lsof >/dev/null 2>&1 || echo "[Warn] lsof still missing - 'cc' can't manage the tunnel ports until it's installed."
+}
+ensure_deps
+
 # --- 1. Collect VM details -------------------------------------------------
 prompt_required "Server IP or hostname"                     SERVER_IP
 prompt_required "SSH username"                              SSH_USER
