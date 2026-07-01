@@ -1,13 +1,13 @@
 # ============================================================
-# PowerShell Profile - SSH Tunnel (local forward) + HTTP Proxy + Claude
+# PowerShell Profile - SSH Tunnel + HTTP proxy (Claude) + SOCKS5 (Chrome)
 # ============================================================
-# Traffic flow:
-#   claude --HTTPS_PROXY--> 127.0.0.1:8080 --ssh -L--> VM tinyproxy:8888 --> API
+# One SSH connection carries two forwards:
+#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude (HTTPS_PROXY)
+#   -D 1080                 ->  SOCKS5 on the VM              ->  used by Chrome / other apps
 #
-# The VM runs an HTTP proxy bound to loopback (see the webproxy-manager tool:
-# https://github.com/crayonluffy/forge/tree/main/webproxy-manager). This profile
-# just forwards a local port to it with `ssh -L`. No SOCKS, no http-proxy-to-socks
-# bridge, no Node dependency for the proxy.
+# Claude Code only speaks HTTP proxies, so it uses the -L forward to the VM's HTTP
+# proxy (see webproxy-manager: https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
+# Chrome is happier on SOCKS5 (full traffic, remote DNS), so it uses the -D forward.
 # ============================================================
 
 # ============================================================
@@ -19,8 +19,14 @@ $script:SSH_HOST          = "jpvpn"   # an ~/.ssh/config alias, OR a raw host/IP
 $script:SSH_USER          = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_KEY           = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_PORT          = 22
-$script:HTTP_PORT         = 8080       # local port -> forwarded to the VM's proxy
+$script:HTTP_PORT         = 8080       # local HTTP port -> forwarded to the VM proxy (Claude)
 $script:REMOTE_PROXY_PORT = 8888       # tinyproxy port on the VM (webproxy-manager)
+$script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
+
+# Also write the proxy into Claude's settings.json while the tunnel is up, so
+# `claude` launched from ANY shell uses it. Removed again on proxy-off / cc-stop.
+$script:SYNC_SETTINGS   = 1
+$script:CLAUDE_SETTINGS = Join-Path $HOME ".claude\settings.json"
 
 $script:NO_PROXY_LIST = @(
     "localhost",
@@ -47,8 +53,50 @@ function Test-Port {
     return ($null -ne $conn)
 }
 
+# --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+function _settings-sync-on {
+    if ($script:SYNC_SETTINGS -ne 1) { return }
+    $settings = $script:CLAUDE_SETTINGS
+    $url = "http://127.0.0.1:$($script:HTTP_PORT)"
+    New-Item -ItemType Directory -Force -Path (Split-Path $settings) | Out-Null
+    if (Test-Path $settings) {
+        Copy-Item $settings "$settings.bak" -Force -ErrorAction SilentlyContinue
+        try { $obj = Get-Content $settings -Raw | ConvertFrom-Json } catch {
+            Write-Host "[Warn] $settings is invalid JSON - left it untouched" -ForegroundColor Yellow
+            return
+        }
+    } else {
+        $obj = [pscustomobject]@{}
+    }
+    if ($null -eq $obj.env) {
+        $obj | Add-Member -NotePropertyName env -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+    $obj.env | Add-Member -NotePropertyName HTTPS_PROXY -NotePropertyValue $url -Force
+    $obj.env | Add-Member -NotePropertyName HTTP_PROXY  -NotePropertyValue $url -Force
+    $obj.env | Add-Member -NotePropertyName NO_PROXY    -NotePropertyValue $script:NO_PROXY_LIST -Force
+    $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
+    Write-Host "[OK] Proxy written into $settings (env block)" -ForegroundColor Green
+}
+
+function _settings-sync-off {
+    if ($script:SYNC_SETTINGS -ne 1) { return }
+    $settings = $script:CLAUDE_SETTINGS
+    if (-not (Test-Path $settings)) { return }
+    Copy-Item $settings "$settings.bak" -Force -ErrorAction SilentlyContinue
+    try { $obj = Get-Content $settings -Raw | ConvertFrom-Json } catch { return }
+    if ($obj.env) {
+        foreach ($k in 'HTTPS_PROXY','HTTP_PROXY','NO_PROXY') {
+            if ($obj.env.PSObject.Properties.Name -contains $k) {
+                $obj.env.PSObject.Properties.Remove($k)
+            }
+        }
+    }
+    $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
+    Write-Host "[OK] Proxy removed from $settings" -ForegroundColor Green
+}
+
 # ============================================================
-# 1. Start SSH tunnel (local forward to the VM's HTTP proxy)
+# 1. Start SSH tunnel: -L (HTTP for Claude) + -D (SOCKS5 for Chrome)
 # ============================================================
 
 function tunnel-start {
@@ -63,6 +111,7 @@ function tunnel-start {
         "-N",
         "-C",
         "-L", "$($script:HTTP_PORT):127.0.0.1:$($script:REMOTE_PROXY_PORT)",
+        "-D", "$($script:SOCKS_PORT)",
         "-o", "ServerAliveInterval=60",
         "-o", "ServerAliveCountMax=3",
         "-o", "ExitOnForwardFailure=yes",
@@ -85,7 +134,7 @@ function tunnel-start {
     }
     $global:SSH_TUNNEL_PID = $proc.Id
 
-    # Wait for the forwarded port to come up
+    # Wait for the forwarded HTTP port to come up
     $attempts = 0
     while (-not (Test-Port -Port $script:HTTP_PORT) -and $attempts -lt 10) {
         Start-Sleep -Milliseconds 500
@@ -93,20 +142,21 @@ function tunnel-start {
     }
 
     if (Test-Port -Port $script:HTTP_PORT) {
-        Write-Host "[OK]  SSH tunnel up: 127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT) (PID: $($proc.Id))" -ForegroundColor Green
+        Write-Host "[OK]  SSH tunnel up (PID: $($proc.Id)):" -ForegroundColor Green
+        Write-Host "       HTTP  127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT)   (Claude)" -ForegroundColor Green
+        Write-Host "       SOCKS 127.0.0.1:$($script:SOCKS_PORT)                                   (Chrome / apps)" -ForegroundColor Green
     } else {
         Write-Host "[Err] SSH tunnel failed to start within 5s" -ForegroundColor Red
         Write-Host "      Accept the host key once with 'ssh $($script:SSH_HOST)', then retry." -ForegroundColor DarkGray
     }
 }
 
-# Back-compat stubs: the separate HTTP bridge is gone - the VM runs the proxy now,
-# and 'tunnel-start' forwards straight to it.
+# Back-compat stubs: the separate HTTP bridge is gone - the VM runs the proxy now.
 function bridge-start { Write-Host "[Info] No bridge needed anymore - the VM runs the HTTP proxy; 'tunnel-start' forwards straight to it." -ForegroundColor Yellow }
 function bridge-stop  { Write-Host "[Info] No bridge to stop - the VM runs the HTTP proxy now. Use 'tunnel-stop'." -ForegroundColor Yellow }
 
 # ============================================================
-# 2. Set proxy env vars
+# 2. Set proxy env vars (+ Claude settings.json sync)
 # ============================================================
 
 function proxy-on {
@@ -118,6 +168,7 @@ function proxy-on {
     $env:no_proxy = $script:NO_PROXY_LIST
     $env:NO_PROXY = $script:NO_PROXY_LIST
     Write-Host "[OK] Env vars set: HTTPS_PROXY=$url" -ForegroundColor Green
+    _settings-sync-on
 }
 
 function proxy-off {
@@ -128,6 +179,7 @@ function proxy-off {
     $env:no_proxy = $null
     $env:NO_PROXY = $null
     Write-Host "[OK] Env vars cleared" -ForegroundColor Green
+    _settings-sync-off
 }
 
 # ============================================================
@@ -138,7 +190,7 @@ function proxy-off {
 function proxy-up {
     param([switch]$NoVerify)
 
-    # Step 1: SSH tunnel (local forward)
+    # Step 1: SSH tunnel (HTTP + SOCKS forwards)
     if (-not (Test-Port -Port $script:HTTP_PORT)) {
         tunnel-start
         if (-not (Test-Port -Port $script:HTTP_PORT)) { return $false }
@@ -146,7 +198,7 @@ function proxy-up {
         Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
     }
 
-    # Step 2: Env vars
+    # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
     # Step 3: Verify
@@ -197,12 +249,12 @@ function cc-safe { cc -Safe }
 # ============================================================
 
 function tunnel-stop {
+    # One ssh process holds both the -L and -D ports; killing it drops both.
     if ($global:SSH_TUNNEL_PID) {
         Stop-Process -Id $global:SSH_TUNNEL_PID -Force -ErrorAction SilentlyContinue
-        Write-Host "[OK] SSH tunnel stopped (PID: $global:SSH_TUNNEL_PID)" -ForegroundColor Green
+        Write-Host "[OK] SSH tunnel stopped (HTTP + SOCKS, PID: $global:SSH_TUNNEL_PID)" -ForegroundColor Green
         $global:SSH_TUNNEL_PID = $null
     } else {
-        # Try to find any ssh process listening on HTTP_PORT
         $conn = Get-NetTCPConnection -LocalPort $script:HTTP_PORT -ErrorAction SilentlyContinue
         if ($conn) {
             Stop-Process -Id $conn.OwningProcess -Force -ErrorAction SilentlyContinue
@@ -228,14 +280,18 @@ function proxy-status {
     Write-Host "=== Proxy Status ===" -ForegroundColor Cyan
     Write-Host ""
 
-    # SSH tunnel (local forward)
     if (Test-Port -Port $script:HTTP_PORT) {
-        Write-Host "[ON]  SSH tunnel    : 127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT)" -ForegroundColor Green
+        Write-Host "[ON]  HTTP tunnel   : 127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT) (Claude)" -ForegroundColor Green
     } else {
-        Write-Host "[OFF] SSH tunnel    : not running" -ForegroundColor Red
+        Write-Host "[OFF] HTTP tunnel   : not running" -ForegroundColor Red
     }
 
-    # Env vars
+    if (Test-Port -Port $script:SOCKS_PORT) {
+        Write-Host "[ON]  SOCKS tunnel  : 127.0.0.1:$($script:SOCKS_PORT) (Chrome / apps)" -ForegroundColor Green
+    } else {
+        Write-Host "[OFF] SOCKS tunnel  : not running" -ForegroundColor Red
+    }
+
     if ($env:HTTPS_PROXY) {
         Write-Host "[ON]  Env HTTPS_PROXY: $env:HTTPS_PROXY" -ForegroundColor Green
     } else {
@@ -249,7 +305,7 @@ function proxy-status {
 }
 
 # ============================================================
-# Launch Chrome through the proxy (separate, isolated profile)
+# Launch Chrome through the SOCKS5 proxy (separate, isolated profile)
 # ============================================================
 
 function chrome-proxy {
@@ -258,12 +314,12 @@ function chrome-proxy {
     if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
     if (-not (Test-Path $chrome)) { Write-Host "[Err] Chrome not found" -ForegroundColor Red; return }
 
-    # Chrome routes through the HTTP proxy, which the SSH tunnel exposes. Auto-start
-    # the tunnel if it's down (same as 'cc' step 1); bail if it still won't come up.
-    if (-not (Test-Port -Port $script:HTTP_PORT)) {
-        Write-Host "[Info] SSH tunnel (port $($script:HTTP_PORT)) not running - starting it..." -ForegroundColor Yellow
+    # Chrome routes through the SOCKS5 forward, which the SSH tunnel provides.
+    # Auto-start the tunnel if it's down; bail if it still won't come up.
+    if (-not (Test-Port -Port $script:SOCKS_PORT)) {
+        Write-Host "[Info] SSH tunnel (SOCKS port $($script:SOCKS_PORT)) not running - starting it..." -ForegroundColor Yellow
         tunnel-start
-        if (-not (Test-Port -Port $script:HTTP_PORT)) {
+        if (-not (Test-Port -Port $script:SOCKS_PORT)) {
             Write-Host "[Err] SSH tunnel could not be started - Chrome not launched. Run 'cc' to diagnose." -ForegroundColor Red
             return
         }
@@ -271,9 +327,12 @@ function chrome-proxy {
         Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
     }
 
-    $url = "http://127.0.0.1:$($script:HTTP_PORT)"
-    Write-Host "[Launch] Opening Chrome via $url (separate profile)..." -ForegroundColor Cyan
-    & $chrome --proxy-server="$url" --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+    $socks = "socks5://127.0.0.1:$($script:SOCKS_PORT)"
+    Write-Host "[Launch] Opening Chrome via $socks (separate profile)..." -ForegroundColor Cyan
+    # --host-resolver-rules routes DNS through the tunnel too (avoids DNS leaks).
+    & $chrome --proxy-server="$socks" `
+              --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
+              --user-data-dir="C:\ChromeVPNProfile" --no-first-run
 }
 
 # ============================================================
@@ -290,12 +349,12 @@ function cc-help {
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
-    Write-Host "  tunnel-start    - Start the SSH tunnel (local forward to the VM proxy)" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray
     Write-Host "  tunnel-stop     - Stop the SSH tunnel" -ForegroundColor DarkGray
-    Write-Host "  proxy-on        - Set the proxy env vars only" -ForegroundColor DarkGray
-    Write-Host "  proxy-off       - Clear the proxy env vars only" -ForegroundColor DarkGray
+    Write-Host "  proxy-on        - Set proxy env vars + sync Claude settings.json" -ForegroundColor DarkGray
+    Write-Host "  proxy-off       - Clear proxy env vars + unsync Claude settings.json" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  chrome-proxy    - Open Chrome via the proxy (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy    - Open Chrome via SOCKS5 (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
 }

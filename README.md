@@ -6,19 +6,23 @@ A minimal, copy-paste guide to connecting Anthropic's `claude` CLI through an SS
 
 ```mermaid
 flowchart LR
-    claude([claude]) -->|HTTPS_PROXY :8080| tunnel([ssh -L])
-    tunnel -->|SSH| vm([VM tinyproxy :8888])
-    vm --> api([Anthropic API])
+    claude([claude]) -->|HTTPS_PROXY :8080| httpf([ssh -L])
+    chrome([Chrome]) -->|SOCKS5 :1080| socksf([ssh -D])
+    httpf -->|SSH| vm([VM tinyproxy :8888])
+    socksf -->|SSH| vm
+    vm --> api([Anthropic API / web])
 ```
 
 After a one-time setup you just type **`cc`** and all of that happens automatically.
 
-> **Server side (one-time):** the VM runs a small HTTP proxy bound to loopback —
-> set it up with [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
-> The client just forwards a local port to it with `ssh -L`, so there's **no
-> SOCKS proxy and no `http-proxy-to-socks` bridge** on your machine anymore.
-> ([Claude Code doesn't support SOCKS proxies](https://code.claude.com/docs/en/network-config.md),
-> so the HTTP proxy lives on the VM instead of being bridged on the client.)
+> **One tunnel, two forwards.** A single SSH connection carries both:
+> - **`-L 8080 → VM:8888`** — an HTTP proxy for **Claude** ([Claude Code doesn't
+>   support SOCKS proxies](https://code.claude.com/docs/en/network-config.md), so the HTTP proxy runs on the VM — set it up
+>   with [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager)).
+> - **`-D 1080`** — a **SOCKS5** proxy for **Chrome** / other apps (full traffic,
+>   remote DNS). SOCKS needs nothing on the VM — plain `ssh -D`.
+>
+> No client-side `http-proxy-to-socks` bridge anymore.
 
 ## ⚠️ Prerequisites
 
@@ -84,8 +88,8 @@ claude --version
 
 Set up a shell profile **once**, then a single **`cc`** command:
 
-1. starts the **SSH tunnel** in the background (local forward `127.0.0.1:8080` → the VM's HTTP proxy on `:8888`),
-2. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables,
+1. starts the **SSH tunnel** in the background — `-L 8080` → the VM's HTTP proxy (Claude) **and** `-D 1080` SOCKS5 (Chrome),
+2. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables, and syncs them into Claude's `settings.json` (so `claude` works from any shell; removed again on `cc-stop`),
 3. verifies your external IP, then launches **Claude**.
 
 It reuses anything already running instead of starting duplicates, and `cc-stop` tears it all back down.
@@ -97,10 +101,18 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 | `proxy-up` | Same setup as `cc` (tunnel + env vars + verify) but stops short of launching Claude |
 | `cc-stop` | Stop the tunnel and clear the proxy env vars |
 | `proxy-status` | Show what's running and your current external IP |
-| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel (local forward to the VM proxy) |
-| `proxy-on` / `proxy-off` | Set / clear the proxy env vars only |
-| `chrome-proxy` | Open Chrome routed through the proxy — auto-starts the tunnel it needs first (separate, isolated profile) |
+| `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel (`-L` HTTP for Claude + `-D` SOCKS5 for Chrome) |
+| `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
+| `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy — auto-starts the tunnel it needs first (separate, isolated profile) |
 | `cc-help` | Print this command list (it also prints when a new shell/profile loads) |
+
+> **Proxy in Claude's `settings.json`:** while the proxy is on, the script also writes
+> `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` into `~/.claude/settings.json`'s `env` block, so
+> `claude` picks up the proxy even when launched from a shell that never ran `cc` (an IDE,
+> a GUI, another terminal). `cc-stop` / `proxy-off` removes exactly those keys again, so a
+> down tunnel never leaves Claude pointed at a dead proxy. It only touches those three keys
+> and needs [`jq`](https://jqlang.github.io/jq/) (macOS/Linux); if `jq` is missing it skips
+> the file and relies on shell env vars. Set `CLAUDE_SYNC_SETTINGS=0` to turn it off.
 
 ---
 
@@ -217,8 +229,10 @@ $script:SSH_HOST          = "jpvpn"   # the alias from Step 1 (or a raw host/IP)
 $script:SSH_USER          = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_KEY           = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_PORT          = 22
-$script:HTTP_PORT         = 8080       # local port -> forwarded to the VM proxy
+$script:HTTP_PORT         = 8080       # local HTTP port -> forwarded to the VM proxy (Claude)
 $script:REMOTE_PROXY_PORT = 8888       # tinyproxy port on the VM (webproxy-manager)
+$script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
+$script:SYNC_SETTINGS     = 1          # also write the proxy into ~/.claude/settings.json; 0 to disable
 # Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
 ```
 
@@ -361,8 +375,10 @@ export CLAUDE_SSH_HOST="jpvpn"          # the alias from Step 1 (or a raw host/I
 export CLAUDE_SSH_USER=""               # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_KEY=""                # leave blank when CLAUDE_SSH_HOST is a config alias
 export CLAUDE_SSH_PORT=22
-export CLAUDE_HTTP_PORT=8080            # local port -> forwarded to the VM proxy
+export CLAUDE_HTTP_PORT=8080            # local HTTP port -> forwarded to the VM proxy (Claude)
 export CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
+export CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
+export CLAUDE_SYNC_SETTINGS=1           # also write the proxy into ~/.claude/settings.json (needs jq); 0 to disable
 # Append corporate intranet ranges to CLAUDE_NO_PROXY if needed.
 ```
 
@@ -389,11 +405,11 @@ Host jpvpn
 
 ## 🌐 (Optional) Browse Through the Proxy
 
-With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the HTTP proxy on `127.0.0.1:8080` (the SSH tunnel), without touching your normal browsing session. Under WSL it launches **Windows** Chrome, which reaches the WSL-side port via WSL2 localhost forwarding.
+With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the **SOCKS5** proxy on `127.0.0.1:1080` (the `-D` forward), without touching your normal browsing session. SOCKS5 is used here rather than the HTTP proxy because it carries all traffic and does DNS remotely — a better fit for general browsing. Under WSL it launches **Windows** Chrome, which reaches the WSL-side SOCKS port via WSL2 localhost forwarding.
 
 > - You don't have to run `cc` first: `chrome-proxy` **auto-starts the tunnel** if it's down before launching. If the tunnel can't be started it aborts instead of opening an un-proxied browser.
 > - The separate `--user-data-dir` keeps this profile's logins, cookies, and history isolated from your everyday Chrome.
-> - No DNS-leak workaround needed: with an HTTP proxy, Chrome hands the hostname to the proxy and **DNS is resolved on the VM**, not locally.
+> - `--host-resolver-rules` is passed so **DNS is resolved through the tunnel** (no DNS leaks), not on your local machine.
 
 ---
 
@@ -408,8 +424,8 @@ Requires the SSH key + `jpvpn` alias from **Step 1** above, and the VM running [
 
 **Window 1 — SSH tunnel (keep open):**
 ```powershell
-# Forward local 8080 -> the VM's HTTP proxy on 8888
-ssh jpvpn -N -C -L 8080:127.0.0.1:8888
+# -L 8080 -> the VM's HTTP proxy (Claude); -D 1080 -> SOCKS5 (Chrome)
+ssh jpvpn -N -C -L 8080:127.0.0.1:8888 -D 1080
 ```
 
 **Window 2 — run Claude:**
@@ -435,8 +451,8 @@ Requires the VM running [`webproxy-manager`](https://github.com/crayonluffy/forg
 
 **Terminal 1 — tunnel (keep open):**
 ```bash
-# Forward local 8080 -> the VM's HTTP proxy on 8888
-ssh -i ~/.ssh/<your-key> -N -C -L 8080:127.0.0.1:8888 <your-ssh-user>@<your-gcp-hostname>
+# -L 8080 -> the VM's HTTP proxy (Claude); -D 1080 -> SOCKS5 (Chrome)
+ssh -i ~/.ssh/<your-key> -N -C -L 8080:127.0.0.1:8888 -D 1080 <your-ssh-user>@<your-gcp-hostname>
 ```
 
 **Terminal 2 — run Claude:**
