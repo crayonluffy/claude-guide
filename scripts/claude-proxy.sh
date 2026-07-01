@@ -211,6 +211,28 @@ proxy-off() {
     _claude_settings_proxy_off
 }
 
+# --- Confirm the external IP really is the proxy's (VM's), not the client's ---
+_verify_proxy_ip() {
+    echo "[Check] Verifying the external IP is the proxy's..."
+    local proxied direct
+    # THROUGH the proxy (explicit -x, doesn't depend on env vars)...
+    proxied=$(curl -s --max-time 10 -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" https://ipinfo.io/ip 2>/dev/null)
+    # ...vs. straight out (bypassing any proxy).
+    direct=$(curl -s --max-time 10 --noproxy '*' https://ipinfo.io/ip 2>/dev/null)
+
+    if [ -z "$proxied" ]; then
+        echo "[FAIL] Could not fetch your IP THROUGH the proxy - the proxy isn't working."
+        echo "       Run 'proxy-doctor'; check the VM with 'webproxy-status'."
+        return 1
+    fi
+    if [ -n "$direct" ] && [ "$proxied" = "$direct" ]; then
+        echo "[WARN] IP via proxy ($proxied) == your direct IP - traffic is NOT going through the VM!"
+        echo "       (Only OK if the client and VM genuinely share this IP.)"
+        return 1
+    fi
+    echo "[OK]  External IP via proxy: $proxied  (your direct IP: ${direct:-unknown})"
+}
+
 # ============================================================
 # Bring the proxy stack up: tunnel + env vars + verify
 # (everything 'cc' does EXCEPT launching Claude)
@@ -236,12 +258,9 @@ proxy-up() {
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
-    # Step 3: Verify
+    # Step 3: Verify the external IP really is the proxy's (VM's), not yours
     if [ $no_verify -eq 0 ]; then
-        echo "[Check] Verifying IP via proxy..."
-        local ip
-        ip=$(curl -s --max-time 5 ipinfo.io)
-        [ -n "$ip" ] && echo "$ip" | head -5
+        _verify_proxy_ip
     fi
 
     echo "[OK]  Proxy ready in this shell - run 'claude' yourself, or 'cc-stop' to tear it down."
