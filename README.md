@@ -112,8 +112,9 @@ It reuses anything already running instead of starting duplicates, and `cc-stop`
 > `claude` picks up the proxy even when launched from a shell that never ran `cc` (an IDE,
 > a GUI, another terminal). `cc-stop` / `proxy-off` removes exactly those keys again, so a
 > down tunnel never leaves Claude pointed at a dead proxy. It only touches those three keys
-> and needs [`jq`](https://jqlang.github.io/jq/) (macOS/Linux); if `jq` is missing it skips
-> the file and relies on shell env vars. Set `CLAUDE_SYNC_SETTINGS=0` to turn it off.
+> and needs [`jq`](https://jqlang.github.io/jq/) (macOS/Linux) — the setup wizard installs it
+> (and `lsof`) for you; if `jq` is missing it just skips the file and relies on shell env vars.
+> Set `CLAUDE_SYNC_SETTINGS=0` to turn it off.
 
 > **When something's off, run `proxy-doctor` first.** It checks each part in turn — `jq`/`lsof`
 > present, both tunnel ports listening (and held by the *same* process — a mismatch flags a
