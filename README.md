@@ -90,7 +90,7 @@ Set up a shell profile **once**, then a single **`cc`** command:
 
 1. starts the **SSH tunnel** in the background — `-L 8080` → the VM's HTTP proxy (Claude) **and** `-D 1080` SOCKS5 (Chrome),
 2. sets the `HTTP(S)_PROXY` / `NO_PROXY` environment variables, and syncs them into Claude's `settings.json` (so `claude` works from any shell; removed again on `cc-stop`),
-3. verifies your external IP, then launches **Claude**.
+3. verifies your external IP **is actually the proxy's** (not your own), then launches **Claude**.
 
 It reuses anything already running instead of starting duplicates, and `cc-stop` tears it all back down.
 
@@ -145,6 +145,7 @@ cc-safe         # same, but keeps Claude's permission prompts
 proxy-up        # turn the proxy ON, but DON'T launch Claude
 cc-stop         # turn the proxy OFF (stop everything)
 proxy-status    # show what's running + your external IP
+proxy-doctor    # diagnose problems (what's broken + how to fix)
 
 # Advanced — manage one piece at a time:
 tunnel-start    # start the SSH tunnel only
@@ -285,6 +286,7 @@ cc-safe         # same, but keeps Claude's permission prompts
 proxy-up        # turn the proxy ON, but DON'T launch Claude
 cc-stop         # turn the proxy OFF (stop everything)
 proxy-status    # show what's running + your external IP
+proxy-doctor    # diagnose problems (what's broken + how to fix)
 
 # Advanced — manage one piece at a time:
 tunnel-start    # start the SSH tunnel only
