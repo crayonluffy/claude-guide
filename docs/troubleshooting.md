@@ -2,9 +2,9 @@
 
 **Start here: run `proxy-doctor`.** It checks each part in turn — `jq`/`lsof`/`codex` present, both tunnel ports listening (and held by the *same* `ssh` process — a mismatch flags a stale leftover, a non-ssh owner flags a port conflict), your shell env vars, whether `settings.json` has the proxy, and finally whether the API is actually reachable *through* the proxy — printing an `[ OK ]` / `[WARN]` / `[FAIL]` line with a concrete fix for each.
 
-**Stale tunnels self-heal.** `cc` / `cx` / `tunnel-start` check the *health* of whatever holds the tunnel port, not just that the port is busy: a healthy tunnel is reused, a **stale ssh** (dropped connection, missing SOCKS forward) is killed and restarted automatically, and a **foreign app** squatting the port is reported by name — it is never killed for you; close it or change the port in the profile settings.
+**Stale tunnels self-heal.** `cc` / `cx` / `tunnel-start` check the *health* of whatever holds the tunnel port, not just that the port is busy: a healthy tunnel is reused (even one running on a fallback port from an earlier shell), a **stale ssh** (dropped connection, missing SOCKS forward) is killed and restarted automatically, and a **foreign app** on the port is left alone — the tunnel simply falls back to the next free port (`8081`, `8082`, …) and every downstream piece (env vars, `settings.json`, status, doctor) follows it.
 
-If a teardown ever looks stuck, `cc-stop` kills every process on both ports, escalates to `kill -9`, and tells you if anything survived (and how to inspect it) instead of falsely reporting success.
+If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both ports (other apps are reported and left alone), escalates to `kill -9`, and tells you if an ssh survived (and how to inspect it) instead of falsely reporting success.
 
 ---
 
@@ -18,7 +18,7 @@ If a teardown ever looks stuck, `cc-stop` kills every process on both ports, esc
 | Tunnel comes up but Claude/Codex can't reach the API | Confirm the VM runs [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `:8888`), and that `NO_PROXY_LIST` does **not** include `api.anthropic.com`. |
 | `cx` says `'codex' not found` | Install it: [Install Codex](install-codex.md). On Windows, Codex is happiest under WSL. |
 | Wizard: `[FAIL] Could not write the profile` / `Access denied` on Documents | Windows blocked PowerShell from writing into Documents — usually Defender's **Controlled folder access** (Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell), or OneDrive/company policy locking the folder. The wizard saves your configured profile to `%TEMP%\Microsoft.PowerShell_profile.ps1` and prints the exact `Copy-Item` command to finish once access is fixed. |
-| `cc` says port 8080 `is taken by '<app>'` | Another program (dev server, Docker, emulator…) is using the tunnel's local port. Close it, or change `$script:HTTP_PORT` at the top of `$PROFILE` to a free port (e.g. `18080`) and run `cc` again. |
+| `cc` says port 8080 `is used by '<app>' … leaving it alone` | Not an error — another program (dev server, Docker, emulator…) has the port, so the tunnel automatically uses the next free one (`8081`, …). To make that permanent, change `$script:HTTP_PORT` at the top of `$PROFILE`. |
 | `proxy-status` shows `Tunnel BROKEN : stale ssh` | A leftover ssh from a dropped connection. Just run `cc` — it kills the stale ssh and starts a fresh tunnel automatically. |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 
@@ -34,7 +34,7 @@ If a teardown ever looks stuck, `cc-stop` kills every process on both ports, esc
 | **WSL:** `cc`/`cx` returns immediately, no tunnel | A backgrounded `ssh -f` can't answer a passphrase prompt, and WSL has no persistent ssh-agent. The script auto-starts one; if it still fails, run `ssh-add ~/.ssh/<your-key>` once, or enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`). |
 | `cc`/`cx` exits before launching the app | The tunnel didn't bind. Accept the host key once with `ssh jpvpn`, then retry. |
 | `cx` says `'codex' not found` | Install it: [Install Codex](install-codex.md). |
-| `cc` says port 8080 `is taken by '<app>'` | Another program is using the tunnel's local port. Close it, or change `CLAUDE_HTTP_PORT` in `~/.claude-proxy.sh` to a free port and run `cc` again. |
+| `cc` says port 8080 `is used by '<app>' … leaving it alone` | Not an error — another program has the port, so the tunnel automatically uses the next free one (`8081`, …). To make that permanent, change `CLAUDE_HTTP_PORT` in `~/.claude-proxy.sh`. |
 | `proxy-status` shows `Tunnel BROKEN : stale ssh` | A leftover ssh from a dropped connection. Just run `cc` — it kills the stale ssh and starts a fresh tunnel automatically. |
 | Tunnel up but Claude can't reach the API | Confirm `CLAUDE_NO_PROXY` does **not** contain `api.anthropic.com`, and that tinyproxy allows CONNECT to 443 (it does by default). |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard to redo it cleanly: `bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)` |

@@ -37,6 +37,6 @@ cc-stop              # the new hardened teardown frees whatever the old tunnel/b
 cc
 ```
 
-Your SSH key and `~/.ssh/config` alias carry over — nothing to redo there. If `cc` reports a port already in use, that's a leftover old process: `cc-stop` kills everything on both ports, then run `cc` again. The wizard fully overwrites `~/.claude-proxy.sh`, so old settings don't linger — and the `-D 1080` SOCKS forward still exists (now used by `chrome-proxy`).
+Your SSH key and `~/.ssh/config` alias carry over — nothing to redo there. Leftover old processes are handled automatically: `cc` kills a stale ssh and restarts the tunnel by itself, and if some other app owns the port it just uses the next free one. The wizard fully overwrites `~/.claude-proxy.sh`, so old settings don't linger — and the `-D 1080` SOCKS forward still exists (now used by `chrome-proxy`).
 
 > **Bonus after upgrading:** the refreshed profile also includes **`cx`** — the same one-command launch for [Codex](install-codex.md).

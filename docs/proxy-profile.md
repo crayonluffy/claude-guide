@@ -21,12 +21,12 @@ It reuses anything already running instead of starting duplicates.
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals a stale tunnel: a dead/leftover ssh on the port is killed and restarted; a foreign app on the port is reported by name, never killed |
+| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals: a dead/leftover ssh is killed and restarted; if another app has the port, it's left alone and the tunnel uses the next free port (`8081`, …) automatically |
 | `cc-safe` | Same, but keeps Claude's permission prompts |
 | `cx` | Proxy ON + launch **Codex** (approvals off) |
 | `cx-safe` | Same, but keeps Codex's approval prompts |
 | `proxy-up` | Proxy ON (tunnel + env vars + verify), but don't launch anything |
-| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills everything on both ports and reports honestly |
+| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly |
 | `proxy-status` | Show what's running + your current external IP |
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |

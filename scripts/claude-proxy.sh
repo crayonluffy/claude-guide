@@ -41,17 +41,54 @@ _port_in_use() {
     lsof -ti:"$1" -sTCP:LISTEN >/dev/null 2>&1
 }
 
+# First free port at or after $1 (fails if none within 20).
+_find_free_port() {
+    local p=$1 end=$(( $1 + 20 ))
+    while [ "$p" -lt "$end" ]; do
+        if ! lsof -ti:"$p" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$p"
+            return 0
+        fi
+        p=$((p+1))
+    done
+    return 1
+}
+
 # Classify what holds the tunnel ports, so callers can HEAL instead of guessing.
-# Prints: "ok|down|stale|foreign [pid] [command]"
-#   ok      - one ssh process listens on BOTH ports (healthy tunnel)
-#   down    - nothing listens on the HTTP port
-#   stale   - ssh holds the HTTP port but the tunnel is broken (SOCKS missing,
-#             different PIDs, or multiple listeners) - safe to kill and restart
-#   foreign - a NON-ssh app holds the HTTP port - never killed automatically
+# Prints: "ok|down|stale|foreign [pid] [command] [http_port]"
+#   ok      - our ssh tunnel is up; the 4th field is where the HTTP forward
+#             actually listens (may be a fallback port like 8081)
+#   down    - no tunnel, configured HTTP port is free
+#   stale   - a broken leftover ssh holds a tunnel port - safe to kill/restart
+#   foreign - a NON-ssh app holds the HTTP port - never killed; callers fall
+#             back to another port instead
+# Anchored on the SOCKS port: its ssh owner identifies OUR tunnel even when the
+# HTTP forward went to a fallback port in an earlier shell.
 _tunnel_health() {
-    local http_pids socks_pids pid name
-    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" -sTCP:LISTEN 2>/dev/null)
+    local socks_pids http_pids pid name other
     socks_pids=$(lsof -ti:"$CLAUDE_SOCKS_PORT" -sTCP:LISTEN 2>/dev/null)
+    if [ -n "$socks_pids" ] && [ "$(echo "$socks_pids" | wc -l)" -eq 1 ]; then
+        pid=$socks_pids
+        name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
+        case "$name" in
+            ssh|*/ssh)
+                other=$(lsof -aPn -p "$pid" -iTCP -sTCP:LISTEN -Fn 2>/dev/null \
+                        | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u \
+                        | grep -vx "$CLAUDE_SOCKS_PORT")
+                if [ "$(echo "$other" | sed '/^$/d' | wc -l)" -eq 1 ]; then
+                    echo "ok $pid $name $other"
+                elif echo "$other" | grep -qx "$CLAUDE_HTTP_PORT"; then
+                    echo "ok $pid $name $CLAUDE_HTTP_PORT"
+                else
+                    echo "stale $pid $name"
+                fi
+                return
+                ;;
+        esac
+    fi
+
+    # No healthy ssh anchor - classify whatever sits on the configured HTTP port.
+    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" -sTCP:LISTEN 2>/dev/null)
     if [ -z "$http_pids" ]; then
         echo "down"
         return
@@ -59,14 +96,8 @@ _tunnel_health() {
     pid=$(echo "$http_pids" | head -1)
     name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
     case "$name" in
-        ssh|*/ssh)
-            if [ "$http_pids" = "$socks_pids" ] && [ "$(echo "$http_pids" | wc -l)" -eq 1 ]; then
-                echo "ok $pid $name"
-            else
-                echo "stale $pid $name"
-            fi
-            ;;
-        *)  echo "foreign $pid ${name:-unknown}" ;;
+        ssh|*/ssh) echo "stale $pid $name" ;;
+        *)         echo "foreign $pid ${name:-unknown}" ;;
     esac
 }
 
@@ -132,32 +163,53 @@ _claude_settings_proxy_off() {
 # ============================================================
 
 tunnel-start() {
-    # Auto-heal: a HEALTHY tunnel is left alone, a STALE ssh is killed and
-    # replaced, and a FOREIGN app on the port is reported by name (never killed).
-    local health status hpid hname
+    # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
+    # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
+    # port - the tunnel simply falls back to the next free port instead.
+    local health status hpid hname hport newp
     health=$(_tunnel_health)
     status=$(echo "$health" | awk '{print $1}')
     hpid=$(echo "$health" | awk '{print $2}')
     hname=$(echo "$health" | awk '{print $3}')
+    hport=$(echo "$health" | awk '{print $4}')
     case "$status" in
         ok)
-            echo "[OK]  SSH tunnel already running (PID $hpid)"
+            if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
+                export CLAUDE_HTTP_PORT=$hport
+                echo "[OK]  SSH tunnel already running (PID $hpid) on fallback port $hport - using it"
+            else
+                echo "[OK]  SSH tunnel already running (PID $hpid)"
+            fi
             return 0
             ;;
         stale)
-            echo "[Heal] Stale ssh tunnel on port $CLAUDE_HTTP_PORT (PID $hpid) - killing it and starting fresh..."
+            echo "[Heal] Stale ssh tunnel (PID $hpid) - killing it and starting fresh..."
             tunnel-stop
-            if _port_in_use "$CLAUDE_HTTP_PORT"; then
-                echo "[Err] Port $CLAUDE_HTTP_PORT is still busy after cleanup - run 'proxy-doctor'."
-                return 1
-            fi
             ;;
         foreign)
-            echo "[Err] Port $CLAUDE_HTTP_PORT is taken by '$hname' (PID $hpid) - that is NOT the tunnel, so it won't be killed automatically."
-            echo "      Close that app (or: kill $hpid), or change CLAUDE_HTTP_PORT in the profile, then retry."
-            return 1
+            echo "[Info] Port $CLAUDE_HTTP_PORT is used by '$hname' (PID $hpid) - that's another app, leaving it alone."
+            if ! newp=$(_find_free_port $((CLAUDE_HTTP_PORT+1))); then
+                echo "[Err] No free port found in $((CLAUDE_HTTP_PORT+1))-$((CLAUDE_HTTP_PORT+20)) - free one up or change CLAUDE_HTTP_PORT."
+                return 1
+            fi
+            export CLAUDE_HTTP_PORT=$newp
+            echo "[Info] Falling back to free port $newp for the HTTP proxy (this session)."
             ;;
     esac
+
+    # The SOCKS port can be squatted by another app too (ssh owners were handled
+    # above) - fall back the same way so ExitOnForwardFailure doesn't kill ssh.
+    if _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        local spid sname snew
+        spid=$(lsof -ti:"$CLAUDE_SOCKS_PORT" -sTCP:LISTEN 2>/dev/null | head -1)
+        sname=$(ps -p "$spid" -o comm= 2>/dev/null | tr -d ' ')
+        if ! snew=$(_find_free_port $((CLAUDE_SOCKS_PORT+1))); then
+            echo "[Err] SOCKS port $CLAUDE_SOCKS_PORT is used by '$sname' and no free port found nearby."
+            return 1
+        fi
+        echo "[Info] SOCKS port $CLAUDE_SOCKS_PORT is used by '$sname' (PID $spid) - falling back to $snew."
+        export CLAUDE_SOCKS_PORT=$snew
+    fi
 
     # WSL: load the key first so 'ssh -f' won't block on a passphrase it can't answer.
     _is_wsl && _ensure_ssh_agent
@@ -193,43 +245,61 @@ tunnel-start() {
 }
 
 tunnel-stop() {
-    # Kill EVERY process listening on either forwarded port - not just the one we
-    # think we started. This catches stale tunnels and leftovers from the old
-    # SOCKS+bridge setup (where killing npx orphaned the node child on 8080).
-    local all_pids survivors=() pid cmd port still p
+    # Kill every SSH process listening on either forwarded port (ours, including
+    # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
+    # port are NOT ours - they are reported and left alone.
+    local all_pids ssh_pids="" survivors=() pid cmd port still p
 
     all_pids=$(
-        { lsof -ti:"$CLAUDE_HTTP_PORT" 2>/dev/null; lsof -ti:"$CLAUDE_SOCKS_PORT" 2>/dev/null; } \
+        { lsof -ti:"$CLAUDE_HTTP_PORT" -sTCP:LISTEN 2>/dev/null; lsof -ti:"$CLAUDE_SOCKS_PORT" -sTCP:LISTEN 2>/dev/null; } \
         | sort -u | sed '/^$/d'
     )
 
-    if [ -z "$all_pids" ]; then
-        echo "[Info] No tunnel running - ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT are already free"
+    for pid in $all_pids; do
+        cmd=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
+        case "$cmd" in
+            ssh|*/ssh|"") ssh_pids="$ssh_pids $pid" ;;
+            *) echo "[Skip] PID $pid ($cmd) on a tunnel port - another app, left alone" ;;
+        esac
+    done
+
+    if [ -z "${ssh_pids// /}" ]; then
+        echo "[Info] No tunnel running on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT"
         return 0
     fi
 
-    for pid in $all_pids; do
-        cmd=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
+    for pid in $ssh_pids; do
         kill "$pid" 2>/dev/null
-        echo "[Kill] PID $pid (${cmd:-unknown})"
+        echo "[Kill] PID $pid (ssh)"
     done
 
-    # Verify the ports actually freed; escalate to SIGKILL if a process lingers.
+    # Verify the ssh listeners are actually gone; escalate to SIGKILL if one lingers.
+    # Only SSH survivors count as failure - foreign apps are none of our business.
     sleep 0.5
     for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
-        still=$(lsof -ti:"$port" 2>/dev/null)
+        still=""
+        for p in $(lsof -ti:"$port" -sTCP:LISTEN 2>/dev/null); do
+            case "$(ps -p "$p" -o comm= 2>/dev/null | tr -d ' ')" in
+                ssh|*/ssh) still="$still $p" ;;
+            esac
+        done
         if [ -n "$still" ]; then
             for p in $still; do kill -9 "$p" 2>/dev/null; done
             sleep 0.3
-            still=$(lsof -ti:"$port" 2>/dev/null)
+            still=""
+            for p in $(lsof -ti:"$port" -sTCP:LISTEN 2>/dev/null); do
+                case "$(ps -p "$p" -o comm= 2>/dev/null | tr -d ' ')" in
+                    ssh|*/ssh) still="$still $p" ;;
+                esac
+            done
         fi
-        [ -n "$still" ] && survivors+=("$port held by PID(s) $(echo $still | tr '\n' ' ')")
+        [ -n "$still" ] && survivors+=("$port held by ssh PID(s)$still")
     done
 
     if [ ${#survivors[@]} -eq 0 ]; then
-        echo "[OK] Tunnel stopped - ports $CLAUDE_HTTP_PORT and $CLAUDE_SOCKS_PORT freed"
+        echo "[OK] Tunnel stopped"
     else
-        echo "[Err] Could not free everything (even with SIGKILL):"
+        echo "[Err] Could not stop everything (even with SIGKILL):"
         for p in "${survivors[@]}"; do echo "       $p"; done
         echo "       Inspect: lsof -i:$CLAUDE_HTTP_PORT -i:$CLAUDE_SOCKS_PORT"
         echo "       A process you don't own needs sudo; a wedged one may need a re-login."
@@ -404,14 +474,19 @@ proxy-status() {
     echo ""
     echo "=== Proxy Status ==="
     echo ""
-    local health status hpid hname
+    local health status hpid hname hport note=""
     health=$(_tunnel_health)
     status=$(echo "$health" | awk '{print $1}')
     hpid=$(echo "$health" | awk '{print $2}')
     hname=$(echo "$health" | awk '{print $3}')
+    hport=$(echo "$health" | awk '{print $4}')
     case "$status" in
         ok)
-            echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude)"
+            if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
+                export CLAUDE_HTTP_PORT=$hport
+                note=" [fallback port]"
+            fi
+            echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude)$note"
             echo "[ON]  SOCKS tunnel  : 127.0.0.1:$CLAUDE_SOCKS_PORT (Chrome / apps)"
             ;;
         down)
@@ -419,11 +494,11 @@ proxy-status() {
             echo "[OFF] SOCKS tunnel  : not running"
             ;;
         stale)
-            echo "[!!]  Tunnel BROKEN : stale ssh (PID $hpid) holds port $CLAUDE_HTTP_PORT - run 'cc' to auto-heal (or 'cc-stop')"
+            echo "[!!]  Tunnel BROKEN : stale ssh (PID $hpid) - run 'cc' to auto-heal (or 'cc-stop')"
             ;;
         foreign)
-            echo "[!!]  Port conflict : '$hname' (PID $hpid) occupies port $CLAUDE_HTTP_PORT - the tunnel is NOT running"
-            echo "      Close that app or change CLAUDE_HTTP_PORT in the profile, then run 'cc'."
+            echo "[!!]  No tunnel     : port $CLAUDE_HTTP_PORT is used by '$hname' (PID $hpid)"
+            echo "      Run 'cc' - it leaves that app alone and uses the next free port automatically."
             ;;
     esac
 
@@ -466,9 +541,20 @@ proxy-doctor() {
     fi
 
     # --- tunnel / ports ---
+    # If the tunnel runs on a fallback port (configured one was busy), adopt it
+    # so every check below looks at the right port.
+    local dhealth dstatus dport
+    dhealth=$(_tunnel_health)
+    dstatus=$(echo "$dhealth" | awk '{print $1}')
+    dport=$(echo "$dhealth" | awk '{print $4}')
+    if [ "$dstatus" = "ok" ] && [ -n "$dport" ] && [ "$dport" != "$CLAUDE_HTTP_PORT" ]; then
+        export CLAUDE_HTTP_PORT=$dport
+        echo "$ok  Tunnel runs on fallback port $dport (configured port was busy) - checks use it"
+    fi
+
     local http_pids socks_pids http_pid socks_pid
-    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" 2>/dev/null)
-    socks_pids=$(lsof -ti:"$CLAUDE_SOCKS_PORT" 2>/dev/null)
+    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" -sTCP:LISTEN 2>/dev/null)
+    socks_pids=$(lsof -ti:"$CLAUDE_SOCKS_PORT" -sTCP:LISTEN 2>/dev/null)
     http_pid=$(echo "$http_pids" | head -1)
     socks_pid=$(echo "$socks_pids" | head -1)
 
@@ -492,7 +578,7 @@ proxy-doctor() {
         http_owner=$(ps -p "$http_pid" -o comm= 2>/dev/null | tr -d ' ')
         case "$http_owner" in
             ssh|*/ssh|"") ;;
-            *) echo "$bad Port $CLAUDE_HTTP_PORT is held by '$http_owner' (PID $http_pid) - NOT an ssh tunnel. Close that app or change CLAUDE_HTTP_PORT." ;;
+            *) echo "$bad Port $CLAUDE_HTTP_PORT is held by '$http_owner' (PID $http_pid) - NOT an ssh tunnel. Fix: run 'cc' - it uses the next free port automatically." ;;
         esac
     fi
     # More than one PID on a single port is also a leftover.
