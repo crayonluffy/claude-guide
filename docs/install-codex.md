@@ -54,7 +54,7 @@ Launch Codex through the proxy — on a blocked network a plain `codex` can't re
 cx
 ```
 
-On first run it asks how to sign in — choose **Sign in with ChatGPT** (uses your ChatGPT Plus/Pro/Team plan; a browser window opens). If the browser page won't load either, open the URL via `chrome-proxy` (the browser doesn't use the tunnel automatically).
+On first run it asks how to sign in — choose **Sign in with ChatGPT** (uses your ChatGPT Plus/Pro/Team plan; a browser window opens). If the browser page won't load either, open the URL via `chrome-proxy` (the browser doesn't use the tunnel automatically) — or use the copy-paste Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
 
 **Alternative — API key:** if you use OpenAI platform billing instead of a ChatGPT plan, follow the API-key option in the sign-in prompt (or see the [Codex docs](https://developers.openai.com/codex/) for the current flow).
 

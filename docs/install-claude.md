@@ -109,7 +109,7 @@ cc
 
 On first run it walks you through signing in with your Anthropic account (a browser window opens). After that, you're in.
 
-> **Browser page won't load either?** The sign-in happens in your browser, which doesn't use the tunnel automatically. Open the sign-in URL in a proxied browser instead: run `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there.
+> **Browser page won't load either?** The sign-in happens in your browser, which doesn't use the tunnel automatically. Open the sign-in URL in a proxied browser instead: run `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there — or use the copy-paste Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
 
 > On an unrestricted network you can simply run `claude` directly instead.
 

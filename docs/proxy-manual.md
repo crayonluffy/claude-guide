@@ -138,6 +138,41 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 ---
 
+## 🌐 (Optional) Browse through the proxy (Chrome)
+
+Your Step-1 tunnel already carries a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). This opens a **separate** Chrome through it — isolated profile, DNS through the tunnel, your normal browser untouched. Handy when a sign-in page (Anthropic/OpenAI OAuth) won't load in your regular browser.
+
+**🪟 Windows (PowerShell)**
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+    --proxy-server="socks5://127.0.0.1:1080" `
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
+    --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+**🍎 macOS**
+
+```bash
+open -n -a "Google Chrome" --args \
+    --proxy-server="socks5://127.0.0.1:1080" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --user-data-dir="$HOME/.chrome-proxy-profile" --no-first-run
+```
+
+**🐧 Linux** (use `chromium` if you don't have `google-chrome`)
+
+```bash
+google-chrome \
+    --proxy-server="socks5://127.0.0.1:1080" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --user-data-dir="$HOME/.config/google-chrome-vpn" --no-first-run &
+```
+
+**🐧 WSL:** run the **Windows PowerShell** command — WSL2 forwards `127.0.0.1:1080` to Windows automatically.
+
+---
+
 ## Didn't work?
 
 | Symptom | Most likely cause → fix |

@@ -342,6 +342,39 @@ Host jpvpn
 
 With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the **SOCKS5** proxy on `127.0.0.1:1080`, without touching your normal browsing session. It auto-starts the tunnel if needed, keeps a separate `--user-data-dir` (isolated logins/cookies/history), and resolves DNS through the tunnel (no DNS leaks). Under WSL it launches **Windows** Chrome.
 
+No profile, or want the raw command? These are the equivalent copy-paste commands. The **tunnel must already be up** (`proxy-up`, or the manual Step-1 `ssh` command — that's what provides the `-D 1080` SOCKS forward):
+
+**🪟 Windows (PowerShell)**
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
+    --proxy-server="socks5://127.0.0.1:1080" `
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
+    --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+```
+
+**🍎 macOS**
+
+```bash
+open -n -a "Google Chrome" --args \
+    --proxy-server="socks5://127.0.0.1:1080" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --user-data-dir="$HOME/.chrome-proxy-profile" --no-first-run
+```
+
+**🐧 Linux** (use `chromium` if you don't have `google-chrome`)
+
+```bash
+google-chrome \
+    --proxy-server="socks5://127.0.0.1:1080" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --user-data-dir="$HOME/.config/google-chrome-vpn" --no-first-run &
+```
+
+**🐧 WSL:** run the **Windows PowerShell** command above — WSL2 forwards `127.0.0.1:1080` to Windows automatically (or just use `chrome-proxy`, which finds Windows Chrome for you).
+
+What the flags do: `--proxy-server` sends all traffic through the SOCKS5 forward; `--host-resolver-rules` forces **DNS** through the tunnel too (no DNS leaks); `--user-data-dir` keeps this Chrome a **separate profile**, so your normal browser session is untouched. If port `1080` was busy and the tunnel fell back to another SOCKS port, `proxy-status` shows the actual port — adjust the command to match.
+
 ---
 
 ## Next →
