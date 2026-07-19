@@ -13,6 +13,17 @@
 $ErrorActionPreference = 'Stop'
 $repoRaw = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 
+# Any unexpected error: say WHAT failed and WHERE, instead of dying with a bare
+# one-line exception (the wizard runs via 'irm | iex', so users can't see a stack).
+trap {
+    Write-Host ""
+    Write-Host "[FAIL] Setup stopped unexpectedly." -ForegroundColor Red
+    Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "       Where: $("$($_.InvocationInfo.PositionMessage)".Trim())" -ForegroundColor DarkGray
+    Write-Host "       Fix the cause above and re-run the wizard - it is safe to run again." -ForegroundColor Yellow
+    break
+}
+
 function Read-Required($prompt) {
     do { $v = (Read-Host $prompt).Trim() } while (-not $v)
     return $v
@@ -106,16 +117,49 @@ try {
 } catch {
     Write-Host "[Warn] Could not set execution policy (managed by group policy?). The profile may not auto-load in new windows." -ForegroundColor Yellow
 }
-if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
-Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/Microsoft.PowerShell_profile.ps1" -OutFile $PROFILE
-Unblock-File -Path $PROFILE
+# Download + patch in TEMP first, then install with ONE copy into $PROFILE -
+# so a locked/blocked Documents folder fails in exactly one place, with a clear
+# diagnosis and a rescue copy the user can install by hand.
+$tmpProfile = Join-Path $env:TEMP 'Microsoft.PowerShell_profile.ps1'
+try {
+    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/Microsoft.PowerShell_profile.ps1" -OutFile $tmpProfile
+} catch {
+    Write-Host "[FAIL] Could not download the profile from GitHub." -ForegroundColor Red
+    Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "       Check your network / corporate proxy, then re-run the wizard." -ForegroundColor Yellow
+    return
+}
 # Patch the Settings block so the profile matches the answers above.
-$raw = Get-Content $PROFILE -Raw
+$raw = Get-Content $tmpProfile -Raw
 $raw = $raw -replace '(?m)^(\$script:SSH_HOST\s*=\s*)"[^"]*"',        ('$1"' + $Alias + '"')
 $raw = $raw -replace '(?m)^(\$script:SSH_PORT\s*=\s*)\d+',           ('${1}' + $SshPort)
 $raw = $raw -replace '(?m)^(\$script:REMOTE_PROXY_PORT\s*=\s*)\d+',  ('${1}' + $ProxyPort)
-Set-Content -Path $PROFILE -Value $raw -Encoding utf8
-Write-Host "[OK] Profile installed: $PROFILE" -ForegroundColor Green
+Set-Content -Path $tmpProfile -Value $raw -Encoding utf8
+
+$profileInstalled = $false
+try {
+    $profileDir = Split-Path $PROFILE
+    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
+    Copy-Item -LiteralPath $tmpProfile -Destination $PROFILE -Force
+    Unblock-File -Path $PROFILE -ErrorAction SilentlyContinue
+    Write-Host "[OK] Profile installed: $PROFILE" -ForegroundColor Green
+    $profileInstalled = $true
+} catch {
+    Write-Host "[FAIL] Could not write the profile to: $PROFILE" -ForegroundColor Red
+    Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
+    # Type check, not message text - "access denied" is localized on non-English Windows.
+    if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception -is [System.IO.IOException] -or $_.Exception.Message -match 'denied|unauthorized') {
+        Write-Host "       'Access denied' on the Documents folder is usually one of:" -ForegroundColor Yellow
+        Write-Host "       1) Defender's CONTROLLED FOLDER ACCESS (ransomware protection) blocks PowerShell" -ForegroundColor Yellow
+        Write-Host "          from writing to Documents. Fix: Windows Security > Virus & threat protection >" -ForegroundColor Yellow
+        Write-Host "          Ransomware protection > 'Allow an app through Controlled folder access' > add" -ForegroundColor Yellow
+        Write-Host "          PowerShell (powershell.exe / pwsh.exe). Then re-run the wizard." -ForegroundColor Yellow
+        Write-Host "       2) Documents is locked by OneDrive or company policy (read-only sync folder)." -ForegroundColor Yellow
+    }
+    Write-Host "       Your CONFIGURED profile was saved to: $tmpProfile" -ForegroundColor Cyan
+    Write-Host "       After fixing access, finish the install with:" -ForegroundColor Cyan
+    Write-Host "           Copy-Item '$tmpProfile' `$PROFILE -Force; . `$PROFILE" -ForegroundColor White
+}
 
 # --- 6. Verify the connection ----------------------------------------------
 Write-Host ""
@@ -135,7 +179,11 @@ if ($sshOk) {
 }
 
 # --- 7. Load the profile + next steps --------------------------------------
-. $PROFILE
+if ($profileInstalled) {
+    . $PROFILE
+} else {
+    Write-Host "[Warn] Profile NOT installed (see the [FAIL] above) - 'cc'/'cx' won't exist until you finish that step." -ForegroundColor Yellow
+}
 # Non-blocking: the proxy works without these CLIs, so only hint, never abort.
 if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
     Write-Host "[Info] Claude Code CLI not installed - 'cc' needs it:  npm install -g @anthropic-ai/claude-code" -ForegroundColor Yellow

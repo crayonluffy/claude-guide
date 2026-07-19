@@ -50,8 +50,35 @@ $script:NO_PROXY_LIST = @(
 
 function Test-Port {
     param([int]$Port)
-    $conn = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+    # -State Listen: a port is only "in use" if something actually LISTENS on it.
+    # Without it, half-dead connections make a broken tunnel look alive.
+    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     return ($null -ne $conn)
+}
+
+# Classify what holds the tunnel ports, so callers can HEAL instead of guessing:
+#   ok      - one ssh process listens on BOTH ports (healthy tunnel)
+#   down    - nothing listens on the HTTP port
+#   stale   - ssh holds the HTTP port but the tunnel is broken (SOCKS missing,
+#             different PIDs, or multiple listeners) - safe to kill and restart
+#   foreign - a NON-ssh app holds the HTTP port - never killed automatically
+function Get-TunnelHealth {
+    $httpPids  = @((Get-NetTCPConnection -LocalPort $script:HTTP_PORT  -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
+    $socksPids = @((Get-NetTCPConnection -LocalPort $script:SOCKS_PORT -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
+    if (-not $httpPids) { return @{ Status = 'down' } }
+
+    $owner = Get-Process -Id $httpPids[0] -ErrorAction SilentlyContinue
+    $name  = if ($owner) { $owner.ProcessName } else { 'unknown' }
+    $info  = @{ OwnerPid = $httpPids[0]; OwnerName = $name }
+
+    if ($name -notmatch '^ssh') {
+        $info.Status = 'foreign'
+    } elseif ($httpPids.Count -eq 1 -and $socksPids.Count -eq 1 -and $httpPids[0] -eq $socksPids[0]) {
+        $info.Status = 'ok'
+    } else {
+        $info.Status = 'stale'
+    }
+    return $info
 }
 
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
@@ -101,9 +128,27 @@ function _settings-sync-off {
 # ============================================================
 
 function tunnel-start {
-    if (Test-Port -Port $script:HTTP_PORT) {
-        Write-Host "[Info] Port $($script:HTTP_PORT) already in use - tunnel may already be running" -ForegroundColor Yellow
-        return
+    # Auto-heal: a HEALTHY tunnel is left alone, a STALE ssh is killed and
+    # replaced, and a FOREIGN app on the port is reported by name (never killed).
+    $health = Get-TunnelHealth
+    switch ($health.Status) {
+        'ok' {
+            Write-Host "[OK]  SSH tunnel already running (PID $($health.OwnerPid))" -ForegroundColor DarkGreen
+            return
+        }
+        'stale' {
+            Write-Host "[Heal] Stale ssh tunnel on port $($script:HTTP_PORT) (PID $($health.OwnerPid)) - killing it and starting fresh..." -ForegroundColor Yellow
+            tunnel-stop | Out-Null
+            if (Test-Port -Port $script:HTTP_PORT) {
+                Write-Host "[Err] Port $($script:HTTP_PORT) is still busy after cleanup - run 'proxy-doctor'." -ForegroundColor Red
+                return
+            }
+        }
+        'foreign' {
+            Write-Host "[Err] Port $($script:HTTP_PORT) is taken by '$($health.OwnerName)' (PID $($health.OwnerPid)) - that is NOT the tunnel, so it won't be killed automatically." -ForegroundColor Red
+            Write-Host "      Close that app (or: Stop-Process -Id $($health.OwnerPid)), or change `$script:HTTP_PORT at the top of `$PROFILE, then retry." -ForegroundColor Yellow
+            return
+        }
     }
 
     Write-Host "[SSH] Starting tunnel to $($script:SSH_HOST)..." -ForegroundColor Cyan
@@ -191,13 +236,12 @@ function proxy-off {
 function proxy-up {
     param([switch]$NoVerify)
 
-    # Step 1: SSH tunnel (HTTP + SOCKS forwards)
-    if (-not (Test-Port -Port $script:HTTP_PORT)) {
-        tunnel-start
-        if (-not (Test-Port -Port $script:HTTP_PORT)) { return $false }
-    } else {
-        Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
-    }
+    # Step 1: SSH tunnel (HTTP + SOCKS forwards).
+    # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
+    # and refuses (with a named culprit) when a foreign app holds the port -
+    # so require actual health afterwards, not just "something is on the port".
+    tunnel-start
+    if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
 
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -337,16 +381,23 @@ function proxy-status {
     Write-Host "=== Proxy Status ===" -ForegroundColor Cyan
     Write-Host ""
 
-    if (Test-Port -Port $script:HTTP_PORT) {
-        Write-Host "[ON]  HTTP tunnel   : 127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT) (Claude)" -ForegroundColor Green
-    } else {
-        Write-Host "[OFF] HTTP tunnel   : not running" -ForegroundColor Red
-    }
-
-    if (Test-Port -Port $script:SOCKS_PORT) {
-        Write-Host "[ON]  SOCKS tunnel  : 127.0.0.1:$($script:SOCKS_PORT) (Chrome / apps)" -ForegroundColor Green
-    } else {
-        Write-Host "[OFF] SOCKS tunnel  : not running" -ForegroundColor Red
+    $health = Get-TunnelHealth
+    switch ($health.Status) {
+        'ok' {
+            Write-Host "[ON]  HTTP tunnel   : 127.0.0.1:$($script:HTTP_PORT) -> VM tinyproxy:$($script:REMOTE_PROXY_PORT) (Claude)" -ForegroundColor Green
+            Write-Host "[ON]  SOCKS tunnel  : 127.0.0.1:$($script:SOCKS_PORT) (Chrome / apps)" -ForegroundColor Green
+        }
+        'down' {
+            Write-Host "[OFF] HTTP tunnel   : not running" -ForegroundColor Red
+            Write-Host "[OFF] SOCKS tunnel  : not running" -ForegroundColor Red
+        }
+        'stale' {
+            Write-Host "[!!]  Tunnel BROKEN : stale ssh (PID $($health.OwnerPid)) holds port $($script:HTTP_PORT) - run 'cc' to auto-heal (or 'cc-stop')" -ForegroundColor Yellow
+        }
+        'foreign' {
+            Write-Host "[!!]  Port conflict : '$($health.OwnerName)' (PID $($health.OwnerPid)) occupies port $($script:HTTP_PORT) - the tunnel is NOT running" -ForegroundColor Red
+            Write-Host "      Close that app or change `$script:HTTP_PORT in `$PROFILE, then run 'cc'." -ForegroundColor Yellow
+        }
     }
 
     if ($env:HTTPS_PROXY) {
@@ -393,7 +444,13 @@ function proxy-doctor {
         Write-Host "[WARN] SOCKS forward :$($script:SOCKS_PORT) NOT listening - chrome-proxy won't work. Fix: tunnel-start" -ForegroundColor Yellow
     }
     if ($httpPids -and $socksPids -and (Compare-Object $httpPids $socksPids)) {
-        Write-Host "[WARN] Ports held by DIFFERENT PIDs - likely a stale process. Fix: cc-stop, then cc" -ForegroundColor Yellow
+        Write-Host "[WARN] Ports held by DIFFERENT PIDs - likely a stale process. Fix: run 'cc' (auto-heals stale ssh) or cc-stop" -ForegroundColor Yellow
+    }
+    if ($httpPids) {
+        $ownerName = (Get-Process -Id $httpPids[0] -ErrorAction SilentlyContinue).ProcessName
+        if ($ownerName -and $ownerName -notmatch '^ssh') {
+            Write-Host "[FAIL] Port $($script:HTTP_PORT) is held by '$ownerName' (PID $($httpPids[0])) - NOT an ssh tunnel. Close that app or change `$script:HTTP_PORT in `$PROFILE." -ForegroundColor Red
+        }
     }
     if ($httpPids.Count -gt 1) {
         Write-Host "[WARN] Port $($script:HTTP_PORT) has MULTIPLE listeners ($($httpPids -join ',')) - stale process. Fix: cc-stop" -ForegroundColor Yellow

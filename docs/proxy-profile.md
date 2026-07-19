@@ -21,7 +21,7 @@ It reuses anything already running instead of starting duplicates.
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`) |
+| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals a stale tunnel: a dead/leftover ssh on the port is killed and restarted; a foreign app on the port is reported by name, never killed |
 | `cc-safe` | Same, but keeps Claude's permission prompts |
 | `cx` | Proxy ON + launch **Codex** (approvals off) |
 | `cx-safe` | Same, but keeps Codex's approval prompts |
@@ -58,6 +58,8 @@ It prompts for your server, user, and alias, then:
 - writes the `~/.ssh/config` alias (so `ssh jpvpn` just works),
 - installs the `cc`/`cx` profile,
 - tests the connection.
+
+> **If it ends with `[FAIL] Could not write the profile`:** Windows blocked writing into your Documents folder — usually Defender's **Controlled folder access** or a locked OneDrive folder. The wizard tells you the exact cause, keeps your configured profile in `%TEMP%`, and prints the one `Copy-Item` command that finishes the install once you unblock it. Details → [Troubleshooting](troubleshooting.md).
 
 **✅ Check it worked:** the wizard ends with `[OK] SSH connection works.` and `Done!`.
 
@@ -187,6 +189,8 @@ notepad $PROFILE     # or:  code $PROFILE
 # 5. Reload the profile into the current window
 . $PROFILE
 ```
+
+> **`Access denied` on step 2?** Windows is blocking writes into Documents — usually Defender's **Controlled folder access** (Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell) or a locked OneDrive folder. Unblock it, then re-run step 2.
 
 The profile reads the connection from your `jpvpn` alias (Step 1), so the **Settings block** just points at it — no key/user/host to re-enter:
 

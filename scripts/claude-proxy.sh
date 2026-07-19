@@ -38,7 +38,36 @@ export CLAUDE_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168
 # ============================================================
 
 _port_in_use() {
-    lsof -ti:"$1" >/dev/null 2>&1
+    lsof -ti:"$1" -sTCP:LISTEN >/dev/null 2>&1
+}
+
+# Classify what holds the tunnel ports, so callers can HEAL instead of guessing.
+# Prints: "ok|down|stale|foreign [pid] [command]"
+#   ok      - one ssh process listens on BOTH ports (healthy tunnel)
+#   down    - nothing listens on the HTTP port
+#   stale   - ssh holds the HTTP port but the tunnel is broken (SOCKS missing,
+#             different PIDs, or multiple listeners) - safe to kill and restart
+#   foreign - a NON-ssh app holds the HTTP port - never killed automatically
+_tunnel_health() {
+    local http_pids socks_pids pid name
+    http_pids=$(lsof -ti:"$CLAUDE_HTTP_PORT" -sTCP:LISTEN 2>/dev/null)
+    socks_pids=$(lsof -ti:"$CLAUDE_SOCKS_PORT" -sTCP:LISTEN 2>/dev/null)
+    if [ -z "$http_pids" ]; then
+        echo "down"
+        return
+    fi
+    pid=$(echo "$http_pids" | head -1)
+    name=$(ps -p "$pid" -o comm= 2>/dev/null | tr -d ' ')
+    case "$name" in
+        ssh|*/ssh)
+            if [ "$http_pids" = "$socks_pids" ] && [ "$(echo "$http_pids" | wc -l)" -eq 1 ]; then
+                echo "ok $pid $name"
+            else
+                echo "stale $pid $name"
+            fi
+            ;;
+        *)  echo "foreign $pid ${name:-unknown}" ;;
+    esac
 }
 
 _is_wsl() {
@@ -103,10 +132,32 @@ _claude_settings_proxy_off() {
 # ============================================================
 
 tunnel-start() {
-    if _port_in_use "$CLAUDE_HTTP_PORT"; then
-        echo "[Info] Local port $CLAUDE_HTTP_PORT already in use - tunnel may already be running"
-        return
-    fi
+    # Auto-heal: a HEALTHY tunnel is left alone, a STALE ssh is killed and
+    # replaced, and a FOREIGN app on the port is reported by name (never killed).
+    local health status hpid hname
+    health=$(_tunnel_health)
+    status=$(echo "$health" | awk '{print $1}')
+    hpid=$(echo "$health" | awk '{print $2}')
+    hname=$(echo "$health" | awk '{print $3}')
+    case "$status" in
+        ok)
+            echo "[OK]  SSH tunnel already running (PID $hpid)"
+            return 0
+            ;;
+        stale)
+            echo "[Heal] Stale ssh tunnel on port $CLAUDE_HTTP_PORT (PID $hpid) - killing it and starting fresh..."
+            tunnel-stop
+            if _port_in_use "$CLAUDE_HTTP_PORT"; then
+                echo "[Err] Port $CLAUDE_HTTP_PORT is still busy after cleanup - run 'proxy-doctor'."
+                return 1
+            fi
+            ;;
+        foreign)
+            echo "[Err] Port $CLAUDE_HTTP_PORT is taken by '$hname' (PID $hpid) - that is NOT the tunnel, so it won't be killed automatically."
+            echo "      Close that app (or: kill $hpid), or change CLAUDE_HTTP_PORT in the profile, then retry."
+            return 1
+            ;;
+    esac
 
     # WSL: load the key first so 'ssh -f' won't block on a passphrase it can't answer.
     _is_wsl && _ensure_ssh_agent
@@ -137,6 +188,7 @@ tunnel-start() {
         echo "       SOCKS 127.0.0.1:$CLAUDE_SOCKS_PORT                                   (Chrome / apps)"
     else
         echo "[Err] SSH tunnel failed to start within 5s (see /tmp/claude-tunnel.log)"
+        return 1
     fi
 }
 
@@ -248,13 +300,12 @@ proxy-up() {
         shift
     done
 
-    # Step 1: SSH tunnel (HTTP + SOCKS forwards)
-    if ! _port_in_use "$CLAUDE_HTTP_PORT"; then
-        tunnel-start
-        _port_in_use "$CLAUDE_HTTP_PORT" || return 1
-    else
-        echo "[OK]  SSH tunnel already running"
-    fi
+    # Step 1: SSH tunnel (HTTP + SOCKS forwards).
+    # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
+    # and refuses (with a named culprit) when a foreign app holds the port -
+    # so require actual health afterwards, not just "something is on the port".
+    tunnel-start || return 1
+    [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] || return 1
 
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -353,17 +404,28 @@ proxy-status() {
     echo ""
     echo "=== Proxy Status ==="
     echo ""
-    if _port_in_use "$CLAUDE_HTTP_PORT"; then
-        echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude)"
-    else
-        echo "[OFF] HTTP tunnel   : not running"
-    fi
-
-    if _port_in_use "$CLAUDE_SOCKS_PORT"; then
-        echo "[ON]  SOCKS tunnel  : 127.0.0.1:$CLAUDE_SOCKS_PORT (Chrome / apps)"
-    else
-        echo "[OFF] SOCKS tunnel  : not running"
-    fi
+    local health status hpid hname
+    health=$(_tunnel_health)
+    status=$(echo "$health" | awk '{print $1}')
+    hpid=$(echo "$health" | awk '{print $2}')
+    hname=$(echo "$health" | awk '{print $3}')
+    case "$status" in
+        ok)
+            echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude)"
+            echo "[ON]  SOCKS tunnel  : 127.0.0.1:$CLAUDE_SOCKS_PORT (Chrome / apps)"
+            ;;
+        down)
+            echo "[OFF] HTTP tunnel   : not running"
+            echo "[OFF] SOCKS tunnel  : not running"
+            ;;
+        stale)
+            echo "[!!]  Tunnel BROKEN : stale ssh (PID $hpid) holds port $CLAUDE_HTTP_PORT - run 'cc' to auto-heal (or 'cc-stop')"
+            ;;
+        foreign)
+            echo "[!!]  Port conflict : '$hname' (PID $hpid) occupies port $CLAUDE_HTTP_PORT - the tunnel is NOT running"
+            echo "      Close that app or change CLAUDE_HTTP_PORT in the profile, then run 'cc'."
+            ;;
+    esac
 
     if [ -n "$HTTPS_PROXY" ]; then
         echo "[ON]  Env HTTPS_PROXY: $HTTPS_PROXY"
@@ -423,7 +485,15 @@ proxy-doctor() {
     # Both ports should belong to the SAME ssh process. Different PIDs => a stale
     # leftover (e.g. an old SOCKS+bridge session) is squatting on one of them.
     if [ -n "$http_pid" ] && [ -n "$socks_pid" ] && [ "$http_pid" != "$socks_pid" ]; then
-        echo "$warn Ports held by DIFFERENT PIDs ($http_pid vs $socks_pid) - likely a stale process. Fix: cc-stop, then cc"
+        echo "$warn Ports held by DIFFERENT PIDs ($http_pid vs $socks_pid) - likely a stale process. Fix: run 'cc' (auto-heals stale ssh) or cc-stop"
+    fi
+    if [ -n "$http_pid" ]; then
+        local http_owner
+        http_owner=$(ps -p "$http_pid" -o comm= 2>/dev/null | tr -d ' ')
+        case "$http_owner" in
+            ssh|*/ssh|"") ;;
+            *) echo "$bad Port $CLAUDE_HTTP_PORT is held by '$http_owner' (PID $http_pid) - NOT an ssh tunnel. Close that app or change CLAUDE_HTTP_PORT." ;;
+        esac
     fi
     # More than one PID on a single port is also a leftover.
     if [ "$(echo "$http_pids" | sed '/^$/d' | wc -l)" -gt 1 ]; then
