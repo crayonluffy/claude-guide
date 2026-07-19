@@ -1,12 +1,13 @@
 # ============================================================
-# PowerShell Profile - SSH Tunnel + HTTP proxy (Claude) + SOCKS5 (Chrome)
+# PowerShell Profile - SSH Tunnel + HTTP proxy (Claude/Codex) + SOCKS5 (Chrome)
 # ============================================================
 # One SSH connection carries two forwards:
-#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude (HTTPS_PROXY)
+#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude & Codex (HTTPS_PROXY)
 #   -D 1080                 ->  SOCKS5 on the VM              ->  used by Chrome / other apps
 #
 # Claude Code only speaks HTTP proxies, so it uses the -L forward to the VM's HTTP
 # proxy (see webproxy-manager: https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
+# Codex reads the same HTTP(S)_PROXY env vars, so it shares that forward too.
 # Chrome is happier on SOCKS5 (full traffic, remote DNS), so it uses the -D forward.
 # ============================================================
 
@@ -217,7 +218,7 @@ function proxy-up {
         }
     }
 
-    Write-Host "[OK]  Proxy ready in this shell - run 'claude' yourself, or 'cc-stop' to tear it down." -ForegroundColor Green
+    Write-Host "[OK]  Proxy ready in this shell - run 'claude' or 'codex' yourself, or 'cc-stop' to tear it down." -ForegroundColor Green
     return $true
 }
 
@@ -243,6 +244,35 @@ function cc {
 }
 
 function cc-safe { cc -Safe }
+
+# ============================================================
+# All-in-one: proxy stack + launch Codex (same tunnel as cc)
+# ============================================================
+
+function cx {
+    param([switch]$Safe, [switch]$NoVerify)
+
+    # Locate codex first, so we don't bring the tunnel up only to find it missing.
+    if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+        Write-Host "[Err] 'codex' not found - install it first: npm install -g @openai/codex" -ForegroundColor Red
+        return
+    }
+
+    # Steps 1-3: bring up tunnel + env vars + verify (the same stack cc uses)
+    if (-not (proxy-up -NoVerify:$NoVerify)) { return }
+
+    # Step 4: Launch Codex (it picks up HTTP(S)_PROXY from this shell's env)
+    Write-Host "[Launch] Starting Codex..." -ForegroundColor Cyan
+    Write-Host ""
+
+    if ($Safe) {
+        codex
+    } else {
+        codex --dangerously-bypass-approvals-and-sandbox
+    }
+}
+
+function cx-safe { cx -Safe }
 
 # ============================================================
 # Stop everything
@@ -338,6 +368,13 @@ function proxy-status {
 function proxy-doctor {
     Write-Host ""
     Write-Host "=== Proxy Doctor ===" -ForegroundColor Cyan
+
+    # --- tools ---
+    if (Get-Command codex -ErrorAction SilentlyContinue) {
+        Write-Host "[ OK ]  codex installed - 'cx' available" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] codex NOT installed (optional) - 'cx' won't work. Fix: npm install -g @openai/codex" -ForegroundColor Yellow
+    }
 
     # --- tunnel / ports ---
     $httpConn  = Get-NetTCPConnection -LocalPort $script:HTTP_PORT  -State Listen -ErrorAction SilentlyContinue
@@ -439,11 +476,13 @@ function chrome-proxy {
 
 function cc-help {
     Write-Host ""
-    Write-Host "=== Claude + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
+    Write-Host "=== Claude / Codex + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
     Write-Host "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)" -ForegroundColor DarkGray
     Write-Host "  cc-safe         - Same, but keeps Claude's permission prompts" -ForegroundColor DarkGray
-    Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch Claude" -ForegroundColor DarkGray
-    Write-Host "  cc-stop         - Turn the proxy OFF (stop everything, reports what it freed)" -ForegroundColor DarkGray
+    Write-Host "  cx              - Turn the proxy ON and launch Codex (skips approval prompts)" -ForegroundColor DarkGray
+    Write-Host "  cx-safe         - Same, but keeps Codex's approval prompts" -ForegroundColor DarkGray
+    Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch anything" -ForegroundColor DarkGray
+    Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host ""

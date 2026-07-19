@@ -1,12 +1,13 @@
 # ============================================================
-# Claude SSH Tunnel + HTTP proxy (Claude) + SOCKS5 (Chrome)   (source from ~/.zshrc or ~/.bashrc)
+# Claude/Codex SSH Tunnel + HTTP proxy + SOCKS5 (Chrome)   (source from ~/.zshrc or ~/.bashrc)
 # ============================================================
 # One SSH connection carries two forwards:
-#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude (HTTPS_PROXY)
+#   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude & Codex (HTTPS_PROXY)
 #   -D 1080                 ->  SOCKS5 on the VM              ->  used by Chrome / other apps
 #
 # Claude Code only speaks HTTP proxies, so it uses the -L forward to the VM's
 # HTTP proxy (see webproxy-manager: https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
+# Codex reads the same HTTP(S)_PROXY env vars, so it shares that forward too.
 # Chrome is happier on SOCKS5 (full traffic, remote DNS), so it uses the -D forward.
 # ============================================================
 
@@ -263,7 +264,7 @@ proxy-up() {
         _verify_proxy_ip
     fi
 
-    echo "[OK]  Proxy ready in this shell - run 'claude' yourself, or 'cc-stop' to tear it down."
+    echo "[OK]  Proxy ready in this shell - run 'claude' or 'codex' yourself, or 'cc-stop' to tear it down."
 }
 
 # ============================================================
@@ -294,6 +295,41 @@ cc() {
 }
 
 cc-safe() { cc --safe; }
+
+# ============================================================
+# All-in-one: proxy stack + launch Codex (same tunnel as cc)
+# ============================================================
+
+cx() {
+    local safe=0
+    local up_args=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --safe)      safe=1 ;;
+            --no-verify) up_args+=(--no-verify) ;;
+        esac
+        shift
+    done
+
+    # Locate codex first, so we don't bring the tunnel up only to find it missing.
+    if ! command -v codex >/dev/null 2>&1; then
+        echo "[Err] 'codex' not found - install it first: npm install -g @openai/codex"
+        return 1
+    fi
+
+    # Steps 1-3: bring up tunnel + env vars + verify (the same stack cc uses)
+    proxy-up "${up_args[@]}" || return 1
+
+    # Step 4: Launch Codex (it picks up HTTP(S)_PROXY from this shell's env)
+    echo "[Launch] Starting Codex..."
+    if [ $safe -eq 1 ]; then
+        codex
+    else
+        codex --dangerously-bypass-approvals-and-sandbox
+    fi
+}
+
+cx-safe() { cx --safe; }
 
 cc-stop() {
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
@@ -360,6 +396,11 @@ proxy-doctor() {
         echo "$ok  jq installed ($(jq --version)) - settings.json sync available"
     else
         echo "$warn jq NOT installed - settings.json sync is skipped (shell env vars still work). Fix: sudo apt install jq"
+    fi
+    if command -v codex >/dev/null 2>&1; then
+        echo "$ok  codex installed - 'cx' available"
+    else
+        echo "$warn codex NOT installed (optional) - 'cx' won't work. Fix: npm install -g @openai/codex"
     fi
 
     # --- tunnel / ports ---
@@ -507,11 +548,13 @@ chrome-proxy() {
 
 cc-help() {
     echo ""
-    echo "=== Claude + SSH Tunnel Quick Commands ==="
+    echo "=== Claude / Codex + SSH Tunnel Quick Commands ==="
     echo "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)"
     echo "  cc-safe         - Same, but keeps Claude's permission prompts"
-    echo "  proxy-up        - Turn the proxy ON, but DON'T launch Claude"
-    echo "  cc-stop         - Turn the proxy OFF (stop everything, reports what it freed)"
+    echo "  cx              - Turn the proxy ON and launch Codex (skips approval prompts)"
+    echo "  cx-safe         - Same, but keeps Codex's approval prompts"
+    echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
+    echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo ""

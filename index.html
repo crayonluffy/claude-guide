@@ -2,9 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Claude Proxy Guide</title>
+  <title>Claude Code + Codex Guide</title>
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
-  <meta name="description" content="Guide to running Claude via GCloud Proxy">
+  <meta name="description" content="Step-by-step guide to installing Claude Code & Codex and running them via a VM proxy">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   
   <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
@@ -39,7 +39,7 @@
 
   <script>
     window.$docsify = {
-      name: 'Claude Proxy Guide',
+      name: 'Claude Code + Codex Guide',
       repo: '',
 
       // Vercel excludes the reserved filename README.md from static output,
@@ -47,13 +47,25 @@
       homepage: 'home.md',
 
       auto2top: true,
-      loadSidebar: false,
-      subMaxLevel: 3,
-      
+
+      // One shared sidebar (docs/_sidebar.md, copied to /_sidebar.md at build)
+      // for every route, so navigation is always visible.
+      loadSidebar: true,
+      alias: {
+        '/.*/_sidebar.md': '/_sidebar.md'
+      },
+      // Resolve relative links against the current page (so docs pages can
+      // link to their siblings the same way GitHub renders them).
+      relativePath: true,
+      subMaxLevel: 2,
+
       search: {
         placeholder: 'Search commands...',
         noData: 'No results!',
-        depth: 2
+        paths: 'auto',
+        depth: 3,
+        // Bump to invalidate visitors' cached (pre-multi-page) search index.
+        namespace: 'claude-codex-guide-v2'
       },
 
       copyCode: {

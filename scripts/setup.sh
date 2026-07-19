@@ -190,8 +190,13 @@ else
 fi
 
 # --- 7. Next steps ----------------------------------------------------------
+# Non-blocking: the proxy works without these CLIs, so only hint, never abort.
+command -v claude >/dev/null 2>&1 || \
+    echo "[Info] Claude Code CLI not installed - 'cc' needs it:  npm install -g @anthropic-ai/claude-code"
+command -v codex  >/dev/null 2>&1 || \
+    echo "[Info] Codex CLI not installed (optional) - to use 'cx':  npm install -g @openai/codex"
 echo ""
-echo "Done! Reload your shell, then launch Claude:"
+echo "Done! Reload your shell, then launch Claude (or Codex with 'cx'):"
 echo "    source ${RC:-~/.zshrc}"
 echo "    cc"
 echo ""

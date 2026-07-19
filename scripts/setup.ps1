@@ -136,7 +136,14 @@ if ($sshOk) {
 
 # --- 7. Load the profile + next steps --------------------------------------
 . $PROFILE
+# Non-blocking: the proxy works without these CLIs, so only hint, never abort.
+if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+    Write-Host "[Info] Claude Code CLI not installed - 'cc' needs it:  npm install -g @anthropic-ai/claude-code" -ForegroundColor Yellow
+}
+if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+    Write-Host "[Info] Codex CLI not installed (optional) - to use 'cx':  npm install -g @openai/codex" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Done! The profile is loaded in this window - just run:" -ForegroundColor Cyan
-Write-Host "    cc" -ForegroundColor White
+Write-Host "    cc        (Claude)   or   cx        (Codex)" -ForegroundColor White
 Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
