@@ -2,7 +2,9 @@
 
 Claude Code is Anthropic's coding agent that runs in your terminal. Installing it takes two steps: **Node.js** first, then the **CLI itself**. Follow your OS section top to bottom — every step ends with a check so you know it worked.
 
-> Already have `claude` working? Skip ahead to **[Install Codex](install-codex.md)** or **[Proxy setup](proxy-profile.md)**.
+> **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, signing in (Step 3) only works through the proxy — and if `npm install` times out for you, it needs the proxy too. This page assumes `cc` / `proxy-up` already exist.
+>
+> Already have `claude` working? Skip ahead to **[Install Codex](install-codex.md)**.
 
 ---
 
@@ -85,6 +87,8 @@ Same command on every OS:
 npm install -g @anthropic-ai/claude-code
 ```
 
+> **`npm install` hangs or times out?** Your network blocks the npm registry too. Run `proxy-up` in this terminal first (from the [proxy setup](proxy-profile.md)) — npm respects the proxy env vars it sets — then retry.
+
 **✅ Check it worked:**
 
 ```bash
@@ -95,21 +99,23 @@ You should see a version number like `2.x.x`. If you get `command not found`, op
 
 ---
 
-## Step 3 — Sign in
+## Step 3 — Sign in (through the proxy)
 
-Run Claude Code once from any folder:
+Launch Claude through the proxy — on a blocked network a plain `claude` can't reach Anthropic to sign in:
 
 ```bash
-claude
+cc
 ```
 
 On first run it walks you through signing in with your Anthropic account (a browser window opens). After that, you're in.
 
-> **🌏 Network blocked?** If your network can't reach `api.anthropic.com` directly (that's why this guide exists), finish the **[proxy setup](proxy-profile.md)** first, then launch Claude with `cc` — it signs in through the proxy.
+> **Browser page won't load either?** The sign-in happens in your browser, which doesn't use the tunnel automatically. Open the sign-in URL in a proxied browser instead: run `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there.
+
+> On an unrestricted network you can simply run `claude` directly instead.
 
 ---
 
 ## Next →
 
 - **[Install Codex](install-codex.md)** — OpenAI's CLI, if you want both.
-- **[Proxy setup — one command](proxy-profile.md)** — connect Claude through the VM proxy.
+- **[Tips & commands](tips.md)** — daily usage: `cc`, `cx`, `cc-stop`, `proxy-doctor`.

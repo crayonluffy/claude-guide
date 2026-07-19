@@ -1,12 +1,12 @@
 - [🏠 Home](/)
 
-- **1 · Install the CLIs**
-  - [Install Claude Code](/docs/install-claude.md)
-  - [Install Codex](/docs/install-codex.md)
-
-- **2 · Connect the proxy**
+- **1 · Connect the proxy**
   - [One-command setup (profile)](/docs/proxy-profile.md)
   - [Manual — no profile](/docs/proxy-manual.md)
+
+- **2 · Install the CLIs**
+  - [Install Claude Code](/docs/install-claude.md)
+  - [Install Codex](/docs/install-codex.md)
 
 - **Reference**
   - [🚑 Troubleshooting](/docs/troubleshooting.md)

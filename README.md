@@ -1,6 +1,6 @@
 # Claude Code + Codex — Install & Proxy Guide
 
-A copy-paste, step-by-step guide to installing **Claude Code** (Anthropic) and **Codex** (OpenAI), and running both through an SSH tunnel to a remote VM proxy.
+A copy-paste, step-by-step guide to running **Claude Code** (Anthropic) and **Codex** (OpenAI) through an SSH tunnel to a remote VM proxy — connect the proxy first, then install and sign in to both CLIs through it.
 
 **How traffic flows once everything is running:**
 
@@ -46,13 +46,15 @@ One caveat: on a **shared** client machine, other local users could use your `12
 
 ## 🚀 Start here — follow in order
 
+**The proxy comes first.** If your network can't reach `api.anthropic.com` / OpenAI directly (that's why this guide exists), signing in to Claude or Codex — and sometimes even `npm install` — only works *through* the proxy. So bring the tunnel up before installing anything.
+
 | | Page | What you'll do | Time |
 |---|------|----------------|------|
-| 1 | **[Install Claude Code](docs/install-claude.md)** | Node.js → `claude` CLI → sign in | ~5 min |
-| 2 | **[Install Codex](docs/install-codex.md)** *(optional)* | `codex` CLI → sign in | ~3 min |
-| 3 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once, get `cc` / `cx` forever | ~5 min |
+| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once, get `cc` / `cx` forever | ~5 min |
+| 2 | **[Install Claude Code](docs/install-claude.md)** | Node.js → `claude` CLI → sign in via `cc` | ~5 min |
+| 3 | **[Install Codex](docs/install-codex.md)** *(optional)* | `codex` CLI → sign in via `cx` | ~3 min |
 
-Prefer nothing installed in your shell? Use **[Proxy — manual, no profile](docs/proxy-manual.md)** instead of step 3 — the same thing as plain step-by-step commands, fully written out (no collapsed sections).
+Prefer nothing installed in your shell? Use **[Proxy — manual, no profile](docs/proxy-manual.md)** instead of step 1 — the same thing as plain step-by-step commands, fully written out (no collapsed sections).
 
 ---
 
@@ -71,6 +73,6 @@ proxy-doctor    # something wrong? this says exactly what + how to fix
 
 ## 📚 All pages
 
-- **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
 - **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md)
+- **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
 - **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Upgrading from the old setup](docs/upgrading.md)

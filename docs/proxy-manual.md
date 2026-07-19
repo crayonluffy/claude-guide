@@ -24,7 +24,7 @@ flowchart LR
 
 - [ ] **SSH key + `jpvpn` alias installed** — if not, do [Proxy setup → Step 1](proxy-profile.md) (wizard or by-hand, either works).
 - [ ] **VM proxy running** — the VM must run [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `127.0.0.1:8888`). Ask your admin if unsure.
-- [ ] **[Claude Code](install-claude.md)** and/or **[Codex](install-codex.md)** installed.
+- [ ] **[Claude Code](install-claude.md)** and/or **[Codex](install-codex.md)** installed — or install them **after** Steps 1–3: on a blocked network their sign-in (and sometimes `npm install`) only works once the proxy is up.
 - [ ] **Host key accepted** — run `ssh jpvpn` once, type `yes`, then exit. (First time only.)
 
 ---

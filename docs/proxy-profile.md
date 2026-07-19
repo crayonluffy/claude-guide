@@ -13,7 +13,8 @@ It reuses anything already running instead of starting duplicates.
 1. Your **SSH private key** file (ask your admin), downloaded into your **Downloads** folder.
 2. The VM's **IP/hostname** and your **SSH username**.
 3. The VM running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `:8888`) — your admin's job.
-4. [Claude Code](install-claude.md) and/or [Codex](install-codex.md) installed.
+
+You do **not** need Claude Code or Codex installed yet — do the proxy first. On a blocked network their sign-in (and sometimes `npm install`) only works *through* this proxy, so [install them](install-claude.md) as the next step once `cc`/`cx` exist.
 
 ---
 
@@ -66,14 +67,15 @@ It prompts for your server, user, and alias, then:
 ### Step 3 — Use it
 
 ```powershell
-cc      # proxy ON + launch Claude
-cx      # proxy ON + launch Codex
-cc-stop # proxy OFF (both)
+proxy-up  # proxy ON (start here if Claude/Codex aren't installed yet)
+cc        # proxy ON + launch Claude
+cx        # proxy ON + launch Codex
+cc-stop   # proxy OFF (both)
 ```
 
-**✅ Check it worked:** `cc`/`cx` prints your external IP — it should be the **VM's** IP, not your own. If anything looks off, run `proxy-doctor`.
+**✅ Check it worked:** `proxy-up`/`cc`/`cx` prints your external IP — it should be the **VM's** IP, not your own. If anything looks off, run `proxy-doctor`.
 
-Done — that's the whole Windows setup. Setting it up **by hand** instead? See [Set up by hand — Windows](#set-up-by-hand--windows) below.
+Done — the tunnel works. **Next: [install Claude Code](install-claude.md)** (and optionally [Codex](install-codex.md)) — their sign-in goes through this proxy, so keep it up. Setting the proxy up **by hand** instead? See [Set up by hand — Windows](#set-up-by-hand--windows) below.
 
 ---
 
@@ -108,14 +110,15 @@ It prompts for your server, user, and alias, then:
 ```bash
 source ~/.zshrc   # or ~/.bashrc — first time only; new terminals load it automatically
 
-cc      # proxy ON + launch Claude
-cx      # proxy ON + launch Codex
-cc-stop # proxy OFF (both)
+proxy-up  # proxy ON (start here if Claude/Codex aren't installed yet)
+cc        # proxy ON + launch Claude
+cx        # proxy ON + launch Codex
+cc-stop   # proxy OFF (both)
 ```
 
-**✅ Check it worked:** `cc`/`cx` prints your external IP — it should be the **VM's** IP, not your own. If anything looks off, run `proxy-doctor`.
+**✅ Check it worked:** `proxy-up`/`cc`/`cx` prints your external IP — it should be the **VM's** IP, not your own. If anything looks off, run `proxy-doctor`.
 
-Done — that's the whole macOS/Linux setup. Setting it up **by hand** instead? See [Set up by hand — macOS / Linux](#set-up-by-hand--macos--linux) below.
+Done — the tunnel works. **Next: [install Claude Code](install-claude.md)** (and optionally [Codex](install-codex.md)) — their sign-in goes through this proxy, so keep it up. Setting the proxy up **by hand** instead? See [Set up by hand — macOS / Linux](#set-up-by-hand--macos--linux) below.
 
 ---
 
@@ -343,5 +346,6 @@ With the profile installed, run **`chrome-proxy`** — it opens a **separate** C
 
 ## Next →
 
+- **[Install Claude Code](install-claude.md)** (then optionally **[Codex](install-codex.md)**) — sign-in goes through this proxy, so it comes *after* this page.
 - Something not working? → **[Troubleshooting](troubleshooting.md)** (start with `proxy-doctor`)
 - Don't want a profile at all? → **[Manual — no profile](proxy-manual.md)**

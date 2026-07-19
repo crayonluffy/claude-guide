@@ -2,7 +2,7 @@
 
 Codex is OpenAI's coding agent for the terminal. Like Claude Code, it needs **Node.js** first, then the **CLI**, then a **sign-in**. Every step ends with a check so you know it worked.
 
-> Already have `codex` working? Skip ahead to **[Proxy setup](proxy-profile.md)** — the `cx` command launches Codex through the same proxy `cc` uses for Claude.
+> **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, signing in (Step 3) only works through the proxy — the `cx` command launches Codex through the same tunnel `cc` uses for Claude. This page assumes `cx` / `proxy-up` already exist.
 
 ---
 
@@ -26,6 +26,8 @@ Same command on every OS:
 npm install -g @openai/codex
 ```
 
+> **`npm install` hangs or times out?** Run `proxy-up` in this terminal first — npm respects the proxy env vars it sets — then retry.
+
 macOS alternative, if you prefer Homebrew:
 
 ```bash
@@ -44,25 +46,25 @@ You should see a version number — not `command not found`. If it's not found, 
 
 ---
 
-## Step 3 — Sign in
+## Step 3 — Sign in (through the proxy)
 
-Run Codex once from any folder:
+Launch Codex through the proxy — on a blocked network a plain `codex` can't reach OpenAI to sign in:
 
 ```bash
-codex
+cx
 ```
 
-On first run it asks how to sign in — choose **Sign in with ChatGPT** (uses your ChatGPT Plus/Pro/Team plan; a browser window opens).
+On first run it asks how to sign in — choose **Sign in with ChatGPT** (uses your ChatGPT Plus/Pro/Team plan; a browser window opens). If the browser page won't load either, open the URL via `chrome-proxy` (the browser doesn't use the tunnel automatically).
 
 **Alternative — API key:** if you use OpenAI platform billing instead of a ChatGPT plan, follow the API-key option in the sign-in prompt (or see the [Codex docs](https://developers.openai.com/codex/) for the current flow).
 
 **✅ Check it worked:** after signing in, Codex drops you into its interactive prompt. Type something like `hello`, get a reply, then quit.
 
-> **🌏 Network blocked?** If your network can't reach OpenAI directly, finish the **[proxy setup](proxy-profile.md)** first, then launch Codex with `cx` — it signs in through the proxy.
+> On an unrestricted network you can simply run `codex` directly instead.
 
 ---
 
 ## Next →
 
-- **[Proxy setup — one command](proxy-profile.md)** — connect Claude **and** Codex through the VM proxy (`cc` / `cx`).
-- **[Proxy — manual, no profile](proxy-manual.md)** — if you'd rather not install a shell profile.
+- **[Tips & commands](tips.md)** — daily usage: `cc`, `cx`, `cc-stop`, `proxy-doctor`.
+- **[Troubleshooting](troubleshooting.md)** — if anything misbehaves.
