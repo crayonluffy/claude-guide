@@ -11,4 +11,4 @@
 - **Reference**
   - [🚑 Troubleshooting](/docs/troubleshooting.md)
   - [💡 Claude Code & Codex tips](/docs/tips.md)
-  - [🔄 Upgrading from the old setup](/docs/upgrading.md)
+  - [🔄 Updating & upgrading](/docs/upgrading.md)

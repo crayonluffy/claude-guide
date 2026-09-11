@@ -8,6 +8,8 @@ This installs a small shell profile **once**. After that, a single command does 
 
 It reuses anything already running instead of starting duplicates.
 
+Your server details live in a small **settings file** (`~/.claude-proxy.conf` on macOS/Linux, `~\.claude-proxy.conf.psd1` on Windows), *separate* from the profile script — so **`proxy-update`** (or simply re-running the wizard) always gives you the newest profile **without retyping anything**.
+
 **Before you start, you need:**
 
 1. Your **SSH private key** file (ask your admin), downloaded into your **Downloads** folder.
@@ -23,8 +25,9 @@ You do **not** need Claude Code or Codex installed yet — do the proxy first. O
 | Command | What it does |
 |---------|--------------|
 | `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals: a dead/leftover ssh is killed and restarted; if another app has the port, it's left alone and the tunnel uses the next free port (`8081`, …) automatically |
-| `cc-safe` | Same, but keeps Claude's permission prompts |
-| `cx` | Proxy ON + launch **Codex** (approvals off) |
+| `cc -c` / `cc -r` | Same, but **continue** the last Claude session / **pick one to resume**. Anything after `cc` is passed to `claude` as-is (`cc --resume <id>`, `cc "fix the tests"`, …) |
+| `cc-safe` | Same as `cc`, but keeps Claude's permission prompts (accepts the same extra arguments) |
+| `cx` | Proxy ON + launch **Codex** (approvals off). Extra arguments pass through too: `cx resume` |
 | `cx-safe` | Same, but keeps Codex's approval prompts |
 | `proxy-up` | Proxy ON (tunnel + env vars + verify), but don't launch anything |
 | `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly |
@@ -32,8 +35,10 @@ You do **not** need Claude Code or Codex installed yet — do the proxy first. O
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
+| `proxy-config` | Show your settings; `proxy-config edit` opens the settings file, `proxy-config set SSH_HOST myvm` changes one value |
+| `proxy-update` | Download the newest profile from this guide and install it — **your settings are kept**. `proxy-update --check` (`-Check` on Windows) only tells you whether there is one |
 | `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy (separate, isolated profile; auto-starts the tunnel) |
-| `cc-help` | Print this command list (it also prints when a new shell opens) |
+| `cc-help` | Print this command list. (A new shell prints a one-line "claude-proxy v… ready" notice instead of the whole list; `BANNER=0` in the settings file silences it) |
 
 > **Codex note:** Codex reads the standard `HTTP(S)_PROXY` env vars, so it shares the same tunnel — no extra setup. Only Claude gets the extra `settings.json` sync (so `claude` works even from shells that never ran `cc`).
 
@@ -57,8 +62,11 @@ It prompts for your server, user, and alias, then:
 
 - installs and locks the key,
 - writes the `~/.ssh/config` alias (so `ssh jpvpn` just works),
+- saves your settings to `~\.claude-proxy.conf.psd1`,
 - installs the `cc`/`cx` profile,
 - tests the connection.
+
+Already set up? Run the same command again: it finds your settings and asks **"Keep these settings and only update the cc/cx profile?"** — press Enter and you have the newest profile with nothing retyped.
 
 > **If it ends with `[FAIL] Could not write the profile`:** Windows blocked writing into your Documents folder — usually Defender's **Controlled folder access** or a locked OneDrive folder. The wizard tells you the exact cause, keeps your configured profile in `%TEMP%`, and prints the one `Copy-Item` command that finishes the install once you unblock it. Details → [Troubleshooting](troubleshooting.md).
 
@@ -100,8 +108,11 @@ It prompts for your server, user, and alias, then:
 - installs `jq` + `lsof` (client dependencies),
 - installs and locks the key (and adds it to the macOS Keychain),
 - writes the `~/.ssh/config` alias (so `ssh jpvpn` just works),
+- saves your settings to `~/.claude-proxy.conf`,
 - installs the `cc`/`cx` profile into your shell rc,
 - tests the connection.
+
+Already set up? Run the same command again: it finds your settings and asks **"Keep these settings and only update the cc/cx profile?"** — press Enter and you have the newest profile with nothing retyped. (Add `--update` to skip even that question: `bash <(curl -fsSL …/setup.sh) --update`.)
 
 **✅ Check it worked:** the wizard ends with `[OK] SSH connection works.` and `Done!`.
 
@@ -119,6 +130,19 @@ cc-stop   # proxy OFF (both)
 **✅ Check it worked:** `proxy-up`/`cc`/`cx` prints your external IP — it should be the **VM's** IP, not your own. If anything looks off, run `proxy-doctor`.
 
 Done — the tunnel works. **Next: [install Claude Code](install-claude.md)** (and optionally [Codex](install-codex.md)) — their sign-in goes through this proxy, so keep it up. Setting the proxy up **by hand** instead? See [Set up by hand — macOS / Linux](#set-up-by-hand--macos--linux) below.
+
+---
+
+## 🔄 Updating the profile later
+
+The profile carries **no personal settings** — those live in your settings file — so updating is one command, on any OS:
+
+```bash
+proxy-update            # fetch + install the newest profile; settings untouched
+proxy-update --check    # just tell me if there is a newer one   (Windows: proxy-update -Check)
+```
+
+Then open a new terminal (or `source ~/.claude-proxy.sh` / `. $PROFILE`). Re-running the setup wizard does the same thing and additionally offers to keep your settings. If your profile is older than v2.0 and has no `proxy-update` yet, re-run the wizard once — it reads the settings out of the old profile for you.
 
 ---
 
@@ -186,8 +210,14 @@ Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/crayo
 # 3. Unblock it (only needed if Windows flagged the file as web content)
 Unblock-File -Path $PROFILE
 
-# 4. Open it and edit the Settings block
-notepad $PROFILE     # or:  code $PROFILE
+# 4. Your settings live in a separate file (the profile itself has none) - point it at the alias from Step 1
+@"
+@{
+    SSH_HOST          = 'jpvpn'   # the alias from Step 1 (or a raw host/IP)
+    SSH_PORT          = 22
+    REMOTE_PROXY_PORT = 8888      # tinyproxy port on the VM (webproxy-manager)
+}
+"@ | Set-Content -Path (Join-Path $HOME '.claude-proxy.conf.psd1') -Encoding ascii
 
 # 5. Reload the profile into the current window
 . $PROFILE
@@ -195,21 +225,19 @@ notepad $PROFILE     # or:  code $PROFILE
 
 > **`Access denied` on step 2?** Windows is blocking writes into Documents — usually Defender's **Controlled folder access** (Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell) or a locked OneDrive folder. Unblock it, then re-run step 2.
 
-The profile reads the connection from your `jpvpn` alias (Step 1), so the **Settings block** just points at it — no key/user/host to re-enter:
+The profile reads the connection from your `jpvpn` alias (Step 1), so the settings file just points at it — no key/user/host to re-enter. Every key it understands (anything you leave out keeps the built-in default; `proxy-config` shows the current values, `proxy-config set KEY VALUE` changes one):
 
-```powershell
-$script:SSH_HOST          = "jpvpn"   # the alias from Step 1 (or a raw host/IP)
-$script:SSH_USER          = ""        # leave blank when SSH_HOST is a config alias
-$script:SSH_KEY           = ""        # leave blank when SSH_HOST is a config alias
-$script:SSH_PORT          = 22
-$script:HTTP_PORT         = 8080       # local HTTP port -> forwarded to the VM proxy (Claude/Codex)
-$script:REMOTE_PROXY_PORT = 8888       # tinyproxy port on the VM (webproxy-manager)
-$script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
-$script:SYNC_SETTINGS     = 1          # also write the proxy into ~/.claude/settings.json; 0 to disable
-# Add corporate intranet ranges to $script:NO_PROXY_LIST further down if needed.
-```
-
-> Not using an alias? Fill in `SSH_KEY`, `SSH_USER`, and `SSH_HOST` explicitly instead — the profile uses them when they're set.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `SSH_HOST` | `'jpvpn'` | the alias from Step 1, or a raw host/IP |
+| `SSH_USER` / `SSH_KEY` | `''` | only when `SSH_HOST` is a raw host, not an alias |
+| `SSH_PORT` | `22` | |
+| `HTTP_PORT` | `8080` | local HTTP port → forwarded to the VM proxy (Claude/Codex) |
+| `REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
+| `SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
+| `SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json`; `0` to disable |
+| `NO_PROXY_EXTRA` | `''` | corporate intranet ranges/domains to bypass, e.g. `'172.20.0.0/24,*.mycorp.example'` |
+| `BANNER` | `1` | one-line notice when a new window opens; `0` for silence |
 
 📄 The full profile lives in the repo: [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file.
 
@@ -285,31 +313,36 @@ fi
 # 1. Download the script to ~/.claude-proxy.sh
 curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/claude-proxy.sh -o ~/.claude-proxy.sh
 
-# 2. Source it from your shell rc so it loads in every new shell
+# 2. Your settings live in a separate file (the script itself has none) - point it at the alias from Step 1
+cat > ~/.claude-proxy.conf <<'EOF'
+CLAUDE_SSH_HOST="jpvpn"          # the alias from Step 1 (or a raw host/IP)
+CLAUDE_SSH_PORT=22
+CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
+EOF
+
+# 3. Source the script from your shell rc so it loads in every new shell
 echo 'source ~/.claude-proxy.sh' >> ~/.zshrc      # macOS (zsh)
 # echo 'source ~/.claude-proxy.sh' >> ~/.bashrc   # Linux (bash)
 
-# 3. Reload your shell
+# 4. Reload your shell
 source ~/.zshrc      # or: source ~/.bashrc
 ```
 
-📄 The full script lives in the repo: [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file.
+📄 The full script lives in the repo: [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads that exact file; it works in **zsh and bash**.
 
-It already points at the `jpvpn` alias from Step 1, so there's nothing to re-enter — the **Settings block** just confirms:
+Every key the settings file understands (anything you leave out keeps the built-in default; `proxy-config` shows the current values, `proxy-config set KEY VALUE` changes one, `proxy-config edit` opens the file):
 
-```bash
-export CLAUDE_SSH_HOST="jpvpn"          # the alias from Step 1 (or a raw host/IP)
-export CLAUDE_SSH_USER=""               # leave blank when CLAUDE_SSH_HOST is a config alias
-export CLAUDE_SSH_KEY=""                # leave blank when CLAUDE_SSH_HOST is a config alias
-export CLAUDE_SSH_PORT=22
-export CLAUDE_HTTP_PORT=8080            # local HTTP port -> forwarded to the VM proxy (Claude/Codex)
-export CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
-export CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
-export CLAUDE_SYNC_SETTINGS=1           # also write the proxy into ~/.claude/settings.json (needs jq); 0 to disable
-# Append corporate intranet ranges to CLAUDE_NO_PROXY if needed.
-```
-
-> Not using an alias? Fill in `CLAUDE_SSH_KEY`, `CLAUDE_SSH_USER`, and `CLAUDE_SSH_HOST` explicitly instead.
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `CLAUDE_SSH_HOST` | `"jpvpn"` | the alias from Step 1, or a raw host/IP |
+| `CLAUDE_SSH_USER` / `CLAUDE_SSH_KEY` | `""` | only when `CLAUDE_SSH_HOST` is a raw host, not an alias |
+| `CLAUDE_SSH_PORT` | `22` | |
+| `CLAUDE_HTTP_PORT` | `8080` | local HTTP port → forwarded to the VM proxy (Claude/Codex) |
+| `CLAUDE_REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
+| `CLAUDE_SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
+| `CLAUDE_SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json` (needs `jq`); `0` to disable |
+| `CLAUDE_NO_PROXY` | private ranges, `*.local`, … | hosts that bypass the proxy — extend with `CLAUDE_NO_PROXY="$CLAUDE_NO_PROXY,172.20.0.0/24,*.mycorp.example"` |
+| `CLAUDE_PROXY_BANNER` | `1` | one-line notice when a new shell opens; `0` for silence |
 
 ### Step 3 — First connection
 
@@ -325,7 +358,7 @@ Type `yes` when prompted, then exit. Now use `cc` / `cx` as usual.
 
 ## 🔁 Changing your server or user later
 
-Your `jpvpn` alias lives in `~/.ssh/config` — that's why `ssh jpvpn`, `cc`, and `cx` need no key path, user, or host. Setup created it; edit that file if your server IP or user changes:
+Your `jpvpn` alias lives in `~/.ssh/config` — that's why `ssh jpvpn`, `cc`, and `cx` need no key path, user, or host. Setup created it; edit that file if your server IP or user changes (or just re-run the wizard, answer **n** to "keep these settings", and press Enter through the pre-filled answers, changing only what moved):
 
 ```
 Host jpvpn
@@ -335,6 +368,8 @@ Host jpvpn
     AddKeysToAgent yes
     UseKeychain yes      # macOS only
 ```
+
+Switching to a *different* alias, or changing a port? That's the settings file: `proxy-config set SSH_HOST other-vm`, `proxy-config set REMOTE_PROXY_PORT 8899`, …
 
 ---
 

@@ -62,11 +62,13 @@ Prefer nothing installed in your shell? Use **[Proxy — manual, no profile](doc
 
 ```bash
 cc              # proxy ON + launch Claude   (cc-safe keeps permission prompts)
+cc -c           # …and continue the last session (cc -r: pick one; any claude flag passes through)
 cx              # proxy ON + launch Codex    (cx-safe keeps approval prompts)
 proxy-up        # proxy ON, launch nothing
 cc-stop         # proxy OFF — one off-switch for both
 proxy-status    # what's running + your external IP
 proxy-doctor    # something wrong? this says exactly what + how to fix
+proxy-update    # get the newest profile — your settings (proxy-config) are kept
 ```
 
 ---
@@ -75,4 +77,4 @@ proxy-doctor    # something wrong? this says exactly what + how to fix
 
 - **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md)
 - **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
-- **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Upgrading from the old setup](docs/upgrading.md)
+- **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Updating & upgrading](docs/upgrading.md)

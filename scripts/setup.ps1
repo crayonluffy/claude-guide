@@ -4,14 +4,20 @@
 # Run with:
 #   irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 #
-# Does the whole one-time setup: prompts for your VM details, installs and
-# locks your SSH key, writes an ~/.ssh/config alias, installs the cc profile,
-# and tests the connection. Prefer the paste-blocks in the README if you'd
-# rather not run a downloaded script.
+# First run: prompts for your VM details, installs and locks your SSH key,
+# writes an ~/.ssh/config alias, installs the cc/cx profile, and tests the
+# connection.
+#
+# Later runs: finds your existing settings (~\.claude-proxy.conf.psd1, or the
+# Settings block of an older profile) and offers to just update the profile -
+# nothing to type again.
+#
+# Prefer the paste-blocks in the guide if you'd rather not run a downloaded script.
 # ============================================================
 
 $ErrorActionPreference = 'Stop'
-$repoRaw = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
+$repoRaw  = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
+$confPath = Join-Path $HOME '.claude-proxy.conf.psd1'
 
 # Any unexpected error: say WHAT failed and WHERE, instead of dying with a bare
 # one-line exception (the wizard runs via 'irm | iex', so users can't see a stack).
@@ -39,21 +45,74 @@ function Confirm-Yes($prompt, [bool]$defaultYes = $true) {
     return ($v -match '^(y|yes)$')
 }
 
+# Read-Default that becomes Read-Required when there is no default to offer.
+function Read-Smart($prompt, $default) {
+    if ($default) { return Read-Default $prompt $default } else { return Read-Required $prompt }
+}
+
 Write-Host ""
 Write-Host "=== Claude proxy setup wizard (Windows) ===" -ForegroundColor Cyan
 Write-Host ""
 
-# --- 1. Collect VM details -------------------------------------------------
-$ServerIp  = Read-Required "Server IP or hostname"
-$SshUser   = Read-Required "SSH username"
-$Alias     = Read-Default  "SSH alias (the shortcut you'll type)" "jpvpn"
-$SshPort   = Read-Default  "SSH port" "22"
-$ProxyPort = Read-Default  "VM proxy port (tinyproxy on the VM)" "8888"
-
-# --- 2. Find / choose the private key --------------------------------------
 $downloads = Join-Path $HOME 'Downloads'
 $sshDir    = Join-Path $HOME '.ssh'
 New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+$configPath = Join-Path $sshDir 'config'
+
+# --- 0. Existing install? Pre-fill everything from it -----------------------
+# Sources, in order of preference: ~\.claude-proxy.conf.psd1, the Settings block
+# of an old-style profile, and the ~/.ssh/config alias itself.
+$dAlias = 'jpvpn'; $dSshPort = '22'; $dProxyPort = '8888'; $dIp = ''; $dUser = ''; $dKey = ''
+$found = $null
+$existingConf = @{}
+if (Test-Path $confPath) {
+    try {
+        $existingConf = Import-PowerShellDataFile $confPath
+        $found = $confPath
+        if ($existingConf.SSH_HOST)          { $dAlias     = "$($existingConf.SSH_HOST)" }
+        if ($existingConf.SSH_PORT)          { $dSshPort   = "$($existingConf.SSH_PORT)" }
+        if ($existingConf.REMOTE_PROXY_PORT) { $dProxyPort = "$($existingConf.REMOTE_PROXY_PORT)" }
+    } catch { Write-Host "[Warn] Could not read $confPath - ignoring it." -ForegroundColor Yellow }
+} elseif ((Test-Path $PROFILE) -and (Select-String -Path $PROFILE -Pattern '^\$script:SSH_HOST\s*=' -Quiet)) {
+    $found = "$PROFILE (settings inside the old profile)"
+    $old = Get-Content $PROFILE -Raw
+    $m = [regex]::Match($old, '(?m)^\$script:SSH_HOST\s*=\s*"([^"]*)"');          if ($m.Success) { $dAlias     = $m.Groups[1].Value }
+    $m = [regex]::Match($old, '(?m)^\$script:SSH_PORT\s*=\s*(\d+)');             if ($m.Success) { $dSshPort   = $m.Groups[1].Value }
+    $m = [regex]::Match($old, '(?m)^\$script:REMOTE_PROXY_PORT\s*=\s*(\d+)');    if ($m.Success) { $dProxyPort = $m.Groups[1].Value }
+}
+$aliasExists = (Test-Path $configPath) -and
+               (Select-String -Path $configPath -Pattern "^Host\s+$([regex]::Escape($dAlias))(\s|$)" -Quiet)
+if ($aliasExists -and (Get-Command ssh -ErrorAction SilentlyContinue)) {
+    # ssh -G resolves the alias exactly as ssh itself would.
+    $g = @{}
+    try { & ssh -G $dAlias 2>$null | ForEach-Object { $w = $_ -split '\s+', 2; if ($w.Count -eq 2 -and -not $g.ContainsKey($w[0])) { $g[$w[0]] = $w[1] } } } catch {}
+    if ($g.hostname)     { $dIp = $g.hostname }
+    if ($g.user)         { $dUser = $g.user }
+    if ($g.port)         { $dSshPort = $g.port }
+    if ($g.identityfile) { $dKey = $g.identityfile }
+}
+
+$quick = $false
+if ($found) {
+    Write-Host ""
+    Write-Host "[Found] Existing setup: $found" -ForegroundColor Green
+    Write-Host "        server alias '$dAlias' -> $(if ($dUser) { $dUser } else { '?' })@$(if ($dIp) { $dIp } else { '?' }) (ssh port $dSshPort), VM proxy port $dProxyPort" -ForegroundColor Green
+    if (Confirm-Yes "Keep these settings and only update the cc/cx profile?") { $quick = $true }
+}
+
+if ($quick) {
+    $Alias = $dAlias; $SshPort = $dSshPort; $ProxyPort = $dProxyPort
+} else {
+
+# --- 1. Collect VM details (defaults = whatever we found) ------------------
+Write-Host ""
+$ServerIp  = Read-Smart   "Server IP or hostname" $dIp
+$SshUser   = Read-Smart   "SSH username" $dUser
+$Alias     = Read-Default "SSH alias (the shortcut you'll type)" $dAlias
+$SshPort   = Read-Default "SSH port" $dSshPort
+$ProxyPort = Read-Default "VM proxy port (tinyproxy on the VM)" $dProxyPort
+
+# --- 2. Find / choose the private key --------------------------------------
 
 $key = Get-ChildItem -File $downloads -ErrorAction SilentlyContinue |
     Where-Object { $_.Extension -ne '.pub' -and $_.Length -lt 100KB } |
@@ -65,6 +124,10 @@ if ($key) {
     Write-Host ""
     Write-Host "[Found] Newest private key in Downloads: $($key.FullName)" -ForegroundColor Green
     if (Confirm-Yes "Use this key?") { $keyPath = $key.FullName }
+}
+if (-not $keyPath -and $dKey -and (Test-Path -LiteralPath $dKey)) {
+    Write-Host "[Found] Key already installed for '$dAlias': $dKey" -ForegroundColor Green
+    if (Confirm-Yes "Keep using it?") { $keyPath = $dKey }
 }
 while (-not $keyPath -or -not (Test-Path -LiteralPath $keyPath)) {
     $keyPath = (Read-Host "Full path to your private key").Trim().Trim('"')
@@ -84,7 +147,6 @@ icacls $dest /remove "Administrators"  | Out-Null
 Write-Host "[OK] Key installed and locked: $dest" -ForegroundColor Green
 
 # --- 4. Write the ~/.ssh/config alias --------------------------------------
-$configPath = Join-Path $sshDir 'config'
 $aliasExists = (Test-Path $configPath) -and
                (Select-String -Path $configPath -Pattern "^Host\s+$([regex]::Escape($Alias))(\s|$)" -Quiet)
 $writeAlias = $true
@@ -111,15 +173,38 @@ if ($writeAlias) {
     Write-Host "[OK] SSH alias '$Alias' written - connect with: ssh $Alias" -ForegroundColor Green
 }
 
-# --- 5. Install the cc profile ---------------------------------------------
+} # end of the full (non-quick) path
+
+# --- 5. Save the settings (~\.claude-proxy.conf.psd1) ------------------------
+# The profile itself carries no personal settings anymore, so updating it
+# (proxy-update, or re-running this wizard) never loses them.
+$existingConf['SSH_HOST']          = $Alias
+$existingConf['SSH_PORT']          = [int]$SshPort
+$existingConf['REMOTE_PROXY_PORT'] = [int]$ProxyPort
+$confLines = @(
+    '@{',
+    '    # ~\.claude-proxy.conf.psd1 - YOUR settings for the cc/cx profile.',
+    "    # 'proxy-update' replaces the profile but never touches this file.",
+    "    # Remove a line to fall back to the profile's built-in default."
+)
+foreach ($k in ($existingConf.Keys | Sort-Object)) {
+    $v = $existingConf[$k]
+    if ($v -is [int]) { $confLines += "    $k = $v" } else { $confLines += "    $k = '$("$v" -replace "'", "''")'" }
+}
+$confLines += '}'
+Set-Content -Path $confPath -Value $confLines -Encoding ascii
+Write-Host "[OK] Settings saved: $confPath" -ForegroundColor Green
+
+# --- 6. Install / update the cc profile ------------------------------------
 try {
     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 } catch {
     Write-Host "[Warn] Could not set execution policy (managed by group policy?). The profile may not auto-load in new windows." -ForegroundColor Yellow
 }
-# Download + patch in TEMP first, then install with ONE copy into $PROFILE -
-# so a locked/blocked Documents folder fails in exactly one place, with a clear
-# diagnosis and a rescue copy the user can install by hand.
+# Download into TEMP first, then install with ONE copy into $PROFILE - so a
+# locked/blocked Documents folder fails in exactly one place, with a clear
+# diagnosis and a rescue copy the user can install by hand. No patching:
+# the profile reads its settings from the conf file written above.
 $tmpProfile = Join-Path $env:TEMP 'Microsoft.PowerShell_profile.ps1'
 try {
     Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/Microsoft.PowerShell_profile.ps1" -OutFile $tmpProfile
@@ -129,20 +214,26 @@ try {
     Write-Host "       Check your network / corporate proxy, then re-run the wizard." -ForegroundColor Yellow
     return
 }
-# Patch the Settings block so the profile matches the answers above.
-$raw = Get-Content $tmpProfile -Raw
-$raw = $raw -replace '(?m)^(\$script:SSH_HOST\s*=\s*)"[^"]*"',        ('$1"' + $Alias + '"')
-$raw = $raw -replace '(?m)^(\$script:SSH_PORT\s*=\s*)\d+',           ('${1}' + $SshPort)
-$raw = $raw -replace '(?m)^(\$script:REMOTE_PROXY_PORT\s*=\s*)\d+',  ('${1}' + $ProxyPort)
-Set-Content -Path $tmpProfile -Value $raw -Encoding utf8
+$raw  = Get-Content $tmpProfile -Raw
+$errs = $null
+[System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
+if ($errs.Count -gt 0 -or $raw -notmatch '(?m)^\$script:PROFILE_VERSION\s*=') {
+    Write-Host "[FAIL] The downloaded profile doesn't look valid - not installing it. Re-run the wizard later." -ForegroundColor Red
+    return
+}
+$newVer = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
 
 $profileInstalled = $false
 try {
     $profileDir = Split-Path $PROFILE
     if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
+    if ((Test-Path $PROFILE) -and ((Get-Content $PROFILE -Raw) -ne $raw)) {
+        Copy-Item -LiteralPath $PROFILE -Destination "$PROFILE.bak" -Force
+        Write-Host "[Info] Previous profile kept at $PROFILE.bak" -ForegroundColor DarkGray
+    }
     Copy-Item -LiteralPath $tmpProfile -Destination $PROFILE -Force
     Unblock-File -Path $PROFILE -ErrorAction SilentlyContinue
-    Write-Host "[OK] Profile installed: $PROFILE" -ForegroundColor Green
+    Write-Host "[OK] Profile installed: $PROFILE (v$newVer)" -ForegroundColor Green
     $profileInstalled = $true
 } catch {
     Write-Host "[FAIL] Could not write the profile to: $PROFILE" -ForegroundColor Red
@@ -161,7 +252,7 @@ try {
     Write-Host "           Copy-Item '$tmpProfile' `$PROFILE -Force; . `$PROFILE" -ForegroundColor White
 }
 
-# --- 6. Verify the connection ----------------------------------------------
+# --- 7. Verify the connection ----------------------------------------------
 Write-Host ""
 Write-Host "[Check] Testing: ssh $Alias ..." -ForegroundColor Cyan
 $sshOk = $false
@@ -178,7 +269,7 @@ if ($sshOk) {
     Write-Host "       Try once manually:  ssh $Alias" -ForegroundColor Yellow
 }
 
-# --- 7. Load the profile + next steps --------------------------------------
+# --- 8. Load the profile + next steps --------------------------------------
 if ($profileInstalled) {
     . $PROFILE
 } else {
@@ -195,3 +286,4 @@ Write-Host ""
 Write-Host "Done! The profile is loaded in this window - just run:" -ForegroundColor Cyan
 Write-Host "    cc        (Claude)   or   cx        (Codex)" -ForegroundColor White
 Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
+Write-Host "Later: 'proxy-update' fetches the newest profile (settings kept), 'proxy-config' shows/edits them." -ForegroundColor DarkGray
