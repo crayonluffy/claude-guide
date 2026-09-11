@@ -50,7 +50,7 @@ One caveat: on a **shared** client machine, other local users could use your `12
 
 | | Page | What you'll do | Time |
 |---|------|----------------|------|
-| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once, get `cc` / `cx` forever | ~5 min |
+| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once (Windows, macOS, Linux or WSL), get `cc` / `cx` forever | ~5 min |
 | 2 | **[Install Claude Code](docs/install-claude.md)** | Node.js → `claude` CLI → sign in via `cc` | ~5 min |
 | 3 | **[Install Codex](docs/install-codex.md)** *(optional)* | `codex` CLI → sign in via `cx` | ~3 min |
 
@@ -62,11 +62,13 @@ Prefer nothing installed in your shell? Use **[Proxy — manual, no profile](doc
 
 ```bash
 cc              # proxy ON + launch Claude   (cc-safe keeps permission prompts)
+cc -c           # …and continue the last session (cc -r: pick one; any claude flag passes through)
 cx              # proxy ON + launch Codex    (cx-safe keeps approval prompts)
 proxy-up        # proxy ON, launch nothing
 cc-stop         # proxy OFF — one off-switch for both
 proxy-status    # what's running + your external IP
 proxy-doctor    # something wrong? this says exactly what + how to fix
+proxy-update    # get the newest profile — your settings (proxy-config) are kept
 ```
 
 ---
@@ -75,4 +77,4 @@ proxy-doctor    # something wrong? this says exactly what + how to fix
 
 - **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md)
 - **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
-- **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Upgrading from the old setup](docs/upgrading.md)
+- **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Updating & upgrading](docs/upgrading.md)

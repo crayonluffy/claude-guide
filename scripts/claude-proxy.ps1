@@ -1,5 +1,7 @@
 # ============================================================
-# PowerShell Profile - SSH Tunnel + HTTP proxy (Claude/Codex) + SOCKS5 (Chrome)
+# claude-proxy.ps1 - SSH Tunnel + HTTP proxy (Claude/Codex) + SOCKS5 (Chrome)
+# Installed as ~\.claude-proxy.ps1 and dot-sourced from $PROFILE (one line),
+# or loaded by the "Claude Proxy Shell" shortcut when $PROFILE can't be edited.
 # ============================================================
 # One SSH connection carries two forwards:
 #   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude & Codex (HTTPS_PROXY)
@@ -9,13 +11,27 @@
 # proxy (see webproxy-manager: https://github.com/crayonluffy/forge/tree/main/webproxy-manager).
 # Codex reads the same HTTP(S)_PROXY env vars, so it shares that forward too.
 # Chrome is happier on SOCKS5 (full traffic, remote DNS), so it uses the -D forward.
+#
+# YOUR SETTINGS LIVE IN ~\.claude-proxy.conf.psd1, NOT IN THIS FILE.
+#   proxy-config        show / edit them
+#   proxy-update        replace this file with the latest version (settings are kept)
 # ============================================================
 
+$script:PROFILE_VERSION = '2.0.0'
+$script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
+$script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
+$script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
+# The one line $PROFILE needs. Lives in your HOME, so a locked Documents folder
+# (Controlled folder access / OneDrive / policy) never blocks an update.
+$script:LOADER_LINE  = 'if (Test-Path "$HOME\.claude-proxy.ps1") { . "$HOME\.claude-proxy.ps1" }   # claude-proxy'
+
 # ============================================================
-# Settings - EDIT THESE
+# Settings - built-in defaults. DO NOT EDIT HERE: put overrides in
+# ~\.claude-proxy.conf.psd1 (created by the setup wizard / 'proxy-config edit').
+# That file survives 'proxy-update', so you never re-enter anything.
 # ============================================================
-# If you ran the "Step 1" setup, you already have an ~/.ssh/config alias -
-# just point SSH_HOST at it and leave SSH_USER / SSH_KEY blank.
+# If you ran the setup wizard, you already have an ~/.ssh/config alias -
+# SSH_HOST points at it and SSH_USER / SSH_KEY stay blank.
 $script:SSH_HOST          = "jpvpn"   # an ~/.ssh/config alias, OR a raw host/IP
 $script:SSH_USER          = ""        # leave blank when SSH_HOST is a config alias
 $script:SSH_KEY           = ""        # leave blank when SSH_HOST is a config alias
@@ -40,9 +56,27 @@ $script:NO_PROXY_LIST = @(
     "*.local",
     "*.internal",
     "*.corp"
-    # Add your company intranet ranges / domains here, e.g.:
-    # , "172.20.0.0/24", "*.mycorp.example"
+    # Company intranet ranges / domains go in the conf file as NO_PROXY_EXTRA, e.g.
+    # NO_PROXY_EXTRA = '172.20.0.0/24,*.mycorp.example'
 ) -join ","
+
+$script:BANNER         = 1     # one-line notice when a new window loads this profile (0 = silent)
+$script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
+
+# --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
+$script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
+                      'SOCKS_PORT','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
+if (Test-Path $script:PROXY_CONF) {
+    try {
+        $cfg = Import-PowerShellDataFile $script:PROXY_CONF
+        foreach ($k in $script:CONF_KEYS) {
+            if ($cfg.ContainsKey($k)) { Set-Variable -Name $k -Value $cfg[$k] -Scope Script }
+        }
+    } catch {
+        Write-Host "[Warn] Could not read $($script:PROXY_CONF) ($($_.Exception.Message)) - using built-in defaults" -ForegroundColor Yellow
+    }
+}
+if ($script:NO_PROXY_EXTRA) { $script:NO_PROXY_LIST = "$($script:NO_PROXY_LIST),$($script:NO_PROXY_EXTRA)" }
 
 # ============================================================
 # Helper: Check if a port is in use
@@ -312,31 +346,52 @@ function proxy-up {
 # All-in-one: proxy stack + launch Claude
 # ============================================================
 
+# Split wrapper flags (-Safe / -NoVerify, any dash style) from app arguments.
+# Everything else is passed straight to the app, so 'cc -c', 'cc -r',
+# 'cc --resume <id>', 'cx resume' ... all work.
+function _split-launch-args {
+    param($ArgList)
+    $r = @{ Safe = $false; NoVerify = $false; App = @() }
+    foreach ($a in $ArgList) {
+        switch -Regex ("$a") {
+            '^-{1,2}safe$'       { $r.Safe = $true }
+            '^-{1,2}no-?verify$' { $r.NoVerify = $true }
+            default              { $r.App += "$a" }
+        }
+    }
+    return $r
+}
+
 function cc {
-    param([switch]$Safe, [switch]$NoVerify)
+    $o = _split-launch-args $args
+    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+        Write-Host "[Err] 'claude' not found - install it first: npm install -g @anthropic-ai/claude-code" -ForegroundColor Red
+        return
+    }
 
     # Steps 1-3: bring up tunnel + env vars + verify
-    if (-not (proxy-up -NoVerify:$NoVerify)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify)) { return }
 
     # Step 4: Launch Claude
-    Write-Host "[Launch] Starting Claude..." -ForegroundColor Cyan
+    Write-Host "[Launch] Starting Claude $($o.App -join ' ')..." -ForegroundColor Cyan
     Write-Host ""
 
-    if ($Safe) {
-        claude
+    $app = $o.App
+    if ($o.Safe) {
+        claude @app
     } else {
-        claude --dangerously-skip-permissions
+        claude --dangerously-skip-permissions @app
     }
 }
 
-function cc-safe { cc -Safe }
+function cc-safe { cc -Safe @args }
 
 # ============================================================
 # All-in-one: proxy stack + launch Codex (same tunnel as cc)
 # ============================================================
 
 function cx {
-    param([switch]$Safe, [switch]$NoVerify)
+    $o = _split-launch-args $args
 
     # Locate codex first, so we don't bring the tunnel up only to find it missing.
     if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
@@ -345,20 +400,21 @@ function cx {
     }
 
     # Steps 1-3: bring up tunnel + env vars + verify (the same stack cc uses)
-    if (-not (proxy-up -NoVerify:$NoVerify)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify)) { return }
 
     # Step 4: Launch Codex (it picks up HTTP(S)_PROXY from this shell's env)
-    Write-Host "[Launch] Starting Codex..." -ForegroundColor Cyan
+    Write-Host "[Launch] Starting Codex $($o.App -join ' ')..." -ForegroundColor Cyan
     Write-Host ""
 
-    if ($Safe) {
-        codex
+    $app = $o.App
+    if ($o.Safe) {
+        codex @app
     } else {
-        codex --dangerously-bypass-approvals-and-sandbox
+        codex --dangerously-bypass-approvals-and-sandbox @app
     }
 }
 
-function cx-safe { cx -Safe }
+function cx-safe { cx -Safe @args }
 
 # ============================================================
 # Stop everything
@@ -430,7 +486,7 @@ function cc-stop {
 
 function proxy-status {
     Write-Host ""
-    Write-Host "=== Proxy Status ===" -ForegroundColor Cyan
+    Write-Host "=== Proxy Status (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
     Write-Host ""
 
     $health = Get-TunnelHealth
@@ -472,7 +528,29 @@ function proxy-status {
 
 function proxy-doctor {
     Write-Host ""
-    Write-Host "=== Proxy Doctor ===" -ForegroundColor Cyan
+    Write-Host "=== Proxy Doctor (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
+
+    # --- profile + settings ---
+    Write-Host "[ OK ]  Profile: $($script:PROFILE_PATH) (v$($script:PROFILE_VERSION)) - 'proxy-update -Check' to see if a newer one exists" -ForegroundColor Green
+    $profRaw = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    if ($profRaw -match '\.claude-proxy\.ps1') {
+        Write-Host "[ OK ]  `$PROFILE loads it in every new window" -ForegroundColor Green
+    } elseif ($profRaw -match '(?m)^\$script:(PROFILE_VERSION|SSH_HOST)\s*=') {
+        Write-Host "[WARN] `$PROFILE still holds an OLD full copy of the profile - new windows load that, not $($script:PROFILE_PATH). Fix: proxy-update (or re-run the wizard)" -ForegroundColor Yellow
+    } else {
+        Write-Host "[WARN] `$PROFILE does not load $($script:PROFILE_PATH) - only this window has cc/cx. Fix: re-run the wizard, or use the 'Claude Proxy Shell' shortcut (proxy-shortcut)" -ForegroundColor Yellow
+    }
+    if (Test-Path $script:PROXY_CONF) {
+        Write-Host "[ OK ]  Settings: $($script:PROXY_CONF) (server '$($script:SSH_HOST)', VM proxy port $($script:REMOTE_PROXY_PORT))" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] No $($script:PROXY_CONF) - using built-in defaults (server '$($script:SSH_HOST)'). Fix: proxy-config edit (or re-run the setup wizard)" -ForegroundColor Yellow
+    }
+    $sshCfg = Join-Path $HOME '.ssh\config'
+    if ((Test-Path $sshCfg) -and (Select-String -Path $sshCfg -Pattern "^Host\s+$([regex]::Escape($script:SSH_HOST))(\s|$)" -Quiet)) {
+        Write-Host "[ OK ]  ~/.ssh/config has an alias '$($script:SSH_HOST)'" -ForegroundColor Green
+    } elseif (-not $script:SSH_USER) {
+        Write-Host "[WARN] No 'Host $($script:SSH_HOST)' in ~/.ssh/config and SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set SSH_USER/SSH_KEY (proxy-config edit)" -ForegroundColor Yellow
+    }
 
     # --- tools ---
     if (Get-Command codex -ErrorAction SilentlyContinue) {
@@ -558,6 +636,188 @@ function proxy-doctor {
 }
 
 # ============================================================
+# Settings file: show / edit / set  (~\.claude-proxy.conf.psd1)
+# ============================================================
+
+# Write EVERY current setting to the conf file (regenerated each time, so the
+# format stays valid). Used by the wizard-less first update and proxy-config.
+function _conf-write-all {
+    $lines = @(
+        '@{',
+        '    # ~\.claude-proxy.conf.psd1 - YOUR settings for the cc/cx profile.',
+        "    # 'proxy-update' replaces the profile but never touches this file.",
+        "    # Remove a line to fall back to the profile's built-in default."
+    )
+    foreach ($k in $script:CONF_KEYS) {
+        $v = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        if ($v -is [int]) { $lines += "    $k = $v" }
+        else              { $lines += "    $k = '$("$v" -replace "'", "''")'" }
+    }
+    $lines += '}'
+    Set-Content -Path $script:PROXY_CONF -Value $lines -Encoding ascii
+}
+
+function proxy-config {
+    param([string]$Action = 'show', [string]$Key, [string]$Value)
+    switch ($Action.ToLower()) {
+        'show' {
+            Write-Host ""
+            Write-Host "=== claude-proxy settings (v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
+            if (Test-Path $script:PROXY_CONF) { Write-Host "  file: $($script:PROXY_CONF)" }
+            else { Write-Host "  file: $($script:PROXY_CONF)  (not created yet - built-in defaults in use)" -ForegroundColor Yellow }
+            Write-Host ""
+            foreach ($k in $script:CONF_KEYS) {
+                $v = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+                Write-Host ("  {0,-18} = {1}" -f $k, $v)
+            }
+            Write-Host ("  {0,-18} = {1}" -f 'NO_PROXY_LIST', $script:NO_PROXY_LIST)
+            Write-Host ""
+            Write-Host "  proxy-config edit              open the file in Notepad" -ForegroundColor DarkGray
+            Write-Host "  proxy-config set KEY VALUE     e.g. proxy-config set SSH_HOST myvm" -ForegroundColor DarkGray
+            Write-Host "  proxy-config path              print the file path" -ForegroundColor DarkGray
+            Write-Host ""
+        }
+        'path' { $script:PROXY_CONF }
+        'edit' {
+            if (-not (Test-Path $script:PROXY_CONF)) { _conf-write-all }
+            Start-Process notepad.exe -ArgumentList "`"$($script:PROXY_CONF)`"" -Wait
+            Write-Host "[OK] Saved. Load the new settings with:  . '$($script:PROFILE_PATH)'   (new windows pick them up automatically)" -ForegroundColor Green
+        }
+        'set' {
+            if (-not $Key -or $null -eq $Value) {
+                Write-Host "usage: proxy-config set KEY VALUE   (KEY = one of: $($script:CONF_KEYS -join ', '))" -ForegroundColor Yellow
+                return
+            }
+            $k = $script:CONF_KEYS | Where-Object { $_ -ieq $Key } | Select-Object -First 1
+            if (-not $k) {
+                Write-Host "[Err] Unknown key '$Key'. Valid: $($script:CONF_KEYS -join ', ')" -ForegroundColor Red
+                return
+            }
+            $v = if ($Value -match '^\d+$') { [int]$Value } else { $Value }
+            Set-Variable -Name $k -Value $v -Scope Script
+            _conf-write-all
+            Write-Host "[OK] $k = $v saved to $($script:PROXY_CONF) and applied in this window." -ForegroundColor Green
+        }
+        default { Write-Host "usage: proxy-config [show|edit|set KEY VALUE|path]" -ForegroundColor Yellow }
+    }
+}
+
+# ============================================================
+# Self-update: fetch the latest profile, keep ~\.claude-proxy.conf.psd1
+# ============================================================
+
+function _fetch-file { param($Uri, $OutFile) Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile }
+
+function proxy-update {
+    param([switch]$Check, [switch]$Force)
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.ps1.new'
+    Write-Host "[Update] Fetching latest profile from GitHub..." -ForegroundColor Cyan
+    try {
+        _fetch-file "$($script:REPO_RAW)/claude-proxy.ps1" $tmp
+    } catch {
+        Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again." -ForegroundColor Yellow
+        return
+    }
+    # Sanity: must be this profile and must parse, or we'd brick every new window.
+    $raw  = Get-Content $tmp -Raw
+    $errs = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
+    if ($errs.Count -gt 0 -or $raw -notmatch '(?m)^\$script:PROFILE_VERSION\s*=') {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Write-Host "[Err] Downloaded file doesn't look like a valid profile - nothing changed." -ForegroundColor Red
+        return
+    }
+    $newver  = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
+    $current = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    if (-not $Force -and $current -eq $raw) {
+        Remove-Item $tmp -Force
+        Write-Host "[OK] Already up to date (v$($script:PROFILE_VERSION))" -ForegroundColor Green
+        return
+    }
+    if ($Check) {
+        Remove-Item $tmp -Force
+        Write-Host "[Info] Update available: v$($script:PROFILE_VERSION) -> v$newver. Run 'proxy-update' to install it." -ForegroundColor Yellow
+        return
+    }
+    # First update from an install that still had settings inside the profile:
+    # snapshot them to the conf file so nothing has to be typed again.
+    if (-not (Test-Path $script:PROXY_CONF)) {
+        _conf-write-all
+        Write-Host "[OK] Saved your current settings to $($script:PROXY_CONF) (they survive every future update)" -ForegroundColor Green
+    }
+    $dest = $script:PROFILE_PATH
+    try {
+        if (Test-Path $dest) { Copy-Item $dest "$dest.bak" -Force }
+        Copy-Item $tmp $dest -Force
+    } catch {
+        Write-Host "[Err] Could not write $dest : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "       The new version is saved at $tmp - copy it there by hand:  Copy-Item '$tmp' '$dest' -Force" -ForegroundColor Yellow
+        return
+    }
+    Remove-Item $tmp -Force
+    if ($env:OS -eq 'Windows_NT') { try { Unblock-File -Path $dest -ErrorAction SilentlyContinue } catch {} }
+    Write-Host "[OK] Updated $dest : v$($script:PROFILE_VERSION) -> v$newver  (previous copy: $dest.bak)" -ForegroundColor Green
+    # Make sure $PROFILE actually loads that file (older installs had the whole
+    # profile INSIDE $PROFILE). Best effort - Documents may be locked.
+    switch (_ensure-loader) {
+        'ok'       { }
+        'replaced' { Write-Host "[OK] `$PROFILE now just loads $dest (old copy kept at $PROFILE.bak)" -ForegroundColor Green }
+        'added'    { Write-Host "[OK] Added the loader line to `$PROFILE" -ForegroundColor Green }
+        'locked'   { Write-Host "[Warn] Could not edit `$PROFILE (locked Documents folder). New windows keep loading whatever is in it;" -ForegroundColor Yellow
+                     Write-Host "       use the 'Claude Proxy Shell' shortcut (proxy-shortcut creates it) or run:  . '$dest'" -ForegroundColor Yellow }
+    }
+    Write-Host "[OK] Load it now with:  . '$dest'" -ForegroundColor Green
+}
+
+# Make $PROFILE load ~\.claude-proxy.ps1. Returns ok | added | replaced | locked.
+#   - $PROFILE already has the loader line            -> ok
+#   - $PROFILE IS an old full copy of this profile    -> back it up, replace with the loader
+#   - anything else (user's own profile, or none)     -> append the loader
+function _ensure-loader {
+    try {
+        $cur = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+        if ($cur -match '\.claude-proxy\.ps1') { return 'ok' }
+        $dir = Split-Path $PROFILE
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        if ($cur -match '(?m)^\$script:(PROFILE_VERSION|SSH_HOST)\s*=') {
+            Copy-Item -LiteralPath $PROFILE -Destination "$PROFILE.bak" -Force
+            Set-Content -Path $PROFILE -Value $script:LOADER_LINE -Encoding ascii
+            return 'replaced'
+        }
+        Add-Content -Path $PROFILE -Value "`r`n$($script:LOADER_LINE)" -Encoding ascii
+        return 'added'
+    } catch {
+        return 'locked'
+    }
+}
+
+# Desktop shortcut "Claude Proxy Shell": a PowerShell window that loads
+# ~\.claude-proxy.ps1 without needing $PROFILE or a script execution policy
+# (the profile is read with Invoke-Expression, which policies don't gate).
+function proxy-shortcut {
+    $lnkPath = '(Desktop)\Claude Proxy Shell.lnk'
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        $lnkPath = Join-Path $desktop 'Claude Proxy Shell.lnk'
+        $exe = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })
+        $ws  = New-Object -ComObject WScript.Shell
+        $lnk = $ws.CreateShortcut($lnkPath)
+        $lnk.TargetPath       = $exe
+        $lnk.Arguments        = "-NoExit -ExecutionPolicy Bypass -Command `"Invoke-Expression (Get-Content -Raw '$($script:PROFILE_PATH)')`""
+        $lnk.WorkingDirectory = $HOME
+        $lnk.Description      = 'PowerShell with the cc / cx proxy commands loaded'
+        $lnk.Save()
+        Write-Host "[OK] Shortcut created: $lnkPath  - double-click it to get a window with cc / cx ready" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "[Warn] Could not create the shortcut ($($_.Exception.Message)). Manual alternative - open PowerShell and run:" -ForegroundColor Yellow
+        Write-Host "       Invoke-Expression (Get-Content -Raw '$($script:PROFILE_PATH)')" -ForegroundColor White
+        return $false
+    }
+}
+
+# ============================================================
 # Launch Chrome through the SOCKS5 proxy (separate, isolated profile)
 # ============================================================
 
@@ -594,15 +854,22 @@ function chrome-proxy {
 
 function cc-help {
     Write-Host ""
-    Write-Host "=== Claude / Codex + SSH Tunnel Quick Commands ===" -ForegroundColor DarkGray
+    Write-Host "=== Claude / Codex + SSH Tunnel Quick Commands (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor DarkGray
     Write-Host "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)" -ForegroundColor DarkGray
-    Write-Host "  cc-safe         - Same, but keeps Claude's permission prompts" -ForegroundColor DarkGray
+    Write-Host "  cc -c / cc -r   - Same, but continue the last session / pick one to resume" -ForegroundColor DarkGray
+    Write-Host "  cc-safe         - Same as cc, but keeps Claude's permission prompts" -ForegroundColor DarkGray
     Write-Host "  cx              - Turn the proxy ON and launch Codex (skips approval prompts)" -ForegroundColor DarkGray
     Write-Host "  cx-safe         - Same, but keeps Codex's approval prompts" -ForegroundColor DarkGray
+    Write-Host "                    (anything after cc/cx is passed to claude/codex as-is)" -ForegroundColor DarkGray
     Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch anything" -ForegroundColor DarkGray
     Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
+    Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray
+    Write-Host "  proxy-update    - Fetch the latest version of this profile; your settings are kept" -ForegroundColor DarkGray
+    Write-Host "  proxy-shortcut  - Desktop shortcut that opens a window with cc/cx ready (no `$PROFILE needed)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
     Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray
@@ -615,5 +882,8 @@ function cc-help {
     Write-Host ""
 }
 
-# Show the available commands when this profile loads
-cc-help
+# One line when a new window loads this profile. Silence it with BANNER = 0 in
+# ~\.claude-proxy.conf.psd1.
+if ($script:BANNER -eq 1) {
+    Write-Host "claude-proxy v$($script:PROFILE_VERSION) ready (server: $($script:SSH_HOST)) - 'cc' launches Claude, 'cc-help' lists all commands" -ForegroundColor DarkGray
+}

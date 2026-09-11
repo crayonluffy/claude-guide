@@ -42,7 +42,7 @@
 | `/diff` | Review uncommitted changes |
 | `/rewind` | Undo edits / restore a checkpoint (also `Esc Esc`) |
 | `/plan` | Enter plan mode (analyze without executing) |
-| `/resume` | Resume a previous session |
+| `/resume` | Resume a previous session (from the shell: `cc -c` continues the last one, `cc -r` lets you pick) |
 | `/fork` | Branch the current conversation |
 | `/agents` | Manage subagents & background sessions |
 | `/code-review` | Review the current diff for bugs (`--comment` posts to a PR) |
@@ -136,7 +136,7 @@ Current model IDs: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5` �
 |---------|---------|
 | `codex` | Start an interactive session (asks approval before edits/commands by default) |
 | `codex "task"` | Start with an initial prompt |
-| `codex resume` | Resume a previous session |
+| `codex resume` | Resume a previous session (through the proxy: `cx resume`) |
 | `codex exec "task"` | Non-interactive mode — run a task and exit |
 | `codex --full-auto` | Auto-edit/run inside a sandbox (middle ground) |
 | `codex --dangerously-bypass-approvals-and-sandbox` | Skip all approvals — what `cx` uses |
