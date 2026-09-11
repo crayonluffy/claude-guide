@@ -166,13 +166,13 @@ tunnel-start() {
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
-    local health status hpid hname hport newp
+    local health tstate hpid hname hport newp
     health=$(_tunnel_health)
-    status=$(echo "$health" | awk '{print $1}')
+    tstate=$(echo "$health" | awk '{print $1}')
     hpid=$(echo "$health" | awk '{print $2}')
     hname=$(echo "$health" | awk '{print $3}')
     hport=$(echo "$health" | awk '{print $4}')
-    case "$status" in
+    case "$tstate" in
         ok)
             if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
@@ -474,13 +474,13 @@ proxy-status() {
     echo ""
     echo "=== Proxy Status ==="
     echo ""
-    local health status hpid hname hport note=""
+    local health tstate hpid hname hport note=""
     health=$(_tunnel_health)
-    status=$(echo "$health" | awk '{print $1}')
+    tstate=$(echo "$health" | awk '{print $1}')
     hpid=$(echo "$health" | awk '{print $2}')
     hname=$(echo "$health" | awk '{print $3}')
     hport=$(echo "$health" | awk '{print $4}')
-    case "$status" in
+    case "$tstate" in
         ok)
             if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
