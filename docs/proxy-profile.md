@@ -68,7 +68,9 @@ It prompts for your server, user, and alias, then:
 
 Already set up? Run the same command again: it finds your settings and asks **"Keep these settings and only update the cc/cx profile?"** — press Enter and you have the newest profile with nothing retyped.
 
-> **If it ends with `[FAIL] Could not write the profile`:** Windows blocked writing into your Documents folder — usually Defender's **Controlled folder access** or a locked OneDrive folder. The wizard tells you the exact cause, keeps your configured profile in `%TEMP%`, and prints the one `Copy-Item` command that finishes the install once you unblock it. Details → [Troubleshooting](troubleshooting.md).
+> **Where things go:** the profile code is installed to **`~\.claude-proxy.ps1`** (your home folder) and your settings to `~\.claude-proxy.conf.psd1`. `$PROFILE` (in Documents) only gets **one loader line**; anything else you already had in it is kept.
+>
+> **Documents locked?** If Windows blocks that one line — Defender's **Controlled folder access**, a locked OneDrive folder, or company policy — or if scripts are disabled by group policy, the wizard says so and instead creates a **"Claude Proxy Shell"** shortcut on your Desktop. Double-click it and you get a PowerShell window with `cc`/`cx` ready; nothing needs Documents, and `proxy-update` keeps working. (`proxy-shortcut` re-creates the shortcut any time.) Details → [Troubleshooting](troubleshooting.md).
 
 **✅ Check it worked:** the wizard ends with `[OK] SSH connection works.` and `Done!`.
 
@@ -133,6 +135,20 @@ Done — the tunnel works. **Next: [install Claude Code](install-claude.md)** (a
 
 ---
 
+## 🐧 WSL (Windows Subsystem for Linux)
+
+Windows users who work in **WSL** (Ubuntu) — the recommended way to run Codex on Windows — follow the **macOS / Linux** steps above *inside the WSL terminal*; nothing needs to be installed on the Windows side. The differences:
+
+- **Key:** download it with your Windows browser as usual. The wizard also searches your **Windows** Downloads folder (`C:\Users\<you>\Downloads`) and copies the key into WSL's `~/.ssh` (ssh refuses to use a key straight from `/mnt/c`, where every file looks world-readable).
+- **Claude / Codex** are installed *inside* WSL (Node.js in WSL, then `npm install -g …` as in [Install Claude Code](install-claude.md)), and `cc` / `cx` launch them there.
+- **Passphrase:** WSL has no ssh-agent that survives between terminals, so a key *with* a passphrase would block the background tunnel. The profile starts an agent and loads the key for you; if the tunnel still doesn't come up, run `ssh-add ~/.ssh/<your-key>` once in that terminal (or use a key without a passphrase).
+- **Chrome:** `chrome-proxy` finds **Windows** Chrome under `/mnt/c` and launches it through the tunnel — WSL2 forwards `127.0.0.1` ports to Windows automatically.
+- **Windows-side Claude too?** The tunnel is reachable from Windows at `http://127.0.0.1:8080`, so a Claude Code installed in *Windows* PowerShell can use it as well. `proxy-config set SYNC_WINDOWS_SETTINGS 1` makes `cc` / `proxy-up` write the proxy into the Windows `%USERPROFILE%\.claude\settings.json` too (and `cc-stop` remove it again), exactly like it does for the WSL one. Needs WSL2's default `localhostForwarding`; `proxy-doctor` shows whether the sync is on.
+
+Everything else — `cc -c`, `proxy-update`, `proxy-config`, `proxy-doctor` — is identical to Linux.
+
+---
+
 ## 🔄 Updating the profile later
 
 The profile carries **no personal settings** — those live in your settings file — so updating is one command, on any OS:
@@ -142,7 +158,7 @@ proxy-update            # fetch + install the newest profile; settings untouched
 proxy-update --check    # just tell me if there is a newer one   (Windows: proxy-update -Check)
 ```
 
-Then open a new terminal (or `source ~/.claude-proxy.sh` / `. $PROFILE`). Re-running the setup wizard does the same thing and additionally offers to keep your settings. If your profile is older than v2.0 and has no `proxy-update` yet, re-run the wizard once — it reads the settings out of the old profile for you.
+Then open a new terminal (or `source ~/.claude-proxy.sh` / `. "$HOME\.claude-proxy.ps1"`). Re-running the setup wizard does the same thing and additionally offers to keep your settings. If your profile is older than v2.0 and has no `proxy-update` yet, re-run the wizard once — it reads the settings out of the old profile for you (on Windows it also moves the profile out of `$PROFILE` into `~\.claude-proxy.ps1`, leaving a one-line loader behind, so a locked Documents folder never blocks future updates).
 
 ---
 
@@ -197,20 +213,17 @@ if (-not $key) {
 
 ### Step 2 — Install the `cc`/`cx` profile
 
-Your PowerShell profile lives at `$PROFILE` (usually `C:\Users\<you>\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1`):
+The profile code lives in your **home folder** (`~\.claude-proxy.ps1`), not in Documents; `$PROFILE` only needs one line that loads it:
 
 ```powershell
 # 1. Allow your own scripts to run (per-user, safe)
 Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 
-# 2. Download the profile straight into $PROFILE
-if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
-Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/Microsoft.PowerShell_profile.ps1" -OutFile $PROFILE
+# 2. Download the profile into your home folder
+Invoke-WebRequest -UseBasicParsing -Uri "https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/claude-proxy.ps1" -OutFile "$HOME\.claude-proxy.ps1"
+Unblock-File -Path "$HOME\.claude-proxy.ps1"
 
-# 3. Unblock it (only needed if Windows flagged the file as web content)
-Unblock-File -Path $PROFILE
-
-# 4. Your settings live in a separate file (the profile itself has none) - point it at the alias from Step 1
+# 3. Your settings live in a separate file (the profile itself has none) - point it at the alias from Step 1
 @"
 @{
     SSH_HOST          = 'jpvpn'   # the alias from Step 1 (or a raw host/IP)
@@ -219,11 +232,15 @@ Unblock-File -Path $PROFILE
 }
 "@ | Set-Content -Path (Join-Path $HOME '.claude-proxy.conf.psd1') -Encoding ascii
 
-# 5. Reload the profile into the current window
-. $PROFILE
+# 4. Make every new window load it: ONE line appended to $PROFILE (your existing profile content stays)
+if (-not (Test-Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force | Out-Null }
+Add-Content -Path $PROFILE -Value 'if (Test-Path "$HOME\.claude-proxy.ps1") { . "$HOME\.claude-proxy.ps1" }   # claude-proxy'
+
+# 5. Load it into the current window
+. "$HOME\.claude-proxy.ps1"
 ```
 
-> **`Access denied` on step 2?** Windows is blocking writes into Documents — usually Defender's **Controlled folder access** (Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell) or a locked OneDrive folder. Unblock it, then re-run step 2.
+> **`Access denied` on step 4, or `running scripts is disabled` on step 5?** Documents is locked (Defender's **Controlled folder access**: Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell; or OneDrive / company policy), or scripts are blocked by group policy. You don't need either: skip step 4 and run **`proxy-shortcut`** once (after step 5 — or, if even that is blocked, after `Invoke-Expression (Get-Content -Raw "$HOME\.claude-proxy.ps1")`, which no policy stops). It puts a **"Claude Proxy Shell"** shortcut on your Desktop that opens PowerShell with `cc`/`cx` loaded.
 
 The profile reads the connection from your `jpvpn` alias (Step 1), so the settings file just points at it — no key/user/host to re-enter. Every key it understands (anything you leave out keeps the built-in default; `proxy-config` shows the current values, `proxy-config set KEY VALUE` changes one):
 
@@ -239,7 +256,7 @@ The profile reads the connection from your `jpvpn` alias (Step 1), so the settin
 | `NO_PROXY_EXTRA` | `''` | corporate intranet ranges/domains to bypass, e.g. `'172.20.0.0/24,*.mycorp.example'` |
 | `BANNER` | `1` | one-line notice when a new window opens; `0` for silence |
 
-📄 The full profile lives in the repo: [`scripts/Microsoft.PowerShell_profile.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/Microsoft.PowerShell_profile.ps1). The download command above pulls that exact file.
+📄 The full profile lives in the repo: [`scripts/claude-proxy.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.ps1). The download command above pulls that exact file.
 
 > **⚠️ Encoding gotcha (Traditional Chinese Windows):** Notepad on a zh-TW system often saves as **Big5 / CP950**, which corrupts the script and produces parse errors. Edit the profile in **VS Code** or **Notepad++** and save as **UTF-8** (the published script is ASCII-only, so any editor is safe if you don't add non-ASCII text).
 
@@ -341,6 +358,7 @@ Every key the settings file understands (anything you leave out keeps the built-
 | `CLAUDE_REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
 | `CLAUDE_SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
 | `CLAUDE_SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json` (needs `jq`); `0` to disable |
+| `CLAUDE_SYNC_WINDOWS_SETTINGS` | `0` | **WSL only:** `1` also keeps the *Windows-side* Claude (`%USERPROFILE%\.claude\settings.json`) pointed at this tunnel — see [WSL](#-wsl-windows-subsystem-for-linux) |
 | `CLAUDE_NO_PROXY` | private ranges, `*.local`, … | hosts that bypass the proxy — extend with `CLAUDE_NO_PROXY="$CLAUDE_NO_PROXY,172.20.0.0/24,*.mycorp.example"` |
 | `CLAUDE_PROXY_BANNER` | `1` | one-line notice when a new shell opens; `0` for silence |
 

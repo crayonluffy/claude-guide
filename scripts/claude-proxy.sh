@@ -51,6 +51,11 @@ CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
 CLAUDE_SYNC_SETTINGS=1
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
+# WSL only: ALSO keep the WINDOWS-side Claude (%USERPROFILE%\.claude\settings.json)
+# pointed at this tunnel while it is up. Windows reaches WSL's 127.0.0.1 ports
+# through WSL2 localhost forwarding (on by default). 1 to enable.
+CLAUDE_SYNC_WINDOWS_SETTINGS=0
+
 # Hosts that must NOT go through the proxy. Append company intranet ranges/domains
 # in the conf file, e.g.  CLAUDE_NO_PROXY="$CLAUDE_NO_PROXY,172.20.0.0/24,*.mycorp.example"
 CLAUDE_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,169.254.0.0/16,*.local,*.internal,*.corp"
@@ -70,7 +75,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
        CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_SYNC_SETTINGS CLAUDE_PROXY_BANNER"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
 
 # ============================================================
 # Helpers
@@ -170,6 +175,26 @@ _is_wsl() {
     grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null
 }
 
+# WSL: the Windows user's ~/.claude/settings.json as a Linux path ("" if unknown).
+_win_claude_settings() {
+    _is_wsl || return 1
+    local cmd up
+    cmd=$(command -v cmd.exe || echo /mnt/c/Windows/System32/cmd.exe)
+    [ -x "$cmd" ] || return 1
+    up=$("$cmd" /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')
+    [ -n "$up" ] || return 1
+    up=$(wslpath -u "$up" 2>/dev/null) || return 1
+    echo "$up/.claude/settings.json"
+}
+
+# All settings.json files the proxy should be written into.
+_settings_targets() {
+    echo "$CLAUDE_SETTINGS"
+    if [ "${CLAUDE_SYNC_WINDOWS_SETTINGS:-0}" = "1" ]; then
+        _win_claude_settings || echo "[Warn] CLAUDE_SYNC_WINDOWS_SETTINGS=1 but the Windows home folder could not be found (not WSL, or cmd.exe unavailable)" >&2
+    fi
+}
+
 _ensure_ssh_agent() {
     # A backgrounded 'ssh -f' cannot answer a passphrase prompt, and WSL keeps no
     # ssh-agent across shells by default (no systemd unless you enabled it). Make
@@ -185,42 +210,52 @@ _ensure_ssh_agent() {
 }
 
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+_settings_file_proxy_on() {  # <settings.json>
+    local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
+    mkdir -p "$(dirname "$f")"
+    [ -f "$f" ] || echo '{}' > "$f"
+    cp "$f" "${f}.bak" 2>/dev/null
+    tmp=$(mktemp)
+    if jq --arg url "$url" --arg np "$CLAUDE_NO_PROXY" \
+        '.env = (.env // {}) | .env.HTTPS_PROXY=$url | .env.HTTP_PROXY=$url | .env.NO_PROXY=$np' \
+        "$f" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$f"
+        echo "[OK] Proxy written into $f (env block)"
+    else
+        rm -f "$tmp"
+        echo "[Warn] Could not update $f (invalid JSON?) - left it untouched"
+    fi
+}
+
+_settings_file_proxy_off() {  # <settings.json>
+    local f="$1" tmp
+    [ -f "$f" ] || return 0
+    cp "$f" "${f}.bak" 2>/dev/null
+    tmp=$(mktemp)
+    if jq 'if .env then .env |= del(.HTTPS_PROXY, .HTTP_PROXY, .NO_PROXY) else . end' \
+        "$f" > "$tmp" 2>/dev/null; then
+        mv "$tmp" "$f"
+        echo "[OK] Proxy removed from $f"
+    else
+        rm -f "$tmp"
+    fi
+}
+
 _claude_settings_proxy_on() {
     [ "${CLAUDE_SYNC_SETTINGS:-0}" = "1" ] || return 0
     if ! command -v jq >/dev/null 2>&1; then
         echo "[Info] jq not found - skipping ~/.claude/settings.json sync (shell env vars still set)"
         return 0
     fi
-    local url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
-    mkdir -p "$(dirname "$CLAUDE_SETTINGS")"
-    [ -f "$CLAUDE_SETTINGS" ] || echo '{}' > "$CLAUDE_SETTINGS"
-    cp "$CLAUDE_SETTINGS" "${CLAUDE_SETTINGS}.bak" 2>/dev/null
-    tmp=$(mktemp)
-    if jq --arg url "$url" --arg np "$CLAUDE_NO_PROXY" \
-        '.env = (.env // {}) | .env.HTTPS_PROXY=$url | .env.HTTP_PROXY=$url | .env.NO_PROXY=$np' \
-        "$CLAUDE_SETTINGS" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$CLAUDE_SETTINGS"
-        echo "[OK] Proxy written into $CLAUDE_SETTINGS (env block)"
-    else
-        rm -f "$tmp"
-        echo "[Warn] Could not update $CLAUDE_SETTINGS (invalid JSON?) - left it untouched"
-    fi
+    local f
+    for f in $(_settings_targets); do _settings_file_proxy_on "$f"; done
 }
 
 _claude_settings_proxy_off() {
     [ "${CLAUDE_SYNC_SETTINGS:-0}" = "1" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
-    [ -f "$CLAUDE_SETTINGS" ] || return 0
-    local tmp
-    cp "$CLAUDE_SETTINGS" "${CLAUDE_SETTINGS}.bak" 2>/dev/null
-    tmp=$(mktemp)
-    if jq 'if .env then .env |= del(.HTTPS_PROXY, .HTTP_PROXY, .NO_PROXY) else . end' \
-        "$CLAUDE_SETTINGS" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$CLAUDE_SETTINGS"
-        echo "[OK] Proxy removed from $CLAUDE_SETTINGS"
-    else
-        rm -f "$tmp"
-    fi
+    local f
+    for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
 }
 
 # ============================================================
@@ -376,6 +411,9 @@ proxy-on() {
     export NO_PROXY="$CLAUDE_NO_PROXY"
     echo "[OK] Env vars set: HTTPS_PROXY=$url"
     _claude_settings_proxy_on
+    if _is_wsl && [ "${CLAUDE_SYNC_WINDOWS_SETTINGS:-0}" != "1" ]; then
+        echo "[Info] WSL: Windows apps can use this tunnel too at $url (Windows-side Claude: proxy-config set SYNC_WINDOWS_SETTINGS 1)"
+    fi
 }
 
 proxy-off() {
@@ -562,6 +600,19 @@ proxy-doctor() {
         echo "$ok  ~/.ssh/config has an alias '$CLAUDE_SSH_HOST'"
     elif [ -z "$CLAUDE_SSH_USER" ]; then
         echo "$warn No 'Host $CLAUDE_SSH_HOST' in ~/.ssh/config and CLAUDE_SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set CLAUDE_SSH_USER/KEY (proxy-config edit)"
+    fi
+
+    if _is_wsl; then
+        local wf
+        if [ "${CLAUDE_SYNC_WINDOWS_SETTINGS:-0}" = "1" ]; then
+            if wf=$(_win_claude_settings); then
+                echo "$ok  WSL: Windows-side Claude kept in sync too ($wf)"
+            else
+                echo "$warn WSL: SYNC_WINDOWS_SETTINGS=1 but the Windows home folder could not be found (cmd.exe / wslpath unavailable?)"
+            fi
+        else
+            echo "$ok  WSL detected - Windows apps can use the tunnel at http://127.0.0.1:$CLAUDE_HTTP_PORT (Windows-side Claude: proxy-config set SYNC_WINDOWS_SETTINGS 1)"
+        fi
     fi
 
     # --- tools ---

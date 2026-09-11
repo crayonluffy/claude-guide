@@ -11,7 +11,7 @@ proxy-update --check    # only report whether a newer one exists  (Windows: prox
 
 Open a new terminal afterwards (or `source ~/.claude-proxy.sh` / `. $PROFILE`). Re-running the setup wizard does the same: it finds your settings and asks *"Keep these settings and only update the cc/cx profile?"*.
 
-**Profile older than v2.0 (no `proxy-update` command, settings still inside the script)?** Re-run the wizard once — it reads the settings out of the old profile, saves them to the settings file, and installs the new profile. From then on `proxy-update` exists. The previous profile is kept next to the new one as `.bak`.
+**Profile older than v2.0 (no `proxy-update` command, settings still inside the script)?** Re-run the wizard once — it reads the settings out of the old profile, saves them to the settings file, and installs the new profile. From then on `proxy-update` exists. The previous profile is kept next to the new one as `.bak`. On Windows the profile code moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps1`, and `$PROFILE` keeps only a one-line loader — if Documents is locked, the wizard makes a Desktop shortcut instead.
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)   # macOS / Linux / WSL

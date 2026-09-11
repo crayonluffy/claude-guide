@@ -16,8 +16,9 @@
 # ============================================================
 
 $ErrorActionPreference = 'Stop'
-$repoRaw  = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
-$confPath = Join-Path $HOME '.claude-proxy.conf.psd1'
+$repoRaw     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
+$confPath    = Join-Path $HOME '.claude-proxy.conf.psd1'
+$profilePath = Join-Path $HOME '.claude-proxy.ps1'   # the profile code lives in HOME, not Documents
 
 # Any unexpected error: say WHAT failed and WHERE, instead of dying with a bare
 # one-line exception (the wizard runs via 'irm | iex', so users can't see a stack).
@@ -196,18 +197,18 @@ Set-Content -Path $confPath -Value $confLines -Encoding ascii
 Write-Host "[OK] Settings saved: $confPath" -ForegroundColor Green
 
 # --- 6. Install / update the cc profile ------------------------------------
+# The profile code goes to ~\.claude-proxy.ps1 (your HOME - practically always
+# writable). $PROFILE only gets ONE loader line. If Documents is locked
+# (Defender Controlled folder access, OneDrive, company policy) or scripts are
+# blocked by policy, a Desktop shortcut gives you a window with cc/cx anyway.
 try {
     Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
 } catch {
-    Write-Host "[Warn] Could not set execution policy (managed by group policy?). The profile may not auto-load in new windows." -ForegroundColor Yellow
+    Write-Host "[Warn] Could not set the execution policy (managed by group policy?)." -ForegroundColor Yellow
 }
-# Download into TEMP first, then install with ONE copy into $PROFILE - so a
-# locked/blocked Documents folder fails in exactly one place, with a clear
-# diagnosis and a rescue copy the user can install by hand. No patching:
-# the profile reads its settings from the conf file written above.
-$tmpProfile = Join-Path $env:TEMP 'Microsoft.PowerShell_profile.ps1'
+$tmpProfile = Join-Path $env:TEMP 'claude-proxy.ps1'
 try {
-    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/Microsoft.PowerShell_profile.ps1" -OutFile $tmpProfile
+    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile
 } catch {
     Write-Host "[FAIL] Could not download the profile from GitHub." -ForegroundColor Red
     Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
@@ -225,31 +226,51 @@ $newVer = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'")
 
 $profileInstalled = $false
 try {
-    $profileDir = Split-Path $PROFILE
-    if (-not (Test-Path $profileDir)) { New-Item -ItemType Directory -Force -Path $profileDir | Out-Null }
-    if ((Test-Path $PROFILE) -and ((Get-Content $PROFILE -Raw) -ne $raw)) {
-        Copy-Item -LiteralPath $PROFILE -Destination "$PROFILE.bak" -Force
-        Write-Host "[Info] Previous profile kept at $PROFILE.bak" -ForegroundColor DarkGray
+    if ((Test-Path $profilePath) -and ((Get-Content $profilePath -Raw) -ne $raw)) {
+        Copy-Item -LiteralPath $profilePath -Destination "$profilePath.bak" -Force
+        Write-Host "[Info] Previous profile kept at $profilePath.bak" -ForegroundColor DarkGray
     }
-    Copy-Item -LiteralPath $tmpProfile -Destination $PROFILE -Force
-    Unblock-File -Path $PROFILE -ErrorAction SilentlyContinue
-    Write-Host "[OK] Profile installed: $PROFILE (v$newVer)" -ForegroundColor Green
+    Copy-Item -LiteralPath $tmpProfile -Destination $profilePath -Force
+    Unblock-File -Path $profilePath -ErrorAction SilentlyContinue
+    Write-Host "[OK] Profile installed: $profilePath (v$newVer)" -ForegroundColor Green
     $profileInstalled = $true
 } catch {
-    Write-Host "[FAIL] Could not write the profile to: $PROFILE" -ForegroundColor Red
+    Write-Host "[FAIL] Could not write $profilePath" -ForegroundColor Red
     Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
-    # Type check, not message text - "access denied" is localized on non-English Windows.
-    if ($_.Exception -is [System.UnauthorizedAccessException] -or $_.Exception -is [System.IO.IOException] -or $_.Exception.Message -match 'denied|unauthorized') {
-        Write-Host "       'Access denied' on the Documents folder is usually one of:" -ForegroundColor Yellow
-        Write-Host "       1) Defender's CONTROLLED FOLDER ACCESS (ransomware protection) blocks PowerShell" -ForegroundColor Yellow
-        Write-Host "          from writing to Documents. Fix: Windows Security > Virus & threat protection >" -ForegroundColor Yellow
-        Write-Host "          Ransomware protection > 'Allow an app through Controlled folder access' > add" -ForegroundColor Yellow
-        Write-Host "          PowerShell (powershell.exe / pwsh.exe). Then re-run the wizard." -ForegroundColor Yellow
-        Write-Host "       2) Documents is locked by OneDrive or company policy (read-only sync folder)." -ForegroundColor Yellow
+    Write-Host "       The downloaded profile is at $tmpProfile - copy it there by hand once access is fixed." -ForegroundColor Yellow
+}
+
+# Hook it into $PROFILE (one line). Loading the profile first gives us
+# _ensure-loader and proxy-shortcut from the profile itself.
+$needShortcut = $false
+if ($profileInstalled) {
+    . $profilePath
+    switch (_ensure-loader) {
+        'ok'       { Write-Host "[OK] `$PROFILE already loads it" -ForegroundColor Green }
+        'added'    { Write-Host "[OK] Added one loader line to `$PROFILE (your other profile content is untouched)" -ForegroundColor Green }
+        'replaced' { Write-Host "[OK] `$PROFILE held the OLD full profile - replaced with the loader line (old copy: $PROFILE.bak)" -ForegroundColor Green }
+        'locked'   {
+            Write-Host "[Warn] Could not write to `$PROFILE ($PROFILE)." -ForegroundColor Yellow
+            Write-Host "       Windows blocks PowerShell from editing your Documents folder - usually Defender's" -ForegroundColor Yellow
+            Write-Host "       CONTROLLED FOLDER ACCESS (Windows Security > Virus & threat protection > Ransomware" -ForegroundColor Yellow
+            Write-Host "       protection > 'Allow an app through Controlled folder access' > add powershell.exe)," -ForegroundColor Yellow
+            Write-Host "       or OneDrive / company policy locking Documents. Nothing else is needed from Documents:" -ForegroundColor Yellow
+            Write-Host "       the profile itself lives in $profilePath and updates there." -ForegroundColor Yellow
+            $needShortcut = $true
+        }
     }
-    Write-Host "       Your CONFIGURED profile was saved to: $tmpProfile" -ForegroundColor Cyan
-    Write-Host "       After fixing access, finish the install with:" -ForegroundColor Cyan
-    Write-Host "           Copy-Item '$tmpProfile' `$PROFILE -Force; . `$PROFILE" -ForegroundColor White
+    # Scripts blocked by policy? Then neither $PROFILE nor a dot-source will run in
+    # new windows - the shortcut loads the profile with Invoke-Expression instead.
+    $ep = Get-ExecutionPolicy
+    if ($ep -in @('Restricted', 'AllSigned')) {
+        Write-Host "[Warn] Execution policy is '$ep' (group policy) - new windows won't auto-load the profile." -ForegroundColor Yellow
+        $needShortcut = $true
+    }
+    $shortcutOk = $false
+    if ($needShortcut) {
+        Write-Host "[Info] Creating a Desktop shortcut that opens PowerShell with cc/cx ready instead..." -ForegroundColor Cyan
+        $shortcutOk = proxy-shortcut
+    }
 }
 
 # --- 7. Verify the connection ----------------------------------------------
@@ -269,10 +290,8 @@ if ($sshOk) {
     Write-Host "       Try once manually:  ssh $Alias" -ForegroundColor Yellow
 }
 
-# --- 8. Load the profile + next steps --------------------------------------
-if ($profileInstalled) {
-    . $PROFILE
-} else {
+# --- 8. Next steps -----------------------------------------------------------
+if (-not $profileInstalled) {
     Write-Host "[Warn] Profile NOT installed (see the [FAIL] above) - 'cc'/'cx' won't exist until you finish that step." -ForegroundColor Yellow
 }
 # Non-blocking: the proxy works without these CLIs, so only hint, never abort.
@@ -285,5 +304,11 @@ if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
 Write-Host ""
 Write-Host "Done! The profile is loaded in this window - just run:" -ForegroundColor Cyan
 Write-Host "    cc        (Claude)   or   cx        (Codex)" -ForegroundColor White
-Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
+if ($needShortcut -and $shortcutOk) {
+    Write-Host "(For new windows, double-click the 'Claude Proxy Shell' shortcut on your Desktop.)" -ForegroundColor DarkGray
+} elseif ($needShortcut) {
+    Write-Host "(For new windows, run:  Invoke-Expression (Get-Content -Raw '$profilePath')  - or fix the access issue above and re-run the wizard.)" -ForegroundColor DarkGray
+} else {
+    Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
+}
 Write-Host "Later: 'proxy-update' fetches the newest profile (settings kept), 'proxy-config' shows/edits them." -ForegroundColor DarkGray

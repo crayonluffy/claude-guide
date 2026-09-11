@@ -1,5 +1,7 @@
 # ============================================================
-# PowerShell Profile - SSH Tunnel + HTTP proxy (Claude/Codex) + SOCKS5 (Chrome)
+# claude-proxy.ps1 - SSH Tunnel + HTTP proxy (Claude/Codex) + SOCKS5 (Chrome)
+# Installed as ~\.claude-proxy.ps1 and dot-sourced from $PROFILE (one line),
+# or loaded by the "Claude Proxy Shell" shortcut when $PROFILE can't be edited.
 # ============================================================
 # One SSH connection carries two forwards:
 #   -L 8080:127.0.0.1:8888  ->  VM's HTTP proxy (tinyproxy)  ->  used by Claude & Codex (HTTPS_PROXY)
@@ -16,8 +18,12 @@
 # ============================================================
 
 $script:PROFILE_VERSION = '2.0.0'
-$script:REPO_RAW   = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
-$script:PROXY_CONF = Join-Path $HOME '.claude-proxy.conf.psd1'
+$script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
+$script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
+$script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
+# The one line $PROFILE needs. Lives in your HOME, so a locked Documents folder
+# (Controlled folder access / OneDrive / policy) never blocks an update.
+$script:LOADER_LINE  = 'if (Test-Path "$HOME\.claude-proxy.ps1") { . "$HOME\.claude-proxy.ps1" }   # claude-proxy'
 
 # ============================================================
 # Settings - built-in defaults. DO NOT EDIT HERE: put overrides in
@@ -525,7 +531,15 @@ function proxy-doctor {
     Write-Host "=== Proxy Doctor (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
 
     # --- profile + settings ---
-    Write-Host "[ OK ]  Profile: $PROFILE (v$($script:PROFILE_VERSION)) - 'proxy-update -Check' to see if a newer one exists" -ForegroundColor Green
+    Write-Host "[ OK ]  Profile: $($script:PROFILE_PATH) (v$($script:PROFILE_VERSION)) - 'proxy-update -Check' to see if a newer one exists" -ForegroundColor Green
+    $profRaw = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    if ($profRaw -match '\.claude-proxy\.ps1') {
+        Write-Host "[ OK ]  `$PROFILE loads it in every new window" -ForegroundColor Green
+    } elseif ($profRaw -match '(?m)^\$script:(PROFILE_VERSION|SSH_HOST)\s*=') {
+        Write-Host "[WARN] `$PROFILE still holds an OLD full copy of the profile - new windows load that, not $($script:PROFILE_PATH). Fix: proxy-update (or re-run the wizard)" -ForegroundColor Yellow
+    } else {
+        Write-Host "[WARN] `$PROFILE does not load $($script:PROFILE_PATH) - only this window has cc/cx. Fix: re-run the wizard, or use the 'Claude Proxy Shell' shortcut (proxy-shortcut)" -ForegroundColor Yellow
+    }
     if (Test-Path $script:PROXY_CONF) {
         Write-Host "[ OK ]  Settings: $($script:PROXY_CONF) (server '$($script:SSH_HOST)', VM proxy port $($script:REMOTE_PROXY_PORT))" -ForegroundColor Green
     } else {
@@ -667,7 +681,7 @@ function proxy-config {
         'edit' {
             if (-not (Test-Path $script:PROXY_CONF)) { _conf-write-all }
             Start-Process notepad.exe -ArgumentList "`"$($script:PROXY_CONF)`"" -Wait
-            Write-Host "[OK] Saved. Load the new settings with:  . `$PROFILE   (new windows pick them up automatically)" -ForegroundColor Green
+            Write-Host "[OK] Saved. Load the new settings with:  . '$($script:PROFILE_PATH)'   (new windows pick them up automatically)" -ForegroundColor Green
         }
         'set' {
             if (-not $Key -or $null -eq $Value) {
@@ -696,10 +710,10 @@ function _fetch-file { param($Uri, $OutFile) Invoke-WebRequest -UseBasicParsing 
 
 function proxy-update {
     param([switch]$Check, [switch]$Force)
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'Microsoft.PowerShell_profile.ps1.new'
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.ps1.new'
     Write-Host "[Update] Fetching latest profile from GitHub..." -ForegroundColor Cyan
     try {
-        _fetch-file "$($script:REPO_RAW)/Microsoft.PowerShell_profile.ps1" $tmp
+        _fetch-file "$($script:REPO_RAW)/claude-proxy.ps1" $tmp
     } catch {
         Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again." -ForegroundColor Yellow
@@ -732,18 +746,75 @@ function proxy-update {
         _conf-write-all
         Write-Host "[OK] Saved your current settings to $($script:PROXY_CONF) (they survive every future update)" -ForegroundColor Green
     }
+    $dest = $script:PROFILE_PATH
     try {
-        if (Test-Path $PROFILE) { Copy-Item $PROFILE "$PROFILE.bak" -Force }
-        Copy-Item $tmp $PROFILE -Force
+        if (Test-Path $dest) { Copy-Item $dest "$dest.bak" -Force }
+        Copy-Item $tmp $dest -Force
     } catch {
-        Write-Host "[Err] Could not write $PROFILE : $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "       The new version is saved at $tmp - once access is fixed:  Copy-Item '$tmp' `$PROFILE -Force" -ForegroundColor Yellow
+        Write-Host "[Err] Could not write $dest : $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "       The new version is saved at $tmp - copy it there by hand:  Copy-Item '$tmp' '$dest' -Force" -ForegroundColor Yellow
         return
     }
     Remove-Item $tmp -Force
-    if ($env:OS -eq 'Windows_NT') { try { Unblock-File -Path $PROFILE -ErrorAction SilentlyContinue } catch {} }
-    Write-Host "[OK] Updated $PROFILE : v$($script:PROFILE_VERSION) -> v$newver  (previous copy: $PROFILE.bak)" -ForegroundColor Green
-    Write-Host "[OK] Load it with:  . `$PROFILE   (new windows pick it up automatically)" -ForegroundColor Green
+    if ($env:OS -eq 'Windows_NT') { try { Unblock-File -Path $dest -ErrorAction SilentlyContinue } catch {} }
+    Write-Host "[OK] Updated $dest : v$($script:PROFILE_VERSION) -> v$newver  (previous copy: $dest.bak)" -ForegroundColor Green
+    # Make sure $PROFILE actually loads that file (older installs had the whole
+    # profile INSIDE $PROFILE). Best effort - Documents may be locked.
+    switch (_ensure-loader) {
+        'ok'       { }
+        'replaced' { Write-Host "[OK] `$PROFILE now just loads $dest (old copy kept at $PROFILE.bak)" -ForegroundColor Green }
+        'added'    { Write-Host "[OK] Added the loader line to `$PROFILE" -ForegroundColor Green }
+        'locked'   { Write-Host "[Warn] Could not edit `$PROFILE (locked Documents folder). New windows keep loading whatever is in it;" -ForegroundColor Yellow
+                     Write-Host "       use the 'Claude Proxy Shell' shortcut (proxy-shortcut creates it) or run:  . '$dest'" -ForegroundColor Yellow }
+    }
+    Write-Host "[OK] Load it now with:  . '$dest'" -ForegroundColor Green
+}
+
+# Make $PROFILE load ~\.claude-proxy.ps1. Returns ok | added | replaced | locked.
+#   - $PROFILE already has the loader line            -> ok
+#   - $PROFILE IS an old full copy of this profile    -> back it up, replace with the loader
+#   - anything else (user's own profile, or none)     -> append the loader
+function _ensure-loader {
+    try {
+        $cur = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+        if ($cur -match '\.claude-proxy\.ps1') { return 'ok' }
+        $dir = Split-Path $PROFILE
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        if ($cur -match '(?m)^\$script:(PROFILE_VERSION|SSH_HOST)\s*=') {
+            Copy-Item -LiteralPath $PROFILE -Destination "$PROFILE.bak" -Force
+            Set-Content -Path $PROFILE -Value $script:LOADER_LINE -Encoding ascii
+            return 'replaced'
+        }
+        Add-Content -Path $PROFILE -Value "`r`n$($script:LOADER_LINE)" -Encoding ascii
+        return 'added'
+    } catch {
+        return 'locked'
+    }
+}
+
+# Desktop shortcut "Claude Proxy Shell": a PowerShell window that loads
+# ~\.claude-proxy.ps1 without needing $PROFILE or a script execution policy
+# (the profile is read with Invoke-Expression, which policies don't gate).
+function proxy-shortcut {
+    $lnkPath = '(Desktop)\Claude Proxy Shell.lnk'
+    try {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        $lnkPath = Join-Path $desktop 'Claude Proxy Shell.lnk'
+        $exe = Join-Path $PSHOME $(if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' })
+        $ws  = New-Object -ComObject WScript.Shell
+        $lnk = $ws.CreateShortcut($lnkPath)
+        $lnk.TargetPath       = $exe
+        $lnk.Arguments        = "-NoExit -ExecutionPolicy Bypass -Command `"Invoke-Expression (Get-Content -Raw '$($script:PROFILE_PATH)')`""
+        $lnk.WorkingDirectory = $HOME
+        $lnk.Description      = 'PowerShell with the cc / cx proxy commands loaded'
+        $lnk.Save()
+        Write-Host "[OK] Shortcut created: $lnkPath  - double-click it to get a window with cc / cx ready" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "[Warn] Could not create the shortcut ($($_.Exception.Message)). Manual alternative - open PowerShell and run:" -ForegroundColor Yellow
+        Write-Host "       Invoke-Expression (Get-Content -Raw '$($script:PROFILE_PATH)')" -ForegroundColor White
+        return $false
+    }
 }
 
 # ============================================================
@@ -798,6 +869,7 @@ function cc-help {
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
     Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray
     Write-Host "  proxy-update    - Fetch the latest version of this profile; your settings are kept" -ForegroundColor DarkGray
+    Write-Host "  proxy-shortcut  - Desktop shortcut that opens a window with cc/cx ready (no `$PROFILE needed)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
     Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray

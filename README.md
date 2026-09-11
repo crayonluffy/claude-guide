@@ -50,7 +50,7 @@ One caveat: on a **shared** client machine, other local users could use your `12
 
 | | Page | What you'll do | Time |
 |---|------|----------------|------|
-| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once, get `cc` / `cx` forever | ~5 min |
+| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once (Windows, macOS, Linux or WSL), get `cc` / `cx` forever | ~5 min |
 | 2 | **[Install Claude Code](docs/install-claude.md)** | Node.js → `claude` CLI → sign in via `cc` | ~5 min |
 | 3 | **[Install Codex](docs/install-codex.md)** *(optional)* | `codex` CLI → sign in via `cx` | ~3 min |
 

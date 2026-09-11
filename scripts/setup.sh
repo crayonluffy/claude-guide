@@ -104,6 +104,8 @@ alias_in_ssh_config() {
     grep -qiE "^Host[[:space:]]+$1([[:space:]]|$)" "$HOME/.ssh/config" 2>/dev/null
 }
 
+is_wsl() { grep -qiE '(microsoft|wsl)' /proc/version 2>/dev/null; }
+
 echo ""
 echo "=== Claude proxy setup wizard (macOS / Linux) ==="
 echo ""
@@ -193,13 +195,26 @@ if [ $QUICK -eq 0 ]; then
     # --- 3. Find / choose the private key ------------------------------------
     mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
 
+    # Newest private key in ~/Downloads - and, under WSL, in the WINDOWS user's
+    # Downloads too (that's where a browser puts it). It gets copied into the
+    # Linux ~/.ssh below, which ssh requires anyway (files on /mnt/c are 0777).
     found=""
-    for f in "$HOME"/Downloads/*; do
-        [ -f "$f" ] || continue
-        case "$f" in *.pub) continue ;; esac
-        if head -n1 "$f" 2>/dev/null | grep -q "BEGIN .*PRIVATE KEY"; then
-            if [ -z "$found" ] || [ "$f" -nt "$found" ]; then found="$f"; fi
-        fi
+    key_dirs=("$HOME/Downloads")
+    if is_wsl; then
+        for d in /mnt/c/Users/*/Downloads; do
+            case "$d" in */Public/*|*/Default/*|*/"Default User"/*|*/"All Users"/*) continue ;; esac
+            [ -d "$d" ] && key_dirs+=("$d")
+        done
+    fi
+    for d in "${key_dirs[@]}"; do
+        for f in "$d"/*; do
+            [ -f "$f" ] || continue
+            case "$f" in *.pub) continue ;; esac
+            [ "$(wc -c < "$f")" -lt 100000 ] || continue
+            if head -n1 "$f" 2>/dev/null | grep -q "BEGIN .*PRIVATE KEY"; then
+                if [ -z "$found" ] || [ "$f" -nt "$found" ]; then found="$f"; fi
+            fi
+        done
     done
 
     KEY=""
