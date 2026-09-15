@@ -140,6 +140,8 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 ## 🌐 (Optional) Browse through the proxy (Chrome)
 
+> Want Chrome windows through **different regions at the same time** (JP + SG + US)? See [Nodes → manual equivalent](proxy-nodes.md#no-profile-the-manual-equivalent): one extra `ssh -D` per region on its own port, and a different `--user-data-dir` per window.
+
 Your Step-1 tunnel already carries a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). This opens a **separate** Chrome through it — isolated profile, DNS through the tunnel, your normal browser untouched. Handy when a sign-in page (Anthropic/OpenAI OAuth) won't load in your regular browser.
 
 **🪟 Windows (PowerShell)**

@@ -37,7 +37,9 @@ You do **not** need Claude Code or Codex installed yet — do the proxy first. O
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
 | `proxy-config` | Show your settings; `proxy-config edit` opens the settings file, `proxy-config set SSH_HOST myvm` changes one value |
 | `proxy-update` | Download the newest profile from this guide and install it — **your settings are kept**. `proxy-update --check` (`-Check` on Windows) only tells you whether there is one |
-| `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy (separate, isolated profile; auto-starts the tunnel) |
+| `proxy-nodes` | List the nodes (JP / SG / US …) and which one is active; `proxy-nodes --refresh` (`-Refresh` on Windows) downloads the latest catalogue and creates the `ssh` aliases — see [Nodes](proxy-nodes.md) |
+| `proxy-node sg` | Make `sg` the node `cc` / `cx` use (restarts the tunnel if it's up). Shortcut: `cc --node sg` |
+| `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy (separate, isolated profile; auto-starts the tunnel). `chrome-proxy sg` opens one through node `sg` on its **own** tunnel + profile, so several regions can be open at once; `chrome-proxy sg https://…` also opens a URL |
 | `cc-help` | Print this command list. (A new shell prints a one-line "claude-proxy v… ready" notice instead of the whole list; `BANNER=0` in the settings file silences it) |
 
 > **Codex note:** Codex reads the standard `HTTP(S)_PROXY` env vars, so it shares the same tunnel — no extra setup. Only Claude gets the extra `settings.json` sync (so `claude` works even from shells that never ran `cc`).
@@ -252,6 +254,8 @@ The profile reads the connection from your `jpvpn` alias (Step 1), so the settin
 | `HTTP_PORT` | `8080` | local HTTP port → forwarded to the VM proxy (Claude/Codex) |
 | `REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
 | `SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
+| `NODE_SOCKS_BASE` | `1180` | first port for per-node Chrome tunnels (`chrome-proxy <node>`) — see [Nodes](proxy-nodes.md) |
+| `CHROME_EXE` | `''` | only if `chrome.exe` isn't in Program Files / `%LOCALAPPDATA%` |
 | `SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json`; `0` to disable |
 | `NO_PROXY_EXTRA` | `''` | corporate intranet ranges/domains to bypass, e.g. `'172.20.0.0/24,*.mycorp.example'` |
 | `BANNER` | `1` | one-line notice when a new window opens; `0` for silence |
@@ -357,6 +361,8 @@ Every key the settings file understands (anything you leave out keeps the built-
 | `CLAUDE_HTTP_PORT` | `8080` | local HTTP port → forwarded to the VM proxy (Claude/Codex) |
 | `CLAUDE_REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
 | `CLAUDE_SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
+| `CLAUDE_NODE_SOCKS_BASE` | `1180` | first port for per-node Chrome tunnels (`chrome-proxy <node>`) — see [Nodes](proxy-nodes.md) |
+| `CLAUDE_CHROME_BIN` | `""` | only if Chrome isn't in the usual place (macOS: app name or path; WSL: `/mnt/c/.../chrome.exe`) |
 | `CLAUDE_SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json` (needs `jq`); `0` to disable |
 | `CLAUDE_SYNC_WINDOWS_SETTINGS` | `0` | **WSL only:** `1` also keeps the *Windows-side* Claude (`%USERPROFILE%\.claude\settings.json`) pointed at this tunnel — see [WSL](#-wsl-windows-subsystem-for-linux) |
 | `CLAUDE_NO_PROXY` | private ranges, `*.local`, … | hosts that bypass the proxy — extend with `CLAUDE_NO_PROXY="$CLAUDE_NO_PROXY,172.20.0.0/24,*.mycorp.example"` |
@@ -387,13 +393,15 @@ Host jpvpn
     UseKeychain yes      # macOS only
 ```
 
-Switching to a *different* alias, or changing a port? That's the settings file: `proxy-config set SSH_HOST other-vm`, `proxy-config set REMOTE_PROXY_PORT 8899`, …
+Switching to a *different* alias, or changing a port? That's the settings file: `proxy-config set SSH_HOST other-vm`, `proxy-config set REMOTE_PROXY_PORT 8899`, … — and if your admin publishes several nodes (JP / SG / US), `proxy-node sg` does exactly that for you: see **[Nodes](proxy-nodes.md)**.
 
 ---
 
 ## 🌐 (Optional) Browse through the proxy
 
 With the profile installed, run **`chrome-proxy`** — it opens a **separate** Chrome routed through the **SOCKS5** proxy on `127.0.0.1:1080`, without touching your normal browsing session. It auto-starts the tunnel if needed, keeps a separate `--user-data-dir` (isolated logins/cookies/history), and resolves DNS through the tunnel (no DNS leaks). Under WSL it launches **Windows** Chrome.
+
+**Several regions at once?** `chrome-proxy jp`, `chrome-proxy sg`, … each open a Chrome through that node on its own tunnel and profile folder — see **[Nodes](proxy-nodes.md)**.
 
 No profile, or want the raw command? These are the equivalent copy-paste commands. The **tunnel must already be up** (`proxy-up`, or the manual Step-1 `ssh` command — that's what provides the `-D 1080` SOCKS forward):
 

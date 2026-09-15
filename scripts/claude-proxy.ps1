@@ -15,9 +15,15 @@
 # YOUR SETTINGS LIVE IN ~\.claude-proxy.conf.psd1, NOT IN THIS FILE.
 #   proxy-config        show / edit them
 #   proxy-update        replace this file with the latest version (settings are kept)
+#
+# NODES (v2.1): the admin publishes a catalogue of VMs (jp / sg / us ...) as
+# scripts/nodes.json. 'proxy-nodes -Refresh' downloads it and creates the
+# matching ~\.ssh\config aliases; 'proxy-node sg' makes sg the node that cc / cx
+# use; 'chrome-proxy sg' opens a Chrome window through sg on its OWN tunnel and
+# profile, so several regions can be open side by side.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.0.0'
+$script:PROFILE_VERSION = '2.1.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -39,6 +45,14 @@ $script:SSH_PORT          = 22
 $script:HTTP_PORT         = 8080       # local HTTP port -> forwarded to the VM proxy (Claude)
 $script:REMOTE_PROXY_PORT = 8888       # tinyproxy port on the VM (webproxy-manager)
 $script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
+
+# Node catalogue (jp / sg / us ...): downloaded by 'proxy-nodes -Refresh' from
+# $REPO_RAW/nodes.json. 'chrome-proxy <node>' opens a SEPARATE SOCKS-only tunnel
+# per node so several regions can be open at once; node i (0-based, catalogue
+# order) listens on NODE_SOCKS_BASE + i.
+$script:NODES_CACHE       = Join-Path $HOME '.claude-proxy.nodes.json'
+$script:NODE_SOCKS_BASE   = 1180
+$script:CHROME_EXE        = ''         # chrome.exe path, only if Chrome isn't in one of the usual places
 
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
 # `claude` launched from ANY shell uses it. Removed again on proxy-off / cc-stop.
@@ -65,7 +79,7 @@ $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -176,6 +190,264 @@ function _settings-sync-off {
     }
     $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
     Write-Host "[OK] Proxy removed from $settings" -ForegroundColor Green
+}
+
+# ============================================================
+# Nodes: catalogue (nodes.json) + ~\.ssh\config aliases + per-node Chrome tunnels
+# ============================================================
+
+# The catalogue as objects: Idx Name Alias Host User SshPort ProxyPort Region Note HostKey
+function Get-ProxyNodes {
+    if (-not (Test-Path $script:NODES_CACHE)) { return @() }
+    try { $cat = Get-Content $script:NODES_CACHE -Raw | ConvertFrom-Json } catch { return @() }
+    $out = @(); $i = 0
+    foreach ($n in @($cat.nodes)) {
+        $out += [pscustomobject]@{
+            Idx = $i; Name = "$($n.name)"; Alias = "$($n.alias)"; Host = "$($n.host)"; User = "$($n.user)"
+            SshPort = $(if ($n.ssh_port) { [int]$n.ssh_port } else { 22 })
+            ProxyPort = $(if ($n.proxy_port) { [int]$n.proxy_port } else { 8888 })
+            Region = "$($n.region)"; Note = "$($n.note)"; HostKey = "$($n.hostkey)"
+        }
+        $i++
+    }
+    return $out
+}
+
+# Node object for a NAME or ALIAS ($null if unknown).
+function Find-ProxyNode { param([string]$Want)
+    if (-not $Want) { return $null }
+    foreach ($n in Get-ProxyNodes) { if ($n.Name -eq $Want -or $n.Alias -eq $Want) { return $n } }
+    return $null
+}
+
+# Name of the node cc/cx currently use ('' when SSH_HOST isn't in the catalogue).
+function Get-ActiveNodeName {
+    $n = Find-ProxyNode $script:SSH_HOST
+    if ($n) { return $n.Name } else { return '' }
+}
+
+# A node's host is "provisioned" once the admin replaced the <placeholder>.
+function Test-NodeProvisioned { param([string]$NodeHost) return ($NodeHost -and -not $NodeHost.StartsWith('<')) }
+
+function Get-NodeSocksPort { param([int]$Idx) return ($script:NODE_SOCKS_BASE + $Idx) }
+
+function Test-SshAlias { param([string]$Alias)
+    $cfg = Join-Path $HOME '.ssh\config'
+    return ((Test-Path $cfg) -and (Select-String -Path $cfg -Pattern "^Host\s+$([regex]::Escape($Alias))(\s|$)" -Quiet))
+}
+
+# IdentityFile of an ~\.ssh\config alias ('' if none) - new nodes reuse the key
+# the wizard installed for the first one.
+function Get-SshIdentity { param([string]$Alias)
+    $cfg = Join-Path $HOME '.ssh\config'
+    if (-not (Test-Path $cfg)) { return '' }
+    $in = $false
+    foreach ($ln in (Get-Content $cfg)) {
+        if ($ln -match '^\s*Host\s+(.+)$') { $in = (($Matches[1] -split '\s+') -contains $Alias); continue }
+        if ($in -and $ln -match '^\s*IdentityFile\s+(.+?)\s*$') { return ($Matches[1] -replace '^"|"$', '') }
+    }
+    return ''
+}
+
+# Append a Host block (same shape as the setup wizard writes).
+function Add-SshAlias { param([string]$Alias, [string]$NodeHost, [string]$User, [int]$Port, [string]$Key)
+    $sshDir = Join-Path $HOME '.ssh'
+    if (-not (Test-Path $sshDir)) { New-Item -ItemType Directory -Force -Path $sshDir | Out-Null }
+    $entry  = "`nHost $Alias`n    HostName $NodeHost`n"
+    if ($User)         { $entry += "    User $User`n" }
+    if ($Port -ne 22)  { $entry += "    Port $Port`n" }
+    if ($Key)          { $entry += "    IdentityFile `"$Key`"`n" }
+    $entry += "    AddKeysToAgent yes`n"
+    Add-Content -Path (Join-Path $sshDir 'config') -Value $entry -Encoding ascii
+}
+
+# Pin a node's host key so the first connection never stops at "Are you sure...?".
+function Add-KnownHost { param([string]$NodeHost, [int]$Port, [string]$HostKey)
+    if (-not $HostKey) { return }
+    $kh = Join-Path $HOME '.ssh\known_hosts'
+    if ((Test-Path $kh) -and (Select-String -Path $kh -SimpleMatch $HostKey -Quiet)) { return }
+    $entry = if ($Port -eq 22) { $NodeHost } else { "[$NodeHost]:$Port" }
+    Add-Content -Path $kh -Value "$entry $HostKey" -Encoding ascii
+    Write-Host "[OK] Host key for $NodeHost pinned in ~\.ssh\known_hosts" -ForegroundColor Green
+}
+
+# Make sure a catalogue node has an ssh alias (creates it from the catalogue if
+# missing, reusing the active alias's key). $false when the node has no host yet.
+function Confirm-NodeAlias { param($Node)
+    if (Test-SshAlias $Node.Alias) { Add-KnownHost $Node.Host $Node.SshPort $Node.HostKey; return $true }
+    if (-not (Test-NodeProvisioned $Node.Host)) {
+        Write-Host "[Err] Node '$($Node.Name)' has no host in the catalogue yet (not provisioned) - ask your admin, then 'proxy-nodes -Refresh'." -ForegroundColor Red
+        return $false
+    }
+    $key = Get-SshIdentity $script:SSH_HOST
+    if (-not $key) { $key = $script:SSH_KEY }
+    Add-SshAlias $Node.Alias $Node.Host $Node.User $Node.SshPort $key
+    $tgt = if ($Node.User) { "$($Node.User)@$($Node.Host)" } else { $Node.Host }
+    if ($key) { Write-Host "[OK] ssh alias '$($Node.Alias)' -> $tgt written to ~\.ssh\config (key: $key)" -ForegroundColor Green }
+    else      { Write-Host "[OK] ssh alias '$($Node.Alias)' -> $tgt written to ~\.ssh\config (no IdentityFile found on '$($script:SSH_HOST)' - ssh will use your default key)" -ForegroundColor Yellow }
+    Add-KnownHost $Node.Host $Node.SshPort $Node.HostKey
+    return $true
+}
+
+# --- per-node Chrome tunnels (SOCKS only; the main tunnel is untouched) ------
+function Start-NodeTunnel { param($Node, [int]$Port)
+    $pids = @((Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
+    if ($pids.Count -gt 0) {
+        $owner = (Get-Process -Id $pids[0] -ErrorAction SilentlyContinue).ProcessName
+        if ($owner -match '^ssh') {
+            Write-Host "[OK]  $($Node.Name) tunnel already running (PID $($pids[0]), SOCKS 127.0.0.1:$Port)" -ForegroundColor DarkGreen
+            return $true
+        }
+        Write-Host "[Err] Port $Port (reserved for the $($Node.Name) tunnel) is used by '$owner' (PID $($pids[0])). Move the node ports: proxy-config set NODE_SOCKS_BASE 1280" -ForegroundColor Red
+        return $false
+    }
+    Write-Host "[SSH] Starting $($Node.Name) tunnel to $($Node.Alias) (SOCKS 127.0.0.1:$Port)..." -ForegroundColor Cyan
+    $sshArgs = @('-N', '-C', '-D', "$Port",
+                 '-o', 'ServerAliveInterval=60', '-o', 'ServerAliveCountMax=3',
+                 '-o', 'ExitOnForwardFailure=yes', '-o', 'StrictHostKeyChecking=accept-new',
+                 $Node.Alias)
+    try { Start-Process -FilePath 'ssh' -ArgumentList $sshArgs -WindowStyle Hidden -ErrorAction Stop | Out-Null }
+    catch { Write-Host "[Err] Failed to launch ssh: $($_.Exception.Message)" -ForegroundColor Red; return $false }
+    $attempts = 0
+    while (-not (Test-Port -Port $Port) -and $attempts -lt 10) { Start-Sleep -Milliseconds 500; $attempts++ }
+    if (Test-Port -Port $Port) {
+        Write-Host "[OK]  $($Node.Name) tunnel up: SOCKS 127.0.0.1:$Port -> $($Node.Alias)" -ForegroundColor Green
+        return $true
+    }
+    Write-Host "[Err] $($Node.Name) tunnel failed to start within 5s. First time? Run 'ssh $($Node.Alias)' once to accept the host key." -ForegroundColor Red
+    return $false
+}
+
+# Running per-node tunnels: objects {Name, Port, Pid}
+function Get-NodeTunnels {
+    $out = @()
+    foreach ($n in Get-ProxyNodes) {
+        $port = Get-NodeSocksPort $n.Idx
+        foreach ($p in @((Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)) {
+            if ((Get-Process -Id $p -ErrorAction SilentlyContinue).ProcessName -match '^ssh') {
+                $out += [pscustomobject]@{ Name = $n.Name; Port = $port; Pid = $p }
+            }
+        }
+    }
+    return $out
+}
+
+function Stop-NodeTunnels {
+    foreach ($t in Get-NodeTunnels) {
+        taskkill /PID $t.Pid /T /F 2>$null | Out-Null
+        Write-Host "[Kill] PID $($t.Pid) (ssh, $($t.Name) Chrome tunnel :$($t.Port))" -ForegroundColor DarkGray
+    }
+}
+
+# --- commands ----------------------------------------------------------------
+function proxy-nodes {
+    param([switch]$Refresh)
+    if ($Refresh) {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.nodes.json.new'
+        Write-Host "[Nodes] Fetching the node catalogue..." -ForegroundColor Cyan
+        try { _fetch-file "$($script:REPO_RAW)/nodes.json" $tmp } catch {
+            Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then again." -ForegroundColor Yellow
+            return
+        }
+        $ok = $false
+        try { $cat = Get-Content $tmp -Raw | ConvertFrom-Json; $ok = (@($cat.nodes).Count -gt 0) } catch {}
+        if (-not $ok) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            Write-Host "[Err] Downloaded file doesn't look like a node catalogue - nothing changed." -ForegroundColor Red
+            return
+        }
+        Move-Item $tmp $script:NODES_CACHE -Force
+        Write-Host "[OK] Catalogue saved: $($script:NODES_CACHE)" -ForegroundColor Green
+        # Create the ssh aliases the catalogue promises (never touches existing ones).
+        foreach ($n in Get-ProxyNodes) {
+            if (Test-SshAlias $n.Alias)               { Confirm-NodeAlias $n | Out-Null }   # pins the host key if given
+            elseif (Test-NodeProvisioned $n.Host)     { Confirm-NodeAlias $n | Out-Null }
+            else { Write-Host "[Info] Node '$($n.Name)' is listed but has no host yet - skipped" -ForegroundColor DarkGray }
+        }
+    }
+
+    $nodes = Get-ProxyNodes
+    if (-not (Test-Path $script:NODES_CACHE) -or $nodes.Count -eq 0) {
+        Write-Host ""
+        Write-Host "[Info] No node catalogue yet - run 'proxy-nodes -Refresh' to download it." -ForegroundColor Yellow
+        Write-Host "       Current server: $($script:SSH_HOST)"
+        Write-Host ""
+        return
+    }
+    $updated = ''
+    try { $updated = "$((Get-Content $script:NODES_CACHE -Raw | ConvertFrom-Json).updated)" } catch {}
+    Write-Host ""
+    Write-Host "=== Proxy nodes (catalogue: $($script:NODES_CACHE)$(if ($updated) { ", updated $updated" })) ===" -ForegroundColor Cyan
+    Write-Host ""
+    $health  = Get-TunnelHealth
+    $running = @(Get-NodeTunnels)
+    $foundActive = $false
+    foreach ($n in $nodes) {
+        $mark = ' '; $where = ''
+        if ($n.Alias -eq $script:SSH_HOST) {
+            $mark = '*'; $foundActive = $true
+            $hp = if ($health.HttpPort) { $health.HttpPort } else { $script:HTTP_PORT }
+            $where = if ($health.Status -eq 'ok') { "ACTIVE - cc/cx tunnel UP (127.0.0.1:$hp / :$($script:SOCKS_PORT))" } else { "ACTIVE - tunnel down ('cc' starts it)" }
+        }
+        if ($running | Where-Object { $_.Name -eq $n.Name }) {
+            $where = "$(if ($where) { "$where; " })Chrome tunnel UP (:$(Get-NodeSocksPort $n.Idx))"
+        }
+        if (Test-NodeProvisioned $n.Host) {
+            $target = if ($n.User) { "$($n.User)@$($n.Host)" } else { $n.Host }
+            if (-not (Test-SshAlias $n.Alias)) { $where = "$(if ($where) { "$where; " })no ssh alias yet ('proxy-nodes -Refresh' creates it)" }
+        } else { $target = '<not provisioned>' }
+        $color = if ($mark -eq '*') { 'Green' } else { 'Gray' }
+        Write-Host ("  {0} {1,-4} {2,-8} {3,-11} {4,-30} {5}" -f $mark, $n.Name, $n.Alias, $n.Region, $target, $where) -ForegroundColor $color
+    }
+    if (-not $foundActive) { Write-Host "  * ($($script:SSH_HOST))  - current server, not in the catalogue" -ForegroundColor Green }
+    Write-Host ""
+    Write-Host "  proxy-node <name>        make it the node cc / cx use (restarts the tunnel if it's up)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy <name>      open a Chrome window through that node (own tunnel + profile; several can be open)" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Refresh     re-download the catalogue and create any missing ssh aliases" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+function proxy-node {
+    param([string]$Name)
+    if (-not $Name) {
+        $an = Get-ActiveNodeName
+        if ($an) { Write-Host "[..] Active node: $an ($($script:SSH_HOST)) - 'proxy-node <name>' switches, 'proxy-nodes' lists them" }
+        else     { Write-Host "[..] Active server: $($script:SSH_HOST) (not in the node catalogue) - 'proxy-nodes' lists the known nodes" }
+        return $true
+    }
+    $n = Find-ProxyNode $Name
+    if ($n) {
+        if (-not (Confirm-NodeAlias $n)) { return $false }
+        $alias = $n.Alias; $label = $n.Name; $pport = $n.ProxyPort
+    } elseif (Test-SshAlias $Name) {
+        $alias = $Name; $label = $Name; $pport = 0
+        Write-Host "[Info] '$Name' is not in the node catalogue but exists in ~\.ssh\config - using it as-is." -ForegroundColor Yellow
+    } else {
+        Write-Host "[Err] Unknown node '$Name'. 'proxy-nodes' lists them ('proxy-nodes -Refresh' fetches the latest)." -ForegroundColor Red
+        return $false
+    }
+    if ($alias -eq $script:SSH_HOST) {
+        Write-Host "[OK] '$label' is already the active node ($alias)" -ForegroundColor Green
+        return $true
+    }
+    $wasUp = ((Get-TunnelHealth).Status -eq 'ok')
+    $envOn = [bool]$env:HTTPS_PROXY
+    if ($wasUp) {
+        Write-Host "[Node] Switching the cc/cx tunnel to $label ($alias)..." -ForegroundColor Cyan
+        tunnel-stop | Out-Null
+    }
+    $script:SSH_HOST = $alias
+    if ($pport) { $script:REMOTE_PROXY_PORT = $pport }
+    _conf-write-all
+    Write-Host "[OK] Active node: $label ($alias) - saved to $($script:PROXY_CONF)" -ForegroundColor Green
+    if ($wasUp) {
+        tunnel-start
+        if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
+        if ($envOn) { proxy-on }
+    }
+    Write-Host "[Info] Other open windows keep the old node until they run:  . '$($script:PROFILE_PATH)'" -ForegroundColor DarkGray
+    return $true
 }
 
 # ============================================================
@@ -310,7 +582,10 @@ function proxy-off {
 # ============================================================
 
 function proxy-up {
-    param([switch]$NoVerify)
+    param([switch]$NoVerify, [string]$Node)
+
+    # Step 0: -Node sg  ==  proxy-node sg first (persists, like running it yourself).
+    if ($Node) { if (-not (proxy-node $Node)) { return $false } }
 
     # Step 1: SSH tunnel (HTTP + SOCKS forwards).
     # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
@@ -351,12 +626,16 @@ function proxy-up {
 # 'cc --resume <id>', 'cx resume' ... all work.
 function _split-launch-args {
     param($ArgList)
-    $r = @{ Safe = $false; NoVerify = $false; App = @() }
-    foreach ($a in $ArgList) {
-        switch -Regex ("$a") {
+    $r = @{ Safe = $false; NoVerify = $false; Node = ''; App = @() }
+    $list = @($ArgList)
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $a = "$($list[$i])"
+        switch -Regex ($a) {
             '^-{1,2}safe$'       { $r.Safe = $true }
             '^-{1,2}no-?verify$' { $r.NoVerify = $true }
-            default              { $r.App += "$a" }
+            '^-{1,2}node$'       { $i++; $r.Node = "$($list[$i])" }
+            '^-{1,2}node=(.+)$'  { $r.Node = $Matches[1] }
+            default              { $r.App += $a }
         }
     }
     return $r
@@ -370,7 +649,7 @@ function cc {
     }
 
     # Steps 1-3: bring up tunnel + env vars + verify
-    if (-not (proxy-up -NoVerify:$o.NoVerify)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node)) { return }
 
     # Step 4: Launch Claude
     Write-Host "[Launch] Starting Claude $($o.App -join ' ')..." -ForegroundColor Cyan
@@ -400,7 +679,7 @@ function cx {
     }
 
     # Steps 1-3: bring up tunnel + env vars + verify (the same stack cc uses)
-    if (-not (proxy-up -NoVerify:$o.NoVerify)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node)) { return }
 
     # Step 4: Launch Codex (it picks up HTTP(S)_PROXY from this shell's env)
     Write-Host "[Launch] Starting Codex $($o.App -join ' ')..." -ForegroundColor Cyan
@@ -472,6 +751,7 @@ function tunnel-stop {
 
 function cc-stop {
     $stopped = tunnel-stop
+    Stop-NodeTunnels      # per-node Chrome tunnels (chrome-proxy <node>) go too
     proxy-off
     if ($stopped) {
         Write-Host "[OK] All proxy services stopped" -ForegroundColor Green
@@ -515,6 +795,12 @@ function proxy-status {
     } else {
         Write-Host "[OFF] Env HTTPS_PROXY: not set" -ForegroundColor Red
     }
+    $an = Get-ActiveNodeName
+    if ($an) { Write-Host "[..]  Node          : $an ($($script:SSH_HOST))  - 'proxy-node <name>' switches, 'proxy-nodes' lists  (settings: $($script:PROXY_CONF))" }
+    else     { Write-Host "[..]  Server        : $($script:SSH_HOST)  (settings: $($script:PROXY_CONF))" }
+    foreach ($t in Get-NodeTunnels) {
+        Write-Host "[ON]  Chrome tunnel : $($t.Name) -> 127.0.0.1:$($t.Port) (PID $($t.Pid))" -ForegroundColor Green
+    }
 
     Write-Host ""
     Write-Host "Current external IP:" -ForegroundColor Cyan
@@ -550,6 +836,13 @@ function proxy-doctor {
         Write-Host "[ OK ]  ~/.ssh/config has an alias '$($script:SSH_HOST)'" -ForegroundColor Green
     } elseif (-not $script:SSH_USER) {
         Write-Host "[WARN] No 'Host $($script:SSH_HOST)' in ~/.ssh/config and SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set SSH_USER/SSH_KEY (proxy-config edit)" -ForegroundColor Yellow
+    }
+    if (Test-Path $script:NODES_CACHE) {
+        $nn = @(Get-ProxyNodes).Count; $an = Get-ActiveNodeName
+        $anTxt = if ($an) { $an } else { "none - '$($script:SSH_HOST)' is not a catalogue node" }
+        Write-Host "[ OK ]  Node catalogue: $($script:NODES_CACHE) ($nn nodes, active: $anTxt) - 'proxy-nodes -Refresh' updates it" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] No node catalogue ($($script:NODES_CACHE)) - only needed for 'proxy-node' / 'chrome-proxy <node>'. Fix: proxy-nodes -Refresh" -ForegroundColor Yellow
     }
 
     # --- tools ---
@@ -821,31 +1114,84 @@ function proxy-shortcut {
 # Launch Chrome through the SOCKS5 proxy (separate, isolated profile)
 # ============================================================
 
-function chrome-proxy {
-    # Locate Chrome first, so we don't start the tunnel only to find Chrome missing.
-    $chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-    if (-not (Test-Path $chrome)) { $chrome = "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe" }
-    if (-not (Test-Path $chrome)) { Write-Host "[Err] Chrome not found" -ForegroundColor Red; return }
+# Chrome keys a RUNNING instance on its --user-data-dir, not on its flags: a
+# second launch into the same dir just opens a window in the existing instance
+# and silently ignores a different --proxy-server. So every node gets its own
+# profile dir (<base>-<node>), which is also what keeps logins/cookies per region.
+# The pre-2.1 dir (<base>) is renamed to the active node's dir once, so nobody
+# loses their existing logins.
+function Get-ChromeProfileDir { param([string]$Base, [string]$Name)
+    if (-not $Name) { return $Base }
+    $target = "$Base-$Name"
+    if (-not (Test-Path $target) -and (Test-Path $Base) -and $Name -eq (Get-ActiveNodeName)) {
+        try {
+            Move-Item -LiteralPath $Base -Destination $target -ErrorAction Stop
+            Write-Host "[Info] Chrome profile moved to $target (per-node profiles since v2.1) - your logins are kept" -ForegroundColor DarkGray
+        } catch { return $Base }
+    }
+    return $target
+}
 
-    # Chrome routes through the SOCKS5 forward, which the SSH tunnel provides.
-    # Auto-start the tunnel if it's down; bail if it still won't come up.
-    if (-not (Test-Port -Port $script:SOCKS_PORT)) {
-        Write-Host "[Info] SSH tunnel (SOCKS port $($script:SOCKS_PORT)) not running - starting it..." -ForegroundColor Yellow
-        tunnel-start
-        if (-not (Test-Port -Port $script:SOCKS_PORT)) {
-            Write-Host "[Err] SSH tunnel could not be started - Chrome not launched. Run 'cc' to diagnose." -ForegroundColor Red
-            return
-        }
-    } else {
-        Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
+# chrome-proxy [node] [url ...]
+#   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
+#   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
+#                           the main tunnel and other nodes' windows are untouched
+#   chrome-proxy sg URL     ...and open URL there (any non-node argument is passed to Chrome)
+function chrome-proxy {
+    # Locate Chrome first, so we don't start a tunnel only to find Chrome missing.
+    $chrome = $null
+    foreach ($c in @($script:CHROME_EXE,
+                     "C:\Program Files\Google\Chrome\Application\chrome.exe",
+                     "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                     $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe" }))) {
+        if ($c -and (Test-Path $c)) { $chrome = $c; break }
+    }
+    if (-not $chrome) { Write-Host "[Err] Chrome not found - if it lives somewhere unusual: proxy-config set CHROME_EXE 'D:\path\to\chrome.exe'" -ForegroundColor Red; return }
+
+    $node = $null; $extra = @()
+    foreach ($a in $args) {
+        $n = if ($null -eq $node) { Find-ProxyNode "$a" } else { $null }
+        if ($n) { $node = $n } else { $extra += "$a" }
     }
 
-    $socks = "socks5://127.0.0.1:$($script:SOCKS_PORT)"
-    Write-Host "[Launch] Opening Chrome via $socks (separate profile)..." -ForegroundColor Cyan
+    if ($node) {
+        $name = $node.Name
+        if ($node.Alias -eq $script:SSH_HOST -and (Get-TunnelHealth).Status -eq 'ok') {
+            $port = $script:SOCKS_PORT; $label = "$name (main tunnel)"
+            Write-Host "[OK]  $name is the active node and its tunnel is up - reusing it" -ForegroundColor DarkGreen
+        } else {
+            if (-not (Confirm-NodeAlias $node)) { return }
+            $port = Get-NodeSocksPort $node.Idx
+            if (-not (Start-NodeTunnel $node $port)) {
+                Write-Host "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $($node.Alias)' by hand to see why." -ForegroundColor Red
+                return
+            }
+            $label = "$name (own tunnel)"
+        }
+    } else {
+        # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
+        if (-not (Test-Port -Port $script:SOCKS_PORT)) {
+            Write-Host "[Info] SSH tunnel (SOCKS port $($script:SOCKS_PORT)) not running - starting it..." -ForegroundColor Yellow
+            tunnel-start
+            if (-not (Test-Port -Port $script:SOCKS_PORT)) {
+                Write-Host "[Err] SSH tunnel could not be started - Chrome not launched. Run 'proxy-doctor' to diagnose." -ForegroundColor Red
+                return
+            }
+        } else {
+            Write-Host "[OK]  SSH tunnel already running" -ForegroundColor DarkGreen
+        }
+        $port = $script:SOCKS_PORT
+        $name = Get-ActiveNodeName
+        $label = "$(if ($name) { $name } else { $script:SSH_HOST }) (main tunnel)"
+    }
+
+    $socks = "socks5://127.0.0.1:$port"
+    $pdir  = Get-ChromeProfileDir "C:\ChromeVPNProfile" $name
+    Write-Host "[Launch] Opening Chrome through $label - $socks, profile $pdir" -ForegroundColor Cyan
     # --host-resolver-rules routes DNS through the tunnel too (avoids DNS leaks).
     & $chrome --proxy-server="$socks" `
               --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
-              --user-data-dir="C:\ChromeVPNProfile" --no-first-run
+              --user-data-dir="$pdir" --no-first-run @extra
 }
 
 # ============================================================
@@ -866,6 +1212,11 @@ function cc-help {
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host ""
+    Write-Host "  -- nodes (jp / sg / us ...) --" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray
+    Write-Host "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
+    Write-Host "" -ForegroundColor DarkGray
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
     Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray
     Write-Host "  proxy-update    - Fetch the latest version of this profile; your settings are kept" -ForegroundColor DarkGray
@@ -877,7 +1228,8 @@ function cc-help {
     Write-Host "  proxy-on        - Set proxy env vars + sync Claude settings.json" -ForegroundColor DarkGray
     Write-Host "  proxy-off       - Clear proxy env vars + unsync Claude settings.json" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  chrome-proxy    - Open Chrome via SOCKS5 (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
+    Write-Host "                    chrome-proxy [node] [url]  - e.g. chrome-proxy us https://example.com" -ForegroundColor DarkGray
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
 }
@@ -885,5 +1237,6 @@ function cc-help {
 # One line when a new window loads this profile. Silence it with BANNER = 0 in
 # ~\.claude-proxy.conf.psd1.
 if ($script:BANNER -eq 1) {
-    Write-Host "claude-proxy v$($script:PROFILE_VERSION) ready (server: $($script:SSH_HOST)) - 'cc' launches Claude, 'cc-help' lists all commands" -ForegroundColor DarkGray
+    $bn = Get-ActiveNodeName
+    Write-Host "claude-proxy v$($script:PROFILE_VERSION) ready (node: $(if ($bn) { "$bn / " })$($script:SSH_HOST)) - 'cc' launches Claude, 'cc-help' lists all commands" -ForegroundColor DarkGray
 }
