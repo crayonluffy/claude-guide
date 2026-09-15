@@ -2,16 +2,9 @@
 
 A copy-paste, step-by-step guide to running **Claude Code** (Anthropic) and **Codex** (OpenAI) through an SSH tunnel to a remote VM proxy — connect the proxy first, then install and sign in to both CLIs through it.
 
-**How traffic flows once everything is running:**
+**How traffic flows once everything is running** (animated — packets move along the two forwards; the red one shows what happens without the tunnel):
 
-```mermaid
-flowchart LR
-    claude([claude / codex]) -->|HTTPS_PROXY :8080| httpf([ssh -L])
-    chrome([Chrome]) -->|SOCKS5 :1080| socksf([ssh -D])
-    httpf -->|SSH| vm([VM tinyproxy :8888])
-    socksf -->|SSH| vm
-    vm --> api([Anthropic / OpenAI API / web])
-```
+<p align="center"><img src="docs/assets/traffic-flow.svg" alt="One SSH connection carries two forwards: -L 8080 to the VM's tinyproxy for Claude and Codex, and -D 1080 SOCKS5 for Chrome; direct traffic to the API is blocked by the network" width="960"></p>
 
 After a one-time setup you just type **`cc`** (Claude) or **`cx`** (Codex) and all of that happens automatically.
 
