@@ -23,7 +23,7 @@
 # profile, so several regions can be open side by side.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.1.0'
+$script:PROFILE_VERSION = '2.1.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -236,18 +236,19 @@ function Test-SshAlias { param([string]$Alias)
     return ((Test-Path $cfg) -and (Select-String -Path $cfg -Pattern "^Host\s+$([regex]::Escape($Alias))(\s|$)" -Quiet))
 }
 
-# IdentityFile of an ~\.ssh\config alias ('' if none) - new nodes reuse the key
-# the wizard installed for the first one.
-function Get-SshIdentity { param([string]$Alias)
+# A field (IdentityFile, User, ...) of an ~\.ssh\config alias ('' if none) - new
+# nodes reuse the key AND the username the wizard set up for the first one.
+function Get-SshField { param([string]$Alias, [string]$Field)
     $cfg = Join-Path $HOME '.ssh\config'
     if (-not (Test-Path $cfg)) { return '' }
     $in = $false
     foreach ($ln in (Get-Content $cfg)) {
         if ($ln -match '^\s*Host\s+(.+)$') { $in = (($Matches[1] -split '\s+') -contains $Alias); continue }
-        if ($in -and $ln -match '^\s*IdentityFile\s+(.+?)\s*$') { return ($Matches[1] -replace '^"|"$', '') }
+        if ($in -and $ln -match "^\s*$Field\s+(.+?)\s*$") { return ($Matches[1] -replace '^"|"$', '') }
     }
     return ''
 }
+function Get-SshIdentity { param([string]$Alias) return (Get-SshField $Alias 'IdentityFile') }
 
 # Append a Host block (same shape as the setup wizard writes).
 function Add-SshAlias { param([string]$Alias, [string]$NodeHost, [string]$User, [int]$Port, [string]$Key)
@@ -281,8 +282,12 @@ function Confirm-NodeAlias { param($Node)
     }
     $key = Get-SshIdentity $script:SSH_HOST
     if (-not $key) { $key = $script:SSH_KEY }
-    Add-SshAlias $Node.Alias $Node.Host $Node.User $Node.SshPort $key
-    $tgt = if ($Node.User) { "$($Node.User)@$($Node.Host)" } else { $Node.Host }
+    # Catalogue 'user' empty = everyone has their own account: reuse the User of the active alias.
+    $user = $Node.User
+    if (-not $user) { $user = Get-SshField $script:SSH_HOST 'User' }
+    if (-not $user) { $user = $script:SSH_USER }
+    Add-SshAlias $Node.Alias $Node.Host $user $Node.SshPort $key
+    $tgt = if ($user) { "$user@$($Node.Host)" } else { $Node.Host }
     if ($key) { Write-Host "[OK] ssh alias '$($Node.Alias)' -> $tgt written to ~\.ssh\config (key: $key)" -ForegroundColor Green }
     else      { Write-Host "[OK] ssh alias '$($Node.Alias)' -> $tgt written to ~\.ssh\config (no IdentityFile found on '$($script:SSH_HOST)' - ssh will use your default key)" -ForegroundColor Yellow }
     Add-KnownHost $Node.Host $Node.SshPort $Node.HostKey

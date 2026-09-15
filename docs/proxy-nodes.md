@@ -98,7 +98,7 @@ To move **Claude/Codex** to another region without the profile, just open the [m
 The catalogue is [`scripts/nodes.json`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/nodes.json) in this repo (served at `https://claude-guide.vercel.app/scripts/nodes.json` and via the GitHub raw URL the profile already uses for `proxy-update`). One line per node:
 
 ```json
-{ "name": "sg", "alias": "sgvpn", "host": "sg.proxy.example.com", "user": "ubuntu", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "", "hostkey": "ssh-ed25519 AAAA..." }
+{ "name": "sg", "alias": "sgvpn", "host": "sg.proxy.example.com", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "", "hostkey": "ssh-ed25519 AAAA..." }
 ```
 
 | Field | Meaning |
@@ -106,7 +106,8 @@ The catalogue is [`scripts/nodes.json`](https://github.com/crayonluffy/claude-gu
 | `name` | short id users type: `proxy-node sg` |
 | `alias` | the `~/.ssh/config` alias the profile creates (`sgvpn`) — keep the existing `jpvpn` for the first node so nobody's config changes |
 | `host` | IP **or DNS name**. A DNS name (e.g. a Cloudflare `A` record `sg.proxy.yourdomain`) lets you move the VM later without every user re-running anything. Leave the `<placeholder>` until the VM exists — users then see *not provisioned* |
-| `user`, `ssh_port` | SSH login for that VM |
+| `user` | **Leave empty** when every person has their own account (that's what [`sshu-manager`](https://github.com/crayonluffy/forge/tree/main/sshu-manager) creates) — the profile then reuses the `User` of the user's existing `jpvpn` alias, exactly like it reuses the key. Set it only if everyone shares one login on that node |
+| `ssh_port` | SSH port of that VM |
 | `proxy_port` | tinyproxy port on that VM (`webproxy-manager` default `8888`) |
 | `hostkey` | optional but recommended: `ssh-keyscan -t ed25519 <host> \| cut -d' ' -f2-`. The profile pins it in `known_hosts`, so the first connection never stops at *"Are you sure you want to continue connecting?"* |
 
@@ -114,5 +115,5 @@ Rules that matter:
 
 - **Append new nodes at the end and never reorder** — a node's position is its Chrome-tunnel port on every client.
 - **Keep one node object per line** — the shell profile has a `jq`-free fallback parser that relies on it.
-- Every VM needs [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy) and the users' public keys, exactly like the first one.
+- Every VM needs [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy) and the users' accounts + public keys. With [`sshu-manager`](https://github.com/crayonluffy/forge/tree/main/sshu-manager) that's `sshu-add --tunnel-only --sync <user>` on the primary node (one key, every node), and `sshu-node-info` prints this node's catalogue line ready to paste.
 - Push to `main`; clients pick it up on their next `proxy-nodes --refresh` (or wizard run). Existing aliases are never overwritten — if a node's address changes, users edit `~/.ssh/config` (or delete that `Host` block and refresh).

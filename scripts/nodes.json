@@ -7,13 +7,15 @@
     "A 'host' left as <...> means 'not provisioned yet' - clients list the node but don't create an alias.",
     "'hostkey' (optional) is the VM's public host key, e.g. from:  ssh-keyscan -t ed25519 <host> | cut -d' ' -f2-",
     "When set, clients add it to known_hosts so the first connection never asks 'Are you sure...?'.",
-    "Keep ONE node per line - the shell profile has a jq-less fallback parser that relies on it."
+    "Keep ONE node per line - the shell profile has a jq-less fallback parser that relies on it.",
+    "'user': leave EMPTY when every person has their own account (sshu-manager) - clients then reuse the User",
+    "of their existing jpvpn alias. Set it only if all users share one login on that node."
   ],
   "version": 1,
   "updated": "2026-09-15",
   "nodes": [
-    { "name": "jp", "alias": "jpvpn", "host": "<jp-vm-ip-or-dns>", "user": "ubuntu", "ssh_port": 22, "proxy_port": 8888, "region": "Japan",     "note": "default node", "hostkey": "" },
-    { "name": "sg", "alias": "sgvpn", "host": "<sg-vm-ip-or-dns>", "user": "ubuntu", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "",             "hostkey": "" },
-    { "name": "us", "alias": "usvpn", "host": "<us-vm-ip-or-dns>", "user": "ubuntu", "ssh_port": 22, "proxy_port": 8888, "region": "US",        "note": "",             "hostkey": "" }
+    { "name": "jp", "alias": "jpvpn", "host": "<jp-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Japan",     "note": "default node", "hostkey": "" },
+    { "name": "sg", "alias": "sgvpn", "host": "<sg-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "",             "hostkey": "" },
+    { "name": "us", "alias": "usvpn", "host": "<us-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "US",        "note": "",             "hostkey": "" }
   ]
 }

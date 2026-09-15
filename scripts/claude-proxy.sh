@@ -22,7 +22,7 @@
 # profile, so several regions can be open side by side.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.1.0"
+CLAUDE_PROXY_VERSION="2.1.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -339,15 +339,17 @@ _ssh_config_has_alias() {  # <alias>
     grep -qiE "^Host[[:space:]]+$1([[:space:]]|$)" "$HOME/.ssh/config" 2>/dev/null
 }
 
-# IdentityFile of an ~/.ssh/config alias ("" if none) - new nodes reuse the key
-# the wizard installed for the first one.
-_ssh_config_identity() {  # <alias>
+# A field (IdentityFile, User, ...) of an ~/.ssh/config alias ("" if none) - new
+# nodes reuse the key AND the username the wizard set up for the first one, since
+# sshu-manager gives every person their own account with one key for all nodes.
+_ssh_config_field() {  # <alias> <Field>
     [ -f "$HOME/.ssh/config" ] || return 1
-    awk -v a="$1" '
-        tolower($1) == "host"         { inblk = 0; for (i = 2; i <= NF; i++) if ($i == a) inblk = 1; next }
-        inblk && tolower($1) == "identityfile" { sub(/^[ \t]*[Ii]dentity[Ff]ile[ \t]+/, ""); gsub(/^"|"$/, ""); print; exit }
+    awk -v a="$1" -v f="$(printf '%s' "$2" | tr 'A-Z' 'a-z')" '
+        tolower($1) == "host" { inblk = 0; for (i = 2; i <= NF; i++) if ($i == a) inblk = 1; next }
+        inblk && tolower($1) == f { $1 = ""; sub(/^[ \t]+/, ""); gsub(/^"|"$/, ""); print; exit }
     ' "$HOME/.ssh/config"
 }
+_ssh_config_identity() { _ssh_config_field "$1" IdentityFile; }
 
 # Append a Host block (same shape as the setup wizard writes).
 _ssh_config_add_alias() {  # <alias> <host> <user> <port> <identityfile>
@@ -392,6 +394,11 @@ _node_ensure_alias() {  # <catalogue line>
     fi
     key=$(_ssh_config_identity "$CLAUDE_SSH_HOST")
     [ -n "$key" ] || key="$CLAUDE_SSH_KEY"
+    # Catalogue 'user' empty = everyone has their own account: reuse the User of the active alias.
+    if [ -z "$user" ]; then
+        user=$(_ssh_config_field "$CLAUDE_SSH_HOST" User)
+        [ -n "$user" ] || user="$CLAUDE_SSH_USER"
+    fi
     _ssh_config_add_alias "$alias" "$host" "$user" "$sport" "$key"
     if [ -n "$key" ]; then
         echo "[OK] ssh alias '$alias' -> ${user:+$user@}$host written to ~/.ssh/config (key: $key)"
