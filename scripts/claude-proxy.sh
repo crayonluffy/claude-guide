@@ -14,9 +14,15 @@
 # YOUR SETTINGS LIVE IN ~/.claude-proxy.conf, NOT IN THIS FILE.
 #   proxy-config        show / edit them
 #   proxy-update        replace this file with the latest version (settings are kept)
+#
+# NODES (v2.1): the admin publishes a catalogue of VMs (jp / sg / us ...) as
+# scripts/nodes.json. 'proxy-nodes --refresh' downloads it and creates the
+# matching ~/.ssh/config aliases; 'proxy-node sg' makes sg the node that cc / cx
+# use; 'chrome-proxy sg' opens a Chrome window through sg on its OWN tunnel and
+# profile, so several regions can be open side by side.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.0.0"
+CLAUDE_PROXY_VERSION="2.1.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -43,6 +49,14 @@ CLAUDE_SSH_PORT=22
 CLAUDE_HTTP_PORT=8080            # local HTTP port -> forwarded to the VM's HTTP proxy (Claude/Codex)
 CLAUDE_REMOTE_PROXY_PORT=8888    # tinyproxy port on the VM (webproxy-manager)
 CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
+
+# Node catalogue (jp / sg / us ...): downloaded by 'proxy-nodes --refresh' from
+# $CLAUDE_PROXY_REPO_RAW/nodes.json. 'chrome-proxy <node>' opens a SEPARATE
+# SOCKS-only tunnel per node so several regions can be open at once; node i
+# (0-based, catalogue order) listens on NODE_SOCKS_BASE + i.
+CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
+CLAUDE_NODE_SOCKS_BASE=1180
+CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
 # `claude` launched from ANY shell (not just this one) uses it. Removed again on
@@ -72,10 +86,11 @@ if [ -f "$CLAUDE_PROXY_CONF" ]; then
 fi
 export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
        CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT \
-       CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF
+       CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF \
+       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
 
 # ============================================================
 # Helpers
@@ -256,6 +271,317 @@ _claude_settings_proxy_off() {
     command -v jq >/dev/null 2>&1 || return 0
     local f
     for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
+}
+
+# ============================================================
+# Nodes: catalogue (nodes.json) + ~/.ssh/config aliases + per-node Chrome tunnels
+# ============================================================
+
+# The catalogue as one line per node, '|'-separated:
+#   idx|name|alias|host|user|ssh_port|proxy_port|region|note|hostkey
+# jq when available; otherwise a small awk parser that relies on the published
+# file keeping ONE node object per line (which nodes.json promises).
+_nodes_tsv() {
+    [ -f "$CLAUDE_PROXY_NODES" ] || return 1
+    if command -v jq >/dev/null 2>&1; then
+        jq -r '.nodes // [] | to_entries[] | [
+            .key, .value.name, .value.alias, (.value.host // ""), (.value.user // ""),
+            (.value.ssh_port // 22), (.value.proxy_port // 8888),
+            (.value.region // ""), (.value.note // ""), (.value.hostkey // "")
+        ] | map(tostring) | join("|")' "$CLAUDE_PROXY_NODES" 2>/dev/null
+    else
+        awk '
+        function f(k,   r, s) {
+            r = "\"" k "\"[ \t]*:[ \t]*"
+            if (match($0, r "\"[^\"]*\"")) { s = substr($0, RSTART, RLENGTH); sub(r "\"", "", s); sub(/"$/, "", s); return s }
+            if (match($0, r "[0-9]+"))    { s = substr($0, RSTART, RLENGTH); sub(r, "", s); return s }
+            return ""
+        }
+        /"name"[ \t]*:/ && /"alias"[ \t]*:/ {
+            sp = f("ssh_port"); if (sp == "") sp = 22
+            pp = f("proxy_port"); if (pp == "") pp = 8888
+            print i++ "|" f("name") "|" f("alias") "|" f("host") "|" f("user") "|" sp "|" pp "|" f("region") "|" f("note") "|" f("hostkey")
+        }' "$CLAUDE_PROXY_NODES"
+    fi
+}
+
+# The catalogue line for a node NAME or ALIAS ("" if unknown).
+_node_lookup() {
+    local want="$1" line idx name alias rest
+    [ -n "$want" ] || return 1
+    while IFS='|' read -r idx name alias rest; do
+        [ -n "$idx" ] || continue
+        if [ "$name" = "$want" ] || [ "$alias" = "$want" ]; then
+            echo "$idx|$name|$alias|$rest"
+            return 0
+        fi
+    done <<< "$(_nodes_tsv)"
+    return 1
+}
+
+# Name of the node cc/cx currently use ("" when CLAUDE_SSH_HOST isn't in the catalogue).
+_node_active_name() {
+    local line
+    line=$(_node_lookup "$CLAUDE_SSH_HOST") || return 1
+    echo "$line" | cut -d'|' -f2
+}
+
+# A node's host is "provisioned" once the admin replaced the <placeholder>.
+_node_provisioned() {  # <host>
+    [ -n "$1" ] && case "$1" in "<"*) return 1 ;; esac
+}
+
+_node_socks_port() {  # <idx>
+    echo $((CLAUDE_NODE_SOCKS_BASE + $1))
+}
+
+_ssh_config_has_alias() {  # <alias>
+    grep -qiE "^Host[[:space:]]+$1([[:space:]]|$)" "$HOME/.ssh/config" 2>/dev/null
+}
+
+# IdentityFile of an ~/.ssh/config alias ("" if none) - new nodes reuse the key
+# the wizard installed for the first one.
+_ssh_config_identity() {  # <alias>
+    [ -f "$HOME/.ssh/config" ] || return 1
+    awk -v a="$1" '
+        tolower($1) == "host"         { inblk = 0; for (i = 2; i <= NF; i++) if ($i == a) inblk = 1; next }
+        inblk && tolower($1) == "identityfile" { sub(/^[ \t]*[Ii]dentity[Ff]ile[ \t]+/, ""); gsub(/^"|"$/, ""); print; exit }
+    ' "$HOME/.ssh/config"
+}
+
+# Append a Host block (same shape as the setup wizard writes).
+_ssh_config_add_alias() {  # <alias> <host> <user> <port> <identityfile>
+    local alias="$1" host="$2" user="$3" port="$4" key="$5"
+    mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+    {
+        printf '\nHost %s\n' "$alias"
+        printf '    HostName %s\n' "$host"
+        [ -n "$user" ] && printf '    User %s\n' "$user"
+        [ -n "$port" ] && [ "$port" != "22" ] && printf '    Port %s\n' "$port"
+        [ -n "$key" ]  && printf '    IdentityFile %s\n' "$key"
+        printf '    AddKeysToAgent yes\n'
+        [ "$(uname)" = "Darwin" ] && printf '    UseKeychain yes\n'
+    } >> "$HOME/.ssh/config"
+    chmod 600 "$HOME/.ssh/config"
+}
+
+# Pin a node's host key so the first connection never stops at "Are you sure...?".
+_known_hosts_add() {  # <host> <port> <hostkey>
+    local host="$1" port="$2" key="$3" entry
+    [ -n "$key" ] || return 0
+    [ "$port" = "22" ] && entry="$host" || entry="[$host]:$port"
+    mkdir -p "$HOME/.ssh"
+    grep -qsF "$key" "$HOME/.ssh/known_hosts" && return 0
+    printf '%s %s\n' "$entry" "$key" >> "$HOME/.ssh/known_hosts"
+    chmod 600 "$HOME/.ssh/known_hosts"
+    echo "[OK] Host key for $host pinned in ~/.ssh/known_hosts"
+}
+
+# Make sure a catalogue node has an ssh alias (creates it from the catalogue if
+# missing, reusing the active alias's key). Fails when the node has no host yet.
+_node_ensure_alias() {  # <catalogue line>
+    local idx name alias host user sport pport region note hostkey key
+    IFS='|' read -r idx name alias host user sport pport region note hostkey <<< "$1"
+    if _ssh_config_has_alias "$alias"; then
+        _known_hosts_add "$host" "$sport" "$hostkey"
+        return 0
+    fi
+    if ! _node_provisioned "$host"; then
+        echo "[Err] Node '$name' has no host in the catalogue yet (not provisioned) - ask your admin, then 'proxy-nodes --refresh'."
+        return 1
+    fi
+    key=$(_ssh_config_identity "$CLAUDE_SSH_HOST")
+    [ -n "$key" ] || key="$CLAUDE_SSH_KEY"
+    _ssh_config_add_alias "$alias" "$host" "$user" "$sport" "$key"
+    if [ -n "$key" ]; then
+        echo "[OK] ssh alias '$alias' -> ${user:+$user@}$host written to ~/.ssh/config (key: $key)"
+    else
+        echo "[OK] ssh alias '$alias' -> ${user:+$user@}$host written to ~/.ssh/config (no IdentityFile found on '$CLAUDE_SSH_HOST' - ssh will use your default key)"
+    fi
+    _known_hosts_add "$host" "$sport" "$hostkey"
+}
+
+# --- per-node Chrome tunnels (SOCKS only; the main tunnel is untouched) ------
+_node_tunnel_start() {  # <name> <alias> <port>
+    local name="$1" alias="$2" port="$3" pid pname attempts=0
+    if _port_in_use "$port"; then
+        pid=$(_ssh_listeners "$port" | head -1)
+        if [ -n "$pid" ]; then
+            echo "[OK]  $name tunnel already running (PID $pid, SOCKS 127.0.0.1:$port)"
+            return 0
+        fi
+        pid=$(_listeners "$port" | head -1); pname=$(_proc_name "$pid")
+        echo "[Err] Port $port (reserved for the $name tunnel) is used by '${pname:-unknown}' (PID $pid). Move the node ports: proxy-config set NODE_SOCKS_BASE 1280"
+        return 1
+    fi
+    _is_wsl && _ensure_ssh_agent
+    echo "[SSH] Starting $name tunnel to $alias (SOCKS 127.0.0.1:$port)..."
+    ssh -N -f -C -D "$port" \
+        -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+        "$alias" 2>"$CLAUDE_TUNNEL_LOG.$name"
+    while ! _port_in_use "$port" && [ $attempts -lt 10 ]; do
+        sleep 0.5; attempts=$((attempts+1))
+    done
+    if _port_in_use "$port"; then
+        echo "[OK]  $name tunnel up: SOCKS 127.0.0.1:$port -> $alias"
+    else
+        echo "[Err] $name tunnel failed to start within 5s. ssh said:"
+        sed 's/^/       /' "$CLAUDE_TUNNEL_LOG.$name" 2>/dev/null | head -5
+        echo "       (first time? run 'ssh $alias' once to accept the host key)"
+        return 1
+    fi
+}
+
+# Running per-node tunnels: "name|port|pid" per line.
+_node_tunnels_running() {
+    local idx name rest port pid
+    while IFS='|' read -r idx name rest; do
+        [ -n "$idx" ] || continue
+        port=$(_node_socks_port "$idx")
+        for pid in $(_ssh_listeners "$port"); do echo "$name|$port|$pid"; done
+    done <<< "$(_nodes_tsv)"
+}
+
+_node_tunnels_stop() {
+    local name port pid
+    while IFS='|' read -r name port pid; do
+        [ -n "$pid" ] || continue
+        kill "$pid" 2>/dev/null
+        echo "[Kill] PID $pid (ssh, $name Chrome tunnel :$port)"
+    done <<< "$(_node_tunnels_running)"
+}
+
+# --- commands ----------------------------------------------------------------
+proxy-nodes() {
+    # (zsh prints a variable when 'local' re-declares it - declare everything once)
+    local refresh=0 tmp updated line idx name alias host user sport pport region note hostkey
+    local tstate hpid hname hport running mark target where found_active=0
+    case "${1:-}" in
+        --refresh|-r|refresh) refresh=1 ;;
+        ""|list) ;;
+        *) echo "usage: proxy-nodes [--refresh]"; return 1 ;;
+    esac
+
+    if [ $refresh -eq 1 ]; then
+        tmp=$(mktemp) || return 1
+        echo "[Nodes] Fetching the node catalogue..."
+        if ! curl -fsSL "$CLAUDE_PROXY_REPO_RAW/nodes.json" -o "$tmp"; then
+            rm -f "$tmp"
+            echo "[Err] Download failed. GitHub not reachable from here? Try 'proxy-up' first, then again."
+            return 1
+        fi
+        if ! grep -q '"nodes"' "$tmp" || { command -v jq >/dev/null 2>&1 && ! jq -e '.nodes | length > 0' "$tmp" >/dev/null 2>&1; }; then
+            rm -f "$tmp"
+            echo "[Err] Downloaded file doesn't look like a node catalogue - nothing changed."
+            return 1
+        fi
+        mv "$tmp" "$CLAUDE_PROXY_NODES"
+        echo "[OK] Catalogue saved: $CLAUDE_PROXY_NODES"
+        # Create the ssh aliases the catalogue promises (never touches existing ones).
+        while IFS='|' read -r line; do
+            [ -n "$line" ] || continue
+            IFS='|' read -r idx name alias host user sport pport region note hostkey <<< "$line"
+            if _ssh_config_has_alias "$alias"; then
+                _node_ensure_alias "$line" >/dev/null   # pins the host key if given
+            elif _node_provisioned "$host"; then
+                _node_ensure_alias "$line"
+            else
+                echo "[Info] Node '$name' is listed but has no host yet - skipped"
+            fi
+        done <<< "$(_nodes_tsv)"
+    fi
+
+    if [ ! -f "$CLAUDE_PROXY_NODES" ]; then
+        echo ""
+        echo "[Info] No node catalogue yet - run 'proxy-nodes --refresh' to download it."
+        echo "       Current server: $CLAUDE_SSH_HOST"
+        echo ""
+        return 0
+    fi
+
+    updated=$(sed -n 's/.*"updated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CLAUDE_PROXY_NODES" | head -1)
+    echo ""
+    echo "=== Proxy nodes (catalogue: $CLAUDE_PROXY_NODES${updated:+, updated $updated}) ==="
+    echo ""
+    read -r tstate hpid hname hport <<< "$(_tunnel_health)"
+    running=$(_node_tunnels_running)
+    while IFS='|' read -r idx name alias host user sport pport region note hostkey; do
+        [ -n "$idx" ] || continue
+        mark=" "; where=""
+        if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then
+            mark="*"; found_active=1
+            case "$tstate" in
+                ok) where="ACTIVE - cc/cx tunnel UP (127.0.0.1:${hport:-$CLAUDE_HTTP_PORT} / :$CLAUDE_SOCKS_PORT)" ;;
+                *)  where="ACTIVE - tunnel down ('cc' starts it)" ;;
+            esac
+        fi
+        if printf '%s\n' "$running" | grep -q "^$name|"; then
+            where="${where:+$where; }Chrome tunnel UP (:$(_node_socks_port "$idx"))"
+        fi
+        if _node_provisioned "$host"; then
+            target="${user:+$user@}$host"
+            _ssh_config_has_alias "$alias" || where="${where:+$where; }no ssh alias yet ('proxy-nodes --refresh' creates it)"
+        else
+            target="<not provisioned>"
+        fi
+        printf '  %s %-4s %-8s %-11s %-30s %s\n' "$mark" "$name" "$alias" "$region" "$target" "$where"
+    done <<< "$(_nodes_tsv)"
+    if [ $found_active -eq 0 ]; then
+        echo "  * ($CLAUDE_SSH_HOST)  - current server, not in the catalogue"
+    fi
+    echo ""
+    echo "  proxy-node <name>        make it the node cc / cx use (restarts the tunnel if it's up)"
+    echo "  chrome-proxy <name>      open a Chrome window through that node (own tunnel + profile; several can be open)"
+    echo "  proxy-nodes --refresh    re-download the catalogue and create any missing ssh aliases"
+    echo ""
+}
+
+proxy-node() {
+    local want="${1:-}" line idx name alias host user sport pport rest
+    if [ -z "$want" ]; then
+        name=$(_node_active_name)
+        if [ -n "$name" ]; then
+            echo "[..] Active node: $name ($CLAUDE_SSH_HOST) - 'proxy-node <name>' switches, 'proxy-nodes' lists them"
+        else
+            echo "[..] Active server: $CLAUDE_SSH_HOST (not in the node catalogue) - 'proxy-nodes' lists the known nodes"
+        fi
+        return 0
+    fi
+
+    if line=$(_node_lookup "$want"); then
+        IFS='|' read -r idx name alias host user sport pport rest <<< "$line"
+        _node_ensure_alias "$line" || return 1
+    elif _ssh_config_has_alias "$want"; then
+        name="$want"; alias="$want"; pport=""
+        echo "[Info] '$want' is not in the node catalogue but exists in ~/.ssh/config - using it as-is."
+    else
+        echo "[Err] Unknown node '$want'. 'proxy-nodes' lists them ('proxy-nodes --refresh' fetches the latest)."
+        return 1
+    fi
+
+    if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then
+        echo "[OK] '$name' is already the active node ($alias)"
+        return 0
+    fi
+
+    local was_up=0 env_on=0
+    [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] && was_up=1
+    [ -n "${HTTPS_PROXY:-}" ] && env_on=1
+
+    _conf_set CLAUDE_SSH_HOST "$alias"
+    [ -n "$pport" ] && _conf_set CLAUDE_REMOTE_PROXY_PORT "$pport"
+    if [ $was_up -eq 1 ]; then
+        echo "[Node] Switching the cc/cx tunnel to $name ($alias)..."
+        tunnel-stop
+    fi
+    _conf_reload
+    echo "[OK] Active node: $name ($alias) - saved to $CLAUDE_PROXY_CONF"
+    if [ $was_up -eq 1 ]; then
+        tunnel-start || return 1
+        [ $env_on -eq 1 ] && proxy-on
+    fi
+    echo "[Info] Open shells keep the old node until they run: source $CLAUDE_PROXY_SELF"
 }
 
 # ============================================================
@@ -450,13 +776,20 @@ _verify_proxy_ip() {
 # ============================================================
 
 proxy-up() {
-    local no_verify=0
+    local no_verify=0 node=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-verify) no_verify=1 ;;
+            --node)      shift; node="${1:-}" ;;
+            --node=*)    node="${1#--node=}" ;;
         esac
         shift
     done
+
+    # Step 0: --node sg  ==  proxy-node sg first (persists, like running it yourself).
+    if [ -n "$node" ]; then
+        proxy-node "$node" || return 1
+    fi
 
     # Step 1: SSH tunnel (HTTP + SOCKS forwards).
     # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
@@ -493,6 +826,8 @@ _launch_via_proxy() {
         case "$1" in
             --safe)      safe=1 ;;
             --no-verify) up_args+=(--no-verify) ;;
+            --node)      up_args+=(--node "${2:-}"); shift ;;
+            --node=*)    up_args+=("$1") ;;
             *)           app_args+=("$1") ;;
         esac
         shift
@@ -526,6 +861,7 @@ cc-stop() {
     # result so cc-stop never falsely claims success when a port is still held.
     local rc=0
     tunnel-stop || rc=1
+    _node_tunnels_stop      # per-node Chrome tunnels (chrome-proxy <node>) go too
     proxy-off
     if [ $rc -eq 0 ]; then
         echo "[OK] All proxy services stopped"
@@ -572,7 +908,18 @@ proxy-status() {
     else
         echo "[OFF] Env HTTPS_PROXY: not set"
     fi
-    echo "[..]  Server        : $CLAUDE_SSH_HOST  (settings: $CLAUDE_PROXY_CONF)"
+    local nname
+    nname=$(_node_active_name)
+    if [ -n "$nname" ]; then
+        echo "[..]  Node          : $nname ($CLAUDE_SSH_HOST)  - 'proxy-node <name>' switches, 'proxy-nodes' lists  (settings: $CLAUDE_PROXY_CONF)"
+    else
+        echo "[..]  Server        : $CLAUDE_SSH_HOST  (settings: $CLAUDE_PROXY_CONF)"
+    fi
+    local nport npid
+    while IFS='|' read -r nname nport npid; do
+        [ -n "$npid" ] || continue
+        echo "[ON]  Chrome tunnel : $nname -> 127.0.0.1:$nport (PID $npid)"
+    done <<< "$(_node_tunnels_running)"
 
     echo ""
     echo "Current external IP:"
@@ -600,6 +947,13 @@ proxy-doctor() {
         echo "$ok  ~/.ssh/config has an alias '$CLAUDE_SSH_HOST'"
     elif [ -z "$CLAUDE_SSH_USER" ]; then
         echo "$warn No 'Host $CLAUDE_SSH_HOST' in ~/.ssh/config and CLAUDE_SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set CLAUDE_SSH_USER/KEY (proxy-config edit)"
+    fi
+    if [ -f "$CLAUDE_PROXY_NODES" ]; then
+        local nn an
+        nn=$(_count "$(_nodes_tsv)"); an=$(_node_active_name)
+        echo "$ok  Node catalogue: $CLAUDE_PROXY_NODES ($nn nodes, active: ${an:-none - '$CLAUDE_SSH_HOST' is not a catalogue node}) - 'proxy-nodes --refresh' updates it"
+    else
+        echo "$warn No node catalogue ($CLAUDE_PROXY_NODES) - only needed for 'proxy-node' / 'chrome-proxy <node>'. Fix: proxy-nodes --refresh"
     fi
 
     if _is_wsl; then
@@ -892,69 +1246,128 @@ proxy-update() {
 # Launch Chrome through the SOCKS5 proxy (separate, isolated profile)
 # ============================================================
 
-chrome-proxy() {
-    local socks="socks5://127.0.0.1:$CLAUDE_SOCKS_PORT"
-
-    # Chrome routes through the SOCKS5 forward, which the SSH tunnel provides.
-    # Ensure the tunnel is up (same as 'cc' step 1); bail if it won't start.
-    if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then
-        echo "[Info] SSH tunnel (SOCKS port $CLAUDE_SOCKS_PORT) not running - starting it..."
-        tunnel-start
-        _port_in_use "$CLAUDE_SOCKS_PORT" || {
-            echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'proxy-doctor' to diagnose."
-            return 1
-        }
-    else
-        echo "[OK]  SSH tunnel already running"
+# Chrome keys a RUNNING instance on its --user-data-dir, not on its flags: a
+# second launch into the same dir just opens a window in the existing instance
+# and silently ignores a different --proxy-server. So every node gets its own
+# profile dir (<base>-<node>), which is also what keeps logins/cookies per region.
+# The pre-2.1 dir (<base>) is renamed to the active node's dir once, so nobody
+# loses their existing logins.
+_chrome_profile_dir() {  # <base linux path> <node name>   (prints the dir to use)
+    local base="$1" name="$2" target
+    [ -n "$name" ] || { echo "$base"; return; }
+    target="$base-$name"
+    if [ ! -d "$target" ] && [ -d "$base" ] && [ "$name" = "$(_node_active_name)" ]; then
+        if mv "$base" "$target" 2>/dev/null; then
+            echo "[Info] Chrome profile moved to $target (per-node profiles since v2.1) - your logins are kept" >&2
+        else
+            echo "$base"; return
+        fi
     fi
+    echo "$target"
+}
 
-    local c
+# chrome-proxy [node] [url ...]
+#   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
+#   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
+#                           the main tunnel and other nodes' windows are untouched
+#   chrome-proxy sg URL     ...and open URL there (any non-node argument is passed to Chrome)
+chrome-proxy() {
+    local a line node="" name idx alias host rest socks port label
+    local extra=()
+    for a in "$@"; do
+        if [ -z "$node" ] && line=$(_node_lookup "$a"); then
+            node="$a"
+        else
+            extra+=("$a")
+        fi
+    done
+
+    if [ -n "$node" ]; then
+        IFS='|' read -r idx name alias host rest <<< "$line"
+        if [ "$alias" = "$CLAUDE_SSH_HOST" ] && [ "$(_tunnel_health | awk '{print $1}')" = "ok" ]; then
+            port="$CLAUDE_SOCKS_PORT"; label="$name (main tunnel)"
+            echo "[OK]  $name is the active node and its tunnel is up - reusing it"
+        else
+            _node_ensure_alias "$line" || return 1
+            port=$(_node_socks_port "$idx")
+            _node_tunnel_start "$name" "$alias" "$port" || {
+                echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
+                return 1
+            }
+            label="$name (own tunnel)"
+        fi
+    else
+        # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
+        if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then
+            echo "[Info] SSH tunnel (SOCKS port $CLAUDE_SOCKS_PORT) not running - starting it..."
+            tunnel-start
+            _port_in_use "$CLAUDE_SOCKS_PORT" || {
+                echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'proxy-doctor' to diagnose."
+                return 1
+            }
+        else
+            echo "[OK]  SSH tunnel already running"
+        fi
+        port="$CLAUDE_SOCKS_PORT"
+        name=$(_node_active_name)
+        label="${name:-$CLAUDE_SSH_HOST} (main tunnel)"
+    fi
+    socks="socks5://127.0.0.1:$port"
+
+    local c pdir
     if _is_wsl; then
         # WSL has no Linux Chrome; drive Windows Chrome instead. It reaches the
         # WSL-side SOCKS port via WSL2 localhost forwarding (on by default).
         local win_chrome=""
-        for c in \
+        for c in "$CLAUDE_CHROME_BIN" \
             "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe" \
             "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe"; do
-            [ -x "$c" ] && { win_chrome="$c"; break; }
+            [ -n "$c" ] && [ -x "$c" ] && { win_chrome="$c"; break; }
         done
         [ -n "$win_chrome" ] || {
-            echo "[Err] Windows Chrome not found under /mnt/c - launch it manually with --proxy-server=$socks"
+            echo "[Err] Windows Chrome not found under /mnt/c - set its path: proxy-config set CHROME_BIN '/mnt/c/.../chrome.exe' (or launch it manually with --proxy-server=$socks)"
             return 1
         }
+        # Profile dir is a Windows path; do the one-time rename via /mnt/c.
+        pdir=$(_chrome_profile_dir "/mnt/c/wsl-proxy-profile" "$name")
+        pdir="C:\\${pdir#/mnt/c/}"
         "$win_chrome" \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="C:\\wsl-proxy-profile" \
-            --no-first-run >/dev/null 2>&1 &
-        echo "[OK] Windows Chrome launched through $socks (separate profile)"
+            --user-data-dir="$pdir" \
+            --no-first-run "${extra[@]}" >/dev/null 2>&1 &
+        echo "[OK] Windows Chrome launched through $label - $socks, profile $pdir"
         return
     fi
 
     # Native Linux / macOS
     if [ "$(uname)" = "Darwin" ]; then
-        [ -d "/Applications/Google Chrome.app" ] || {
-            echo "[Err] Google Chrome not found in /Applications"
+        local app="${CLAUDE_CHROME_BIN:-Google Chrome}"
+        [ -n "$CLAUDE_CHROME_BIN" ] || [ -d "/Applications/Google Chrome.app" ] || {
+            echo "[Err] Google Chrome not found in /Applications - set it: proxy-config set CHROME_BIN 'Chromium' (app name or path)"
             return 1
         }
         # A dedicated user-data-dir OUTSIDE the real Chrome folder: the proxied
         # Chrome is fully isolated and can never touch your normal profiles.
-        open -n -a "Google Chrome" --args \
+        pdir=$(_chrome_profile_dir "$HOME/.chrome-proxy-profile" "$name")
+        open -n -a "$app" --args \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="$HOME/.chrome-proxy-profile" \
-            --no-first-run
+            --user-data-dir="$pdir" \
+            --no-first-run "${extra[@]}"
     else
         local bin
-        bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
-        [ -n "$bin" ] || { echo "[Err] Chrome/Chromium not found on PATH"; return 1; }
+        bin="$CLAUDE_CHROME_BIN"
+        [ -n "$bin" ] || bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
+        [ -n "$bin" ] || { echo "[Err] Chrome/Chromium not found on PATH - set it: proxy-config set CHROME_BIN /path/to/chrome"; return 1; }
+        pdir=$(_chrome_profile_dir "$HOME/.config/google-chrome-vpn" "$name")
         nohup "$bin" \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="$HOME/.config/google-chrome-vpn" \
-            --no-first-run >/dev/null 2>&1 &
+            --user-data-dir="$pdir" \
+            --no-first-run "${extra[@]}" >/dev/null 2>&1 &
     fi
-    echo "[OK] Chrome launched through $socks (separate profile)"
+    echo "[OK] Chrome launched through $label - $socks, profile $pdir"
 }
 
 # ============================================================
@@ -975,6 +1388,11 @@ cc-help() {
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo ""
+    echo "  -- nodes (jp / sg / us ...) --"
+    echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
+    echo "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)"
+    echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
+    echo ""
     echo "  -- settings & updates --"
     echo "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~/.claude-proxy.conf"
     echo "  proxy-update    - Fetch the latest version of this profile; your settings are kept"
@@ -985,7 +1403,8 @@ cc-help() {
     echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
     echo "  proxy-off       - Clear proxy env vars + unsync Claude settings.json"
     echo ""
-    echo "  chrome-proxy    - Open Chrome via SOCKS5 (auto-starts the tunnel, separate profile)"
+    echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
+    echo "                    chrome-proxy [node] [url]  - e.g. chrome-proxy us https://example.com"
     echo "  cc-help         - Show this list again"
     echo ""
 }
@@ -993,5 +1412,7 @@ cc-help() {
 # One line when a new shell loads this file. Silence it with
 # CLAUDE_PROXY_BANNER=0 in ~/.claude-proxy.conf.
 if [ "${CLAUDE_PROXY_BANNER:-1}" = "1" ] && [ "${_CLAUDE_PROXY_QUIET:-0}" != "1" ]; then
-    echo "claude-proxy v$CLAUDE_PROXY_VERSION ready (server: $CLAUDE_SSH_HOST) - 'cc' launches Claude, 'cc-help' lists all commands"
+    _bn=$(_node_active_name)
+    echo "claude-proxy v$CLAUDE_PROXY_VERSION ready (node: ${_bn:+$_bn / }$CLAUDE_SSH_HOST) - 'cc' launches Claude, 'cc-help' lists all commands"
+    unset _bn
 fi

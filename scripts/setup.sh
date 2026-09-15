@@ -318,6 +318,17 @@ else
     echo "       Install it manually (guide: Proxy setup -> Set up by hand) or re-run this wizard later."
 fi
 
+# --- 7b. Node catalogue (jp / sg / us ...) - best effort, the profile can fetch it later
+NODES_DEST="$HOME/.claude-proxy.nodes.json"
+tmp_nodes=$(mktemp)
+if curl -fsSL "$REPO_RAW/nodes.json" -o "$tmp_nodes" 2>/dev/null && grep -q '"nodes"' "$tmp_nodes"; then
+    mv "$tmp_nodes" "$NODES_DEST"
+    echo "[OK] Node catalogue installed: $NODES_DEST  ('proxy-nodes' lists the nodes, 'proxy-node <name>' switches)"
+else
+    rm -f "$tmp_nodes"
+    echo "[Info] Node catalogue not downloaded (optional) - later: proxy-nodes --refresh"
+fi
+
 # --- 8. Verify the connection ----------------------------------------------
 echo ""
 echo "[Check] Testing: ssh $ALIAS ..."

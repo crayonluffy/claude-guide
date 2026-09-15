@@ -224,6 +224,19 @@ if ($errs.Count -gt 0 -or $raw -notmatch '(?m)^\$script:PROFILE_VERSION\s*=') {
 }
 $newVer = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
 
+# Node catalogue (jp / sg / us ...) - best effort, the profile can fetch it later ('proxy-nodes -Refresh').
+$nodesDest = Join-Path $HOME '.claude-proxy.nodes.json'
+try {
+    $tmpNodes = Join-Path $env:TEMP 'claude-proxy.nodes.json'
+    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/nodes.json" -OutFile $tmpNodes
+    if ((Get-Content $tmpNodes -Raw) -match '"nodes"') {
+        Copy-Item -LiteralPath $tmpNodes -Destination $nodesDest -Force
+        Write-Host "[OK] Node catalogue installed: $nodesDest  ('proxy-nodes' lists the nodes, 'proxy-node <name>' switches)" -ForegroundColor Green
+    }
+} catch {
+    Write-Host "[Info] Node catalogue not downloaded (optional) - later: proxy-nodes -Refresh" -ForegroundColor DarkGray
+}
+
 $profileInstalled = $false
 try {
     if ((Test-Path $profilePath) -and ((Get-Content $profilePath -Raw) -ne $raw)) {

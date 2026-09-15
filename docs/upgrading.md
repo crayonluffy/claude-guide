@@ -2,6 +2,8 @@
 
 ## Getting the newest profile (any time)
 
+> **New in v2.1 — nodes.** After `proxy-update`, run `proxy-nodes --refresh` (`-Refresh` on Windows) once to download the node catalogue (JP / SG / US …). Then `proxy-node sg` moves Claude/Codex to another region and `chrome-proxy sg` opens a Chrome through it — several regions at once. Your existing `jpvpn` alias, settings and Chrome logins carry over (the Chrome profile folder is renamed to `…-<node>` on first use). Details: **[Nodes](proxy-nodes.md)**.
+
 Since **v2.0** the profile keeps your settings in a separate file (`~/.claude-proxy.conf`, or `~\.claude-proxy.conf.psd1` on Windows), so updating never touches them:
 
 ```bash

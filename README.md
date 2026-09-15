@@ -65,16 +65,20 @@ cc              # proxy ON + launch Claude   (cc-safe keeps permission prompts)
 cc -c           # …and continue the last session (cc -r: pick one; any claude flag passes through)
 cx              # proxy ON + launch Codex    (cx-safe keeps approval prompts)
 proxy-up        # proxy ON, launch nothing
-cc-stop         # proxy OFF — one off-switch for both
+cc-stop         # proxy OFF — one off-switch for both (per-node Chrome tunnels included)
 proxy-status    # what's running + your external IP
 proxy-doctor    # something wrong? this says exactly what + how to fix
 proxy-update    # get the newest profile — your settings (proxy-config) are kept
+
+proxy-nodes     # which nodes exist (jp / sg / us …) and which one you're on
+proxy-node sg   # move Claude/Codex to another node   (or: cc --node sg)
+chrome-proxy us # a Chrome window through 'us' — own tunnel + profile, other nodes stay open
 ```
 
 ---
 
 ## 📚 All pages
 
-- **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md)
+- **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md) · [🌏 Nodes — JP / SG / US](docs/proxy-nodes.md)
 - **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
 - **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Updating & upgrading](docs/upgrading.md)
