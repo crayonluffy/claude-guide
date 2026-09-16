@@ -32,7 +32,7 @@
 # read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.3.1'
+$script:PROFILE_VERSION = '2.3.2'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -526,14 +526,6 @@ function Stop-NodeTunnels {
 }
 
 # --- commands ----------------------------------------------------------------
-# PowerShell only knows -Name parameters; a bash-style '--domain' would otherwise be
-# taken as the VALUE of the first string parameter. Put such a token back in front
-# of the leftover arguments so the function can parse both spellings.
-function _gnu-rest { param($BoundValue, $Rest)
-    if ("$BoundValue" -like '-*') { return @(@("$BoundValue") + @($Rest)) }
-    return @($Rest)
-}
-
 function proxy-nodes {
     # -From <vm alias> : take the node list PRIVATELY from that VM (over SSH) from now on
     # -Domain <domain> : ... from that domain's public DNS
@@ -860,8 +852,11 @@ function proxy-off {
 function proxy-up {
     param([switch]$NoVerify, [string]$Node)
     # bash spellings too: --no-verify, --node <name>
-    $o = _split-launch-args (_gnu-rest $Node $args)
-    if ("$Node" -like '-*') { $Node = '' }
+    # A bash-style '--node' / '--no-verify' lands in $Node (PowerShell binds it as the
+    # value of the first string parameter) - put it back in front of the rest.
+    $rest = @($args)
+    if ("$Node" -like '-*') { $rest = @("$Node") + $rest; $Node = '' }
+    $o = _split-launch-args $rest
     if ($o.NoVerify) { $NoVerify = $true }
     if ($o.Node) { $Node = $o.Node }
     if ($o.App.Count) { Write-Host "[Err] Unknown argument(s): $($o.App -join ' ')   usage: proxy-up [-NoVerify] [-Node <name>]" -ForegroundColor Red; return $false }
@@ -909,7 +904,8 @@ function proxy-up {
 function _split-launch-args {
     param($ArgList)
     $r = @{ Safe = $false; NoVerify = $false; Node = ''; App = @() }
-    $list = @($ArgList)
+    # (an empty argument list can arrive as $null - never treat that as an argument)
+    $list = @($ArgList | Where-Object { $null -ne $_ })
     for ($i = 0; $i -lt $list.Count; $i++) {
         $a = "$($list[$i])"
         switch -Regex ($a) {
