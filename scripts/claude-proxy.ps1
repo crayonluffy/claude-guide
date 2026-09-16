@@ -28,7 +28,7 @@
 # profile that goes out through the same node.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.2.2'
+$script:PROFILE_VERSION = '2.2.3'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -1181,7 +1181,11 @@ function proxy-config {
         'edit' {
             if (-not (Test-Path $script:PROXY_CONF)) { _conf-write-all }
             Start-Process notepad.exe -ArgumentList "`"$($script:PROXY_CONF)`"" -Wait
-            Write-Host "[OK] Saved. Load the new settings with:  . '$($script:PROFILE_PATH)'   (new windows pick them up automatically)" -ForegroundColor Green
+            if (_reload-profile) {
+                Write-Host "[OK] Saved and loaded in this window (server '$($script:SSH_HOST)'). Other open windows: . '$($script:PROFILE_PATH)'" -ForegroundColor Green
+            } else {
+                Write-Host "[OK] Saved. Load the new settings with:  . '$($script:PROFILE_PATH)'   (new windows pick them up automatically)" -ForegroundColor Green
+            }
         }
         'set' {
             if (-not $Key -or $null -eq $Value) {
@@ -1282,7 +1286,37 @@ function proxy-update {
         'locked'   { Write-Host "[Warn] Could not edit `$PROFILE (locked Documents folder). New windows keep loading whatever is in it;" -ForegroundColor Yellow
                      Write-Host "       use the 'Claude Proxy Shell' shortcut (proxy-shortcut creates it) or run:  . '$dest'" -ForegroundColor Yellow }
     }
-    Write-Host "[OK] Load it now with:  . '$dest'" -ForegroundColor Green
+    if (_reload-profile) {
+        Write-Host "[OK] v$($script:PROFILE_VERSION) is loaded in this window. Other open windows keep the old one until reopened (or: . '$dest')" -ForegroundColor Green
+    } else {
+        Write-Host "[Warn] Updated, but could not load it into this window - open a new window, or run:  . '$dest'" -ForegroundColor Yellow
+    }
+}
+
+# Load ~\.claude-proxy.ps1 again into THIS window (after proxy-update / proxy-config edit).
+# A dot-source from inside a function updates the $script: settings, but the
+# functions it defines only live until this function returns - so every function
+# the file defines is copied to global scope, where the prompt finds it.
+function _reload-profile {
+    $path = $script:PROFILE_PATH
+    if (-not (Test-Path $path)) { return $false }
+    $script:RELOADING = $true
+    try {
+        . $path
+        $errs = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errs)
+        if ($errs.Count -gt 0) { return $false }
+        $defs = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)
+        foreach ($f in $defs) {
+            $fn = Get-Item -Path "function:$($f.Name)" -ErrorAction SilentlyContinue   # the copy the dot-source just made
+            if ($fn) { Set-Item -Path "function:global:$($f.Name)" -Value $fn.ScriptBlock }
+        }
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $script:RELOADING = $false
+    }
 }
 
 # Make $PROFILE load ~\.claude-proxy.ps1. Returns ok | added | replaced | locked.
@@ -1515,7 +1549,7 @@ function cc-help {
 
 # One line when a new window loads this profile. Silence it with BANNER = 0 in
 # ~\.claude-proxy.conf.psd1.
-if ($script:BANNER -eq 1) {
+if ($script:BANNER -eq 1 -and -not $script:RELOADING) {
     $bn = Get-ActiveNodeName
     Write-Host "claude-proxy v$($script:PROFILE_VERSION) ready (node: $(if ($bn) { "$bn / " })$($script:SSH_HOST)) - 'cc' launches Claude, 'cc-help' lists all commands" -ForegroundColor DarkGray
 }
