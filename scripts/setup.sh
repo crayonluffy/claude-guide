@@ -4,7 +4,8 @@
 # ============================================================
 # Run with:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
-# If your company publishes its proxy nodes in DNS, add its domain:
+# The node list (jp / jp2 / sg ...) is then fetched privately from your VM over SSH.
+# Only if your company publishes its nodes in PUBLIC DNS instead, add its domain:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh) --domain example.com
 #
 # First run: prompts for your VM details, installs and locks your SSH key,
@@ -52,15 +53,6 @@ prompt_required() {  # prompt_required <text> <varname>
         fi
         [ -z "$reply" ] && echo "  (required - please enter a value)" > /dev/tty
     done
-    printf -v "$__var" '%s' "$reply"
-}
-
-prompt_optional() {  # prompt_optional <text> <varname> <default-or-empty>  (Enter keeps the default, '-' clears it)
-    local text="$1" __var="$2" default="$3" reply=""
-    printf '%s: ' "$text" > /dev/tty
-    IFS= read -r reply < /dev/tty || reply=""
-    [ -z "$reply" ] && reply="$default"
-    [ "$reply" = "-" ] && reply=""
     printf -v "$__var" '%s' "$reply"
 }
 
@@ -189,18 +181,13 @@ domain_nodes() {  # <domain>
     )
 }
 
-# Ask for / check the company domain. With full=1 the server questions are
-# pre-filled from the node the user picks.  use_domain <full:0|1>
+# Check the public-DNS domain (--domain, or the one saved before - never asked:
+# the default is the private list from your VM). With full=1 the server
+# questions are pre-filled from the node the user picks.  use_domain <full:0|1>
 DOMAIN=""
 use_domain() {
     local full="$1" nodes pick line
-    if [ -n "$DOMAIN_ARG" ]; then
-        DOMAIN="$DOMAIN_ARG"
-    else
-        echo ""
-        echo "Does your company publish its proxy nodes in DNS? Then enter its domain (e.g. example.com)."
-        prompt_optional "Company domain (Enter = ${D_DOMAIN:-none}${D_DOMAIN:+, '-' = none})" DOMAIN "$D_DOMAIN"
-    fi
+    DOMAIN="${DOMAIN_ARG:-$D_DOMAIN}"
     [ -n "$DOMAIN" ] || return 0
     if ! nodes=$(domain_nodes "$DOMAIN") || [ -z "$nodes" ]; then
         echo "[Warn] No proxy nodes found at _claude-proxy.$DOMAIN (DNS TXT)."
@@ -356,8 +343,8 @@ if [ $QUICK -eq 0 ]; then
     fi
 else
     ALIAS="$D_ALIAS"; SSH_PORT="$D_SSH_PORT"; PROXY_PORT="$D_PROXY_PORT"
-    # Keep the saved domain; only ask when there is none yet (never in --update mode).
-    if [ -n "$DOMAIN_ARG" ] || { [ -z "$D_DOMAIN" ] && [ $UPDATE_ONLY -eq 0 ]; }; then
+    # Keep the saved domain unless --domain gives a new one.
+    if [ -n "$DOMAIN_ARG" ]; then
         use_domain 0
     else
         DOMAIN="$D_DOMAIN"
@@ -371,6 +358,7 @@ conf_set CLAUDE_SSH_HOST          "$ALIAS"
 conf_set CLAUDE_SSH_PORT          "$SSH_PORT"
 conf_set CLAUDE_REMOTE_PROXY_PORT "$PROXY_PORT"
 conf_set CLAUDE_PROXY_DOMAIN      "$DOMAIN"
+[ -n "$DOMAIN" ] && conf_set CLAUDE_NODES_FROM ""     # one node-list source at a time
 echo "[OK] Settings saved: $CONF"
 
 # --- 7. Install / update the cc profile --------------------------------------
@@ -403,13 +391,19 @@ else
     echo "       Install it manually (guide: Proxy setup -> Set up by hand) or re-run this wizard later."
 fi
 
-# --- 7b. Node catalogue (jp / sg / us ...) + ssh aliases for the other nodes -----
-# Best effort, done by the profile itself (from DNS when a domain is set, else
-# from this guide's nodes.json); 'proxy-nodes --refresh' repeats it any time.
+# --- 7b. Node list (jp / jp2 / sg ...) + ssh aliases for the other nodes ---------
+# Best effort, done by the profile itself. First choice: privately from the VM
+# just set up (over SSH); if it doesn't serve a list (yet), this guide's (empty)
+# list. A saved source (--from / --domain) is simply refreshed.
 if [ "$PROFILE_OK" = 1 ]; then
     echo ""
-    if ! ( set +u; _CLAUDE_PROXY_QUIET=1; . "$PROFILE_DEST"; proxy-nodes --refresh ); then
-        echo "[Info] Node catalogue not loaded (optional) - later: proxy-nodes --refresh"
+    if ! ( set +u; _CLAUDE_PROXY_QUIET=1; . "$PROFILE_DEST"
+           if [ -z "$CLAUDE_PROXY_DOMAIN" ] && [ -z "$CLAUDE_NODES_FROM" ]; then
+               proxy-nodes --from "$ALIAS" && exit 0
+               echo "[Info] $ALIAS doesn't serve a node list (yet) - fine for now. Once your admin sets it up: proxy-nodes --from $ALIAS"
+           fi
+           proxy-nodes --refresh ); then
+        echo "[Info] Node list not loaded (optional) - later: proxy-nodes --refresh"
     fi
 fi
 

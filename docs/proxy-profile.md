@@ -37,7 +37,7 @@ You do **not** need Claude Code or Codex installed yet — do the proxy first. O
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
 | `proxy-config` | Show your settings; `proxy-config edit` opens the settings file, `proxy-config set SSH_HOST myvm` changes one value |
 | `proxy-update` | Download the newest profile from this guide and install it — **your settings are kept**. `proxy-update --check` (`-Check` on Windows) only tells you whether there is one |
-| `proxy-nodes` | List the nodes (JP / JP2 / SG / US …) and which one is active; `proxy-nodes --refresh` (`-Refresh` on Windows) reloads the catalogue and creates the `ssh` aliases; `proxy-nodes --domain example.com` (`-Domain`) takes the list from your company's DNS — see [Nodes](proxy-nodes.md) |
+| `proxy-nodes` | List the nodes (JP / JP2 / SG / US …) and which one is active; `proxy-nodes --refresh` (`-Refresh` on Windows) reloads the catalogue and creates the `ssh` aliases; `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS) — see [Nodes](proxy-nodes.md) |
 | `proxy-node sg` | Make `sg` the node `cc` / `cx` use (restarts the tunnel if it's up). Shortcut: `cc --node sg` |
 | `chrome-proxy` | Open Chrome routed through the SOCKS5 proxy (separate, isolated profile; auto-starts the tunnel). `chrome-proxy sg` opens one through node `sg` on its **own** tunnel + profile, so several regions can be open at once; `chrome-proxy sg https://…` also opens a URL; `chrome-proxy jp --profile work` (`-Profile` on Windows) opens another Chrome profile through the same node |
 | `chrome-profiles` | List the Chrome profiles of every node (`chrome-profiles jp`: just `jp`'s) |
@@ -256,7 +256,8 @@ The profile reads the connection from your `jpvpn` alias (Step 1), so the settin
 | `REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
 | `SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
 | `NODE_SOCKS_BASE` | `1180` | first port for per-node Chrome tunnels (`chrome-proxy <node>`) — see [Nodes](proxy-nodes.md) |
-| `PROXY_DOMAIN` | `''` | take the node list from this domain's DNS (`proxy-nodes -Domain` sets it) — see [Nodes](proxy-nodes.md) |
+| `NODES_FROM` | `''` | the VM that serves the node list over SSH (`proxy-nodes -From` sets it) — see [Nodes](proxy-nodes.md) |
+| `PROXY_DOMAIN` | `''` | take the node list from this domain's public DNS instead (`proxy-nodes -Domain` sets it) |
 | `CHROME_EXE` | `''` | only if `chrome.exe` isn't in Program Files / `%LOCALAPPDATA%` |
 | `SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json`; `0` to disable |
 | `NO_PROXY_EXTRA` | `''` | corporate intranet ranges/domains to bypass, e.g. `'172.20.0.0/24,*.mycorp.example'` |
@@ -364,7 +365,8 @@ Every key the settings file understands (anything you leave out keeps the built-
 | `CLAUDE_REMOTE_PROXY_PORT` | `8888` | tinyproxy port on the VM (webproxy-manager) |
 | `CLAUDE_SOCKS_PORT` | `1080` | local SOCKS5 port (Chrome / other apps) |
 | `CLAUDE_NODE_SOCKS_BASE` | `1180` | first port for per-node Chrome tunnels (`chrome-proxy <node>`) — see [Nodes](proxy-nodes.md) |
-| `CLAUDE_PROXY_DOMAIN` | `""` | take the node list from this domain's DNS (`proxy-nodes --domain` sets it) — see [Nodes](proxy-nodes.md) |
+| `CLAUDE_NODES_FROM` | `""` | the VM that serves the node list over SSH (`proxy-nodes --from` sets it) — see [Nodes](proxy-nodes.md) |
+| `CLAUDE_PROXY_DOMAIN` | `""` | take the node list from this domain's public DNS instead (`proxy-nodes --domain` sets it) |
 | `CLAUDE_CHROME_BIN` | `""` | only if Chrome isn't in the usual place (macOS: app name or path; WSL: `/mnt/c/.../chrome.exe`) |
 | `CLAUDE_SYNC_SETTINGS` | `1` | also write the proxy into `~/.claude/settings.json` (needs `jq`); `0` to disable |
 | `CLAUDE_SYNC_WINDOWS_SETTINGS` | `0` | **WSL only:** `1` also keeps the *Windows-side* Claude (`%USERPROFILE%\.claude\settings.json`) pointed at this tunnel — see [WSL](#-wsl-windows-subsystem-for-linux) |

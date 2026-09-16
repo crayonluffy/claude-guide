@@ -67,7 +67,7 @@ proxy-nodes     # which nodes exist (jp / jp2 / sg / us …) and which one you'r
 proxy-node sg   # move Claude/Codex to another node   (or: cc --node sg)
 chrome-proxy us # a Chrome window through 'us' — own tunnel + profile, other nodes stay open
 chrome-proxy jp --profile work   # another Chrome profile through the same node (chrome-profiles lists them)
-proxy-nodes --domain example.com # company node list from your own DNS
+proxy-nodes --from jpvpn         # get the node list privately from one of your VMs (over SSH)
 ```
 
 ---
