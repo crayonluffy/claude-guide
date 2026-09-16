@@ -21,9 +21,14 @@
 # matching ~\.ssh\config aliases; 'proxy-node sg' makes sg the node that cc / cx
 # use; 'chrome-proxy sg' opens a Chrome window through sg on its OWN tunnel and
 # profile, so several regions can be open side by side.
+#
+# v2.2: nodes can come from YOUR DOMAIN instead of GitHub (DNS TXT records at
+# _claude-proxy.<domain>, see PROXY_DOMAIN), a region can have several VMs
+# (jp, jp2, jp3 ...), and 'chrome-proxy jp --profile work' opens another Chrome
+# profile that goes out through the same node.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.1.1'
+$script:PROFILE_VERSION = '2.2.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -53,6 +58,12 @@ $script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
 $script:NODES_CACHE       = Join-Path $HOME '.claude-proxy.nodes.json'
 $script:NODE_SOCKS_BASE   = 1180
 $script:CHROME_EXE        = ''         # chrome.exe path, only if Chrome isn't in one of the usual places
+$script:CHROME_BASE       = 'C:\ChromeVPNProfile'   # per-node Chrome data dirs are <this>-<node>
+
+# Where 'proxy-nodes -Refresh' gets the catalogue from:
+#   ''            -> $REPO_RAW/nodes.json (this guide's repo)
+#   'example.com' -> DNS TXT records at _claude-proxy.example.com (your admin manages them in DNS)
+$script:PROXY_DOMAIN      = ''
 
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
 # `claude` launched from ANY shell uses it. Removed again on proxy-off / cc-stop.
@@ -79,7 +90,7 @@ $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -197,13 +208,15 @@ function _settings-sync-off {
 # ============================================================
 
 # The catalogue as objects: Idx Name Alias Host User SshPort ProxyPort Region Note HostKey
+# Idx is the node's 'slot' (its Chrome-tunnel port offset), or its position when
+# the catalogue has no slots.
 function Get-ProxyNodes {
     if (-not (Test-Path $script:NODES_CACHE)) { return @() }
     try { $cat = Get-Content $script:NODES_CACHE -Raw | ConvertFrom-Json } catch { return @() }
     $out = @(); $i = 0
     foreach ($n in @($cat.nodes)) {
         $out += [pscustomobject]@{
-            Idx = $i; Name = "$($n.name)"; Alias = "$($n.alias)"; Host = "$($n.host)"; User = "$($n.user)"
+            Idx = $(if ($null -ne $n.slot -and "$($n.slot)" -match '^\d+$') { [int]$n.slot } else { $i }); Name = "$($n.name)"; Alias = "$($n.alias)"; Host = "$($n.host)"; User = "$($n.user)"
             SshPort = $(if ($n.ssh_port) { [int]$n.ssh_port } else { 22 })
             ProxyPort = $(if ($n.proxy_port) { [int]$n.proxy_port } else { 8888 })
             Region = "$($n.region)"; Note = "$($n.note)"; HostKey = "$($n.hostkey)"
@@ -211,6 +224,104 @@ function Get-ProxyNodes {
         $i++
     }
     return $out
+}
+
+# --- catalogue from DNS (PROXY_DOMAIN) -------------------------------------------
+# One TXT value per node at _claude-proxy.<domain>, space-separated key=value:
+#   v=cp1 name=jp2 slot=3 region=Japan [alias=jpvpn2] [host=jpvpn2.example.com]
+#         [user=] [ssh=22] [proxy=8888] [note=Second_JP_VM] [hostkey=ssh-ed25519:AAAA...]
+# Required: v=cp1, name, slot. alias defaults to <letters>vpn<digits> of the name
+# (jp -> jpvpn, jp2 -> jpvpn2), host to <alias>.<domain>. '_' in region/note is a
+# space; the ':' in hostkey stands for the space between key type and key.
+
+# TXT records of a DNS name (multi-string records joined). Windows' resolver
+# first, then DNS-over-HTTPS.
+function Get-DnsTxt { param([string]$Fqdn)
+    $out = @()
+    if (Get-Command Resolve-DnsName -ErrorAction SilentlyContinue) {
+        try {
+            $out = @(Resolve-DnsName -Name $Fqdn -Type TXT -DnsOnly -QuickTimeout -ErrorAction Stop |
+                     Where-Object { $_.Type -eq 'TXT' } | ForEach-Object { $_.Strings -join '' })
+        } catch {}
+    }
+    if ($out.Count -eq 0) {
+        foreach ($u in 'https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve') {
+            try {
+                $r = Invoke-RestMethod -UseBasicParsing -Uri "$($u)?name=$Fqdn&type=TXT" -Headers @{ accept = 'application/dns-json' } -TimeoutSec 6
+                $out = @($r.Answer | Where-Object { $_.type -eq 16 } |
+                         ForEach-Object { ($_.data -replace '"\s*"', '') -replace '^"|"$', '' })
+                if ($out.Count -gt 0) { break }
+            } catch {}
+        }
+    }
+    return $out
+}
+
+# A nodes.json (same shape as the published one, one node per line, sorted by
+# slot) built from the TXT records of _claude-proxy.<domain>. $null when there are none.
+function ConvertTo-NodesJsonFromDns { param([string]$Domain)
+    $nodes = @()
+    foreach ($rec in (Get-DnsTxt "_claude-proxy.$Domain")) {
+        $words = @("$rec".Trim() -split '\s+')
+        if ($words[0] -ne 'v=cp1') { continue }
+        $kv = @{}
+        foreach ($w in ($words | Select-Object -Skip 1)) {
+            $i = $w.IndexOf('=')
+            if ($i -gt 0) { $kv[$w.Substring(0, $i)] = $w.Substring($i + 1) }
+        }
+        if ("$($kv.name)" -notmatch '^[A-Za-z][A-Za-z0-9]*$' -or "$($kv.slot)" -notmatch '^\d+$') {
+            Write-Host "[Warn] Ignoring a TXT record without a valid name/slot: $rec" -ForegroundColor Yellow
+            continue
+        }
+        $null = $kv.name -match '^(.*?)(\d*)$'
+        $alias = if ($kv.ContainsKey('alias')) { $kv.alias } else { "$($Matches[1])vpn$($Matches[2])" }
+        $nodes += [pscustomobject][ordered]@{
+            name       = $kv.name
+            alias      = $alias
+            host       = $(if ($kv.ContainsKey('host')) { $kv.host } else { "$alias.$Domain" })
+            user       = "$($kv.user)"
+            ssh_port   = $(if ("$($kv.ssh)" -match '^\d+$') { [int]$kv.ssh } else { 22 })
+            proxy_port = $(if ("$($kv.proxy)" -match '^\d+$') { [int]$kv.proxy } else { 8888 })
+            region     = "$($kv.region)" -replace '_', ' '
+            note       = "$($kv.note)" -replace '_', ' '
+            hostkey    = ([regex]'[:]').Replace("$($kv.hostkey)", ' ', 1)
+            slot       = [int]$kv.slot
+        }
+    }
+    if ($nodes.Count -eq 0) { return $null }
+    $lines = @($nodes | Sort-Object slot | ForEach-Object { '    ' + ($_ | ConvertTo-Json -Compress) })
+    return (@(
+        '{',
+        "  `"_comment`": `"Generated by proxy-nodes from the DNS TXT records at _claude-proxy.$Domain - edit DNS, not this file.`",",
+        '  "version": 1,',
+        "  `"source`": `"dns:$Domain`",",
+        "  `"updated`": `"$(Get-Date -Format 'yyyy-MM-dd')`",",
+        '  "nodes": [',
+        ($lines -join ",`n"),
+        '  ]',
+        '}'
+    ) -join "`n")
+}
+
+# Download / discover the catalogue into $OutFile. $false on failure.
+function Get-NodesCatalogue { param([string]$OutFile)
+    if ($script:PROXY_DOMAIN) {
+        Write-Host "[Nodes] Looking up the nodes of $($script:PROXY_DOMAIN) (DNS TXT _claude-proxy.$($script:PROXY_DOMAIN))..." -ForegroundColor Cyan
+        $json = ConvertTo-NodesJsonFromDns $script:PROXY_DOMAIN
+        if (-not $json) {
+            Write-Host "[Err] No valid 'v=cp1' TXT records at _claude-proxy.$($script:PROXY_DOMAIN) - check the domain (proxy-config set PROXY_DOMAIN <domain>) or ask your admin." -ForegroundColor Red
+            return $false
+        }
+        [System.IO.File]::WriteAllText($OutFile, $json + "`n")
+        return $true
+    }
+    Write-Host "[Nodes] Fetching the node catalogue..." -ForegroundColor Cyan
+    try { _fetch-file "$($script:REPO_RAW)/nodes.json" $OutFile } catch {
+        Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then again." -ForegroundColor Yellow
+        return $false
+    }
+    return $true
 }
 
 # Node object for a NAME or ALIAS ($null if unknown).
@@ -346,13 +457,18 @@ function Stop-NodeTunnels {
 
 # --- commands ----------------------------------------------------------------
 function proxy-nodes {
-    param([switch]$Refresh)
+    param([switch]$Refresh, [string]$Domain)
+    # -Domain example.com: take the nodes from that domain's DNS from now on ('' = back to the guide's catalogue)
+    if ($PSBoundParameters.ContainsKey('Domain')) {
+        $script:PROXY_DOMAIN = $Domain
+        _conf-write-all
+        Write-Host "[OK] PROXY_DOMAIN = '$Domain' saved to $($script:PROXY_CONF)" -ForegroundColor Green
+        $Refresh = $true
+    }
     if ($Refresh) {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.nodes.json.new'
-        Write-Host "[Nodes] Fetching the node catalogue..." -ForegroundColor Cyan
-        try { _fetch-file "$($script:REPO_RAW)/nodes.json" $tmp } catch {
-            Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
-            Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then again." -ForegroundColor Yellow
+        if (-not (Get-NodesCatalogue $tmp)) {
+            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
             return
         }
         $ok = $false
@@ -366,7 +482,14 @@ function proxy-nodes {
         Write-Host "[OK] Catalogue saved: $($script:NODES_CACHE)" -ForegroundColor Green
         # Create the ssh aliases the catalogue promises (never touches existing ones).
         foreach ($n in Get-ProxyNodes) {
-            if (Test-SshAlias $n.Alias)               { Confirm-NodeAlias $n | Out-Null }   # pins the host key if given
+            if (Test-SshAlias $n.Alias) {
+                Confirm-NodeAlias $n | Out-Null   # pins the host key if given
+                # Existing aliases are never rewritten - but say so when they point elsewhere.
+                $cur = Get-SshField $n.Alias 'HostName'
+                if ((Test-NodeProvisioned $n.Host) -and $cur -and $cur -ne $n.Host) {
+                    Write-Host "[Warn] ssh alias '$($n.Alias)' points to $cur, the catalogue says $($n.Host) - edit ~\.ssh\config (or delete that Host block and refresh again)" -ForegroundColor Yellow
+                }
+            }
             elseif (Test-NodeProvisioned $n.Host)     { Confirm-NodeAlias $n | Out-Null }
             else { Write-Host "[Info] Node '$($n.Name)' is listed but has no host yet - skipped" -ForegroundColor DarkGray }
         }
@@ -380,15 +503,22 @@ function proxy-nodes {
         Write-Host ""
         return
     }
-    $updated = ''
-    try { $updated = "$((Get-Content $script:NODES_CACHE -Raw | ConvertFrom-Json).updated)" } catch {}
+    $updated = ''; $source = ''
+    try { $cat = Get-Content $script:NODES_CACHE -Raw | ConvertFrom-Json; $updated = "$($cat.updated)"; $source = "$($cat.source)" } catch {}
+    $from = if ($source) { $source } else { "the guide's nodes.json" }
+    if ($updated) { $from += ", updated $updated" }
     Write-Host ""
-    Write-Host "=== Proxy nodes (catalogue: $($script:NODES_CACHE)$(if ($updated) { ", updated $updated" })) ===" -ForegroundColor Cyan
+    Write-Host "=== Proxy nodes (catalogue: $($script:NODES_CACHE), from $from) ===" -ForegroundColor Cyan
+    if ($script:PROXY_DOMAIN -and $source -ne "dns:$($script:PROXY_DOMAIN)") {
+        Write-Host "[Info] PROXY_DOMAIN is '$($script:PROXY_DOMAIN)' but this list came from elsewhere - 'proxy-nodes -Refresh' reloads it" -ForegroundColor Yellow
+    }
+    $dups = @($nodes | Group-Object Idx | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    if ($dups) { Write-Host "[Warn] Several nodes share slot(s) $($dups -join ', ') - their Chrome tunnels would collide. Tell your admin." -ForegroundColor Yellow }
     Write-Host ""
     $health  = Get-TunnelHealth
     $running = @(Get-NodeTunnels)
     $foundActive = $false
-    foreach ($n in $nodes) {
+    foreach ($n in ($nodes | Sort-Object Region, Idx)) {
         $mark = ' '; $where = ''
         if ($n.Alias -eq $script:SSH_HOST) {
             $mark = '*'; $foundActive = $true
@@ -403,13 +533,15 @@ function proxy-nodes {
             if (-not (Test-SshAlias $n.Alias)) { $where = "$(if ($where) { "$where; " })no ssh alias yet ('proxy-nodes -Refresh' creates it)" }
         } else { $target = '<not provisioned>' }
         $color = if ($mark -eq '*') { 'Green' } else { 'Gray' }
-        Write-Host ("  {0} {1,-4} {2,-8} {3,-11} {4,-30} {5}" -f $mark, $n.Name, $n.Alias, $n.Region, $target, $where) -ForegroundColor $color
+        Write-Host ("  {0} {1,-5} {2,-8} {3,-11} {4,-30} {5}" -f $mark, $n.Name, $n.Alias, $n.Region, $target, $where) -ForegroundColor $color
     }
     if (-not $foundActive) { Write-Host "  * ($($script:SSH_HOST))  - current server, not in the catalogue" -ForegroundColor Green }
     Write-Host ""
-    Write-Host "  proxy-node <name>        make it the node cc / cx use (restarts the tunnel if it's up)" -ForegroundColor DarkGray
-    Write-Host "  chrome-proxy <name>      open a Chrome window through that node (own tunnel + profile; several can be open)" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes -Refresh     re-download the catalogue and create any missing ssh aliases" -ForegroundColor DarkGray
+    Write-Host "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy <name> -Profile <p>   another Chrome profile through the same node ('chrome-profiles' lists them)" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Refresh               reload the catalogue and create any missing ssh aliases" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Domain <domain>       take the nodes from your company's DNS from now on" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -842,6 +974,10 @@ function proxy-doctor {
     } elseif (-not $script:SSH_USER) {
         Write-Host "[WARN] No 'Host $($script:SSH_HOST)' in ~/.ssh/config and SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set SSH_USER/SSH_KEY (proxy-config edit)" -ForegroundColor Yellow
     }
+    if ($script:PROXY_DOMAIN) {
+        $recs = @(Get-DnsTxt "_claude-proxy.$($script:PROXY_DOMAIN)" | Where-Object { $_ -match '^v=cp1\s' }).Count
+        Write-Host "[ OK ]  Nodes come from DNS: TXT _claude-proxy.$($script:PROXY_DOMAIN) ($recs node records visible right now)" -ForegroundColor Green
+    }
     if (Test-Path $script:NODES_CACHE) {
         $nn = @(Get-ProxyNodes).Count; $an = Get-ActiveNodeName
         $anTxt = if ($an) { $an } else { "none - '$($script:SSH_HOST)' is not a catalogue node" }
@@ -1137,11 +1273,14 @@ function Get-ChromeProfileDir { param([string]$Base, [string]$Name)
     return $target
 }
 
-# chrome-proxy [node] [url ...]
+# chrome-proxy [node] [-Profile NAME] [url ...]
 #   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
 #   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
 #                           the main tunnel and other nodes' windows are untouched
-#   chrome-proxy sg URL     ...and open URL there (any non-node argument is passed to Chrome)
+#   chrome-proxy sg -p work ...as Chrome profile 'work' (created on first use). Every profile
+#                           of a node lives in that node's data dir, so all of them share its
+#                           tunnel and IP but keep their own logins/cookies/extensions.
+#   chrome-proxy sg URL     ...and open URL there (any other argument is passed to Chrome)
 function chrome-proxy {
     # Locate Chrome first, so we don't start a tunnel only to find Chrome missing.
     $chrome = $null
@@ -1153,11 +1292,27 @@ function chrome-proxy {
     }
     if (-not $chrome) { Write-Host "[Err] Chrome not found - if it lives somewhere unusual: proxy-config set CHROME_EXE 'D:\path\to\chrome.exe'" -ForegroundColor Red; return }
 
-    $node = $null; $extra = @()
-    foreach ($a in $args) {
-        $n = if ($null -eq $node) { Find-ProxyNode "$a" } else { $null }
-        if ($n) { $node = $n } else { $extra += "$a" }
+    $node = $null; $extra = @(); $profileName = ''
+    $list = @($args)
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $a = "$($list[$i])"
+        if ($a -match '^-{1,2}(p|profile)$') {
+            if ($i + 1 -ge $list.Count) {
+                Write-Host "usage: chrome-proxy [node] -Profile <name> [url]   ('chrome-profiles' lists the existing ones)" -ForegroundColor Yellow
+                return
+            }
+            $i++; $profileName = "$($list[$i])"; continue
+        }
+        if ($a -match '^-{1,2}profile[=:](.+)$') { $profileName = $Matches[1]; continue }
+        $n = if ($null -eq $node) { Find-ProxyNode $a } else { $null }
+        if ($n) { $node = $n } else { $extra += $a }
     }
+    if ($profileName -ieq 'default') { $profileName = 'Default' }
+    if ($profileName -and ($profileName -notmatch '^[A-Za-z0-9_ -][A-Za-z0-9._ -]*$')) {
+        Write-Host "[Err] Profile names may only use letters, digits, space, '.', '_' and '-' (got '$profileName')" -ForegroundColor Red
+        return
+    }
+    $pargs = @(); if ($profileName) { $pargs = @("--profile-directory=$profileName") }
 
     if ($node) {
         $name = $node.Name
@@ -1191,12 +1346,48 @@ function chrome-proxy {
     }
 
     $socks = "socks5://127.0.0.1:$port"
-    $pdir  = Get-ChromeProfileDir "C:\ChromeVPNProfile" $name
-    Write-Host "[Launch] Opening Chrome through $label - $socks, profile $pdir" -ForegroundColor Cyan
+    $pdir  = Get-ChromeProfileDir $script:CHROME_BASE $name
+    if ($profileName) { $label += ", profile '$profileName'" }
+    Write-Host "[Launch] Opening Chrome through $label - $socks, data dir $pdir" -ForegroundColor Cyan
     # --host-resolver-rules routes DNS through the tunnel too (avoids DNS leaks).
     & $chrome --proxy-server="$socks" `
               --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
-              --user-data-dir="$pdir" --no-first-run @extra
+              --user-data-dir="$pdir" @pargs --no-first-run @extra
+}
+
+# chrome-profiles [node]  - the Chrome profiles that exist in each node's data dir
+function chrome-profiles {
+    param([string]$Node)
+    Write-Host ""
+    Write-Host "=== Chrome profiles per node (data dirs: $($script:CHROME_BASE)-<node>) ===" -ForegroundColor Cyan
+    $found = $false
+    foreach ($n in Get-ProxyNodes) {
+        if ($Node -and $Node -ne $n.Name -and $Node -ne $n.Alias) { continue }
+        $dir = "$($script:CHROME_BASE)-$($n.Name)"
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $found = $true
+        $open = if (Test-Path -LiteralPath (Join-Path $dir 'lockfile')) { '  (Chrome open)' } else { '' }
+        Write-Host ""
+        Write-Host "  $($n.Name) ($($n.Alias))$open" -ForegroundColor Green
+        $info = $null
+        try { $info = (Get-Content -LiteralPath (Join-Path $dir 'Local State') -Raw -ErrorAction Stop | ConvertFrom-Json).profile.info_cache } catch {}
+        $profs = @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue |
+                   Where-Object { (Test-Path -LiteralPath (Join-Path $_.FullName 'Preferences')) -and $_.Name -notin @('System Profile', 'Guest Profile') } |
+                   Sort-Object Name)
+        if ($profs.Count -eq 0) { Write-Host "      (no profile yet - opens as 'Default')" -ForegroundColor DarkGray; continue }
+        foreach ($p in $profs) {
+            $disp = if ($info -and $info.($p.Name)) { "`"$($info.($p.Name).name)`"" } else { '' }
+            Write-Host ("      {0,-20} {1}" -f $p.Name, $disp)
+        }
+    }
+    if (-not $found) {
+        Write-Host ""
+        Write-Host "  (none yet$(if ($Node) { " for '$Node'" }))" -ForegroundColor DarkGray
+    }
+    Write-Host ""
+    Write-Host "  chrome-proxy <node> -Profile <name>   open one (a new name creates it; 'Default' is the first)" -ForegroundColor DarkGray
+    Write-Host "  Profiles added from Chrome's own profile menu show up here too (e.g. 'Profile 1')." -ForegroundColor DarkGray
+    Write-Host ""
 }
 
 # ============================================================
@@ -1221,6 +1412,8 @@ function cc-help {
     Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray
     Write-Host "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
+    Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Domain example.com - take the node list from your company's DNS" -ForegroundColor DarkGray
     Write-Host "" -ForegroundColor DarkGray
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
     Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray
@@ -1234,7 +1427,7 @@ function cc-help {
     Write-Host "  proxy-off       - Clear proxy env vars + unsync Claude settings.json" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
-    Write-Host "                    chrome-proxy [node] [url]  - e.g. chrome-proxy us https://example.com" -ForegroundColor DarkGray
+    Write-Host "                    chrome-proxy [node] [-Profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com" -ForegroundColor DarkGray
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
 }

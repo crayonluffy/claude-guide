@@ -3,6 +3,8 @@
 # ============================================================
 # Run with:
 #   irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
+# If your company publishes its proxy nodes in DNS, name its domain first:
+#   $env:CLAUDE_PROXY_DOMAIN = 'example.com'; irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 #
 # First run: prompts for your VM details, installs and locks your SSH key,
 # writes an ~/.ssh/config alias, installs the cc/cx profile, and tests the
@@ -19,6 +21,8 @@ $ErrorActionPreference = 'Stop'
 $repoRaw     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $confPath    = Join-Path $HOME '.claude-proxy.conf.psd1'
 $profilePath = Join-Path $HOME '.claude-proxy.ps1'   # the profile code lives in HOME, not Documents
+$domainArg   = "$env:CLAUDE_PROXY_DOMAIN"
+if ($env:CLAUDE_PROXY_REPO_RAW) { $repoRaw = $env:CLAUDE_PROXY_REPO_RAW }
 
 # Any unexpected error: say WHAT failed and WHERE, instead of dying with a bare
 # one-line exception (the wizard runs via 'irm | iex', so users can't see a stack).
@@ -55,6 +59,67 @@ Write-Host ""
 Write-Host "=== Claude proxy setup wizard (Windows) ===" -ForegroundColor Cyan
 Write-Host ""
 
+# Fetch the profile now: the node lookup below reuses its functions. A failed
+# download is reported (and stops the wizard) at step 6, as before.
+$tmpProfile = Join-Path $env:TEMP 'claude-proxy.ps1'
+$profileErr = $null
+$raw = ''
+try {
+    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile
+    $raw  = Get-Content $tmpProfile -Raw
+    $errs = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
+    if ($errs.Count -gt 0 -or $raw -notmatch '(?m)^\$script:PROFILE_VERSION\s*=') { $profileErr = 'invalid' }
+} catch {
+    $profileErr = $_.Exception.Message
+}
+
+# Nodes a company publishes in DNS (TXT _claude-proxy.<domain>), sorted by slot. @() if none.
+function Get-DomainNodes($domain) {
+    if ($profileErr) { return @() }
+    $json = & {
+        $ErrorActionPreference = 'Continue'
+        . $tmpProfile
+        ConvertTo-NodesJsonFromDns $domain
+    } 6>$null
+    if (-not $json) { return @() }
+    try { return @(($json | ConvertFrom-Json).nodes) } catch { return @() }
+}
+
+# Ask for / check the company domain. Returns @{ Domain; Node } - Node is the
+# node the user picked as their main one (only when $pick is set).
+function Select-Domain($current, [bool]$pick, $alias) {
+    $d = $domainArg
+    if (-not $d) {
+        Write-Host ""
+        Write-Host "Does your company publish its proxy nodes in DNS? Then enter its domain (e.g. example.com)."
+        $hint = if ($current) { "Enter = $current, '-' = none" } else { 'Enter = none' }
+        $d = (Read-Host "Company domain ($hint)").Trim()
+        if (-not $d) { $d = $current }
+        if ($d -eq '-') { $d = '' }
+    }
+    $r = @{ Domain = $d; Node = $null }
+    if (-not $d) { return $r }
+    $nodes = Get-DomainNodes $d
+    if ($nodes.Count -eq 0) {
+        Write-Host "[Warn] No proxy nodes found at _claude-proxy.$d (DNS TXT)." -ForegroundColor Yellow
+        if (-not (Confirm-Yes "Keep '$d' anyway (e.g. the records aren't published yet)?" $false)) { $r.Domain = '' }
+        return $r
+    }
+    Write-Host "[OK] $d publishes these nodes:" -ForegroundColor Green
+    foreach ($n in $nodes) { Write-Host ("       {0,-5} {1,-9} {2,-12} {3}" -f $n.name, $n.alias, $n.region, $n.host) }
+    if (-not $pick) { return $r }
+    # Default pick: the node behind the alias you already have, else the first one.
+    $def = ($nodes | Where-Object { $_.alias -eq $alias } | Select-Object -First 1).name
+    if (-not $def) { $def = $nodes[0].name }
+    while (-not $r.Node) {
+        $want = Read-Default "Your main node (the one cc / cx use)" $def
+        $r.Node = $nodes | Where-Object { $_.name -eq $want -or $_.alias -eq $want } | Select-Object -First 1
+        if (-not $r.Node) { Write-Host "  (not in the list above)" -ForegroundColor Yellow }
+    }
+    return $r
+}
+
 $downloads = Join-Path $HOME 'Downloads'
 $sshDir    = Join-Path $HOME '.ssh'
 New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
@@ -63,7 +128,7 @@ $configPath = Join-Path $sshDir 'config'
 # --- 0. Existing install? Pre-fill everything from it -----------------------
 # Sources, in order of preference: ~\.claude-proxy.conf.psd1, the Settings block
 # of an old-style profile, and the ~/.ssh/config alias itself.
-$dAlias = 'jpvpn'; $dSshPort = '22'; $dProxyPort = '8888'; $dIp = ''; $dUser = ''; $dKey = ''
+$dAlias = 'jpvpn'; $dSshPort = '22'; $dProxyPort = '8888'; $dIp = ''; $dUser = ''; $dKey = ''; $dDomain = ''
 $found = $null
 $existingConf = @{}
 if (Test-Path $confPath) {
@@ -73,6 +138,7 @@ if (Test-Path $confPath) {
         if ($existingConf.SSH_HOST)          { $dAlias     = "$($existingConf.SSH_HOST)" }
         if ($existingConf.SSH_PORT)          { $dSshPort   = "$($existingConf.SSH_PORT)" }
         if ($existingConf.REMOTE_PROXY_PORT) { $dProxyPort = "$($existingConf.REMOTE_PROXY_PORT)" }
+        if ($existingConf.PROXY_DOMAIN)      { $dDomain    = "$($existingConf.PROXY_DOMAIN)" }
     } catch { Write-Host "[Warn] Could not read $confPath - ignoring it." -ForegroundColor Yellow }
 } elseif ((Test-Path $PROFILE) -and (Select-String -Path $PROFILE -Pattern '^\$script:SSH_HOST\s*=' -Quiet)) {
     $found = "$PROFILE (settings inside the old profile)"
@@ -98,14 +164,24 @@ if ($found) {
     Write-Host ""
     Write-Host "[Found] Existing setup: $found" -ForegroundColor Green
     Write-Host "        server alias '$dAlias' -> $(if ($dUser) { $dUser } else { '?' })@$(if ($dIp) { $dIp } else { '?' }) (ssh port $dSshPort), VM proxy port $dProxyPort" -ForegroundColor Green
+    if ($dDomain) { Write-Host "        nodes from the DNS of: $dDomain" -ForegroundColor Green }
     if (Confirm-Yes "Keep these settings and only update the cc/cx profile?") { $quick = $true }
 }
 
 if ($quick) {
     $Alias = $dAlias; $SshPort = $dSshPort; $ProxyPort = $dProxyPort
+    # Keep the saved domain; only ask when there is none yet.
+    if ($domainArg -or -not $dDomain) { $Domain = (Select-Domain $dDomain $false $dAlias).Domain }
+    else { $Domain = $dDomain }
 } else {
 
 # --- 1. Collect VM details (defaults = whatever we found) ------------------
+$sel = Select-Domain $dDomain $true $dAlias
+$Domain = $sel.Domain
+if ($sel.Node) {
+    $dAlias = $sel.Node.alias; $dIp = $sel.Node.host
+    $dSshPort = "$($sel.Node.ssh_port)"; $dProxyPort = "$($sel.Node.proxy_port)"
+}
 Write-Host ""
 $ServerIp  = Read-Smart   "Server IP or hostname" $dIp
 $SshUser   = Read-Smart   "SSH username" $dUser
@@ -182,6 +258,7 @@ if ($writeAlias) {
 $existingConf['SSH_HOST']          = $Alias
 $existingConf['SSH_PORT']          = [int]$SshPort
 $existingConf['REMOTE_PROXY_PORT'] = [int]$ProxyPort
+$existingConf['PROXY_DOMAIN']      = "$Domain"
 $confLines = @(
     '@{',
     '    # ~\.claude-proxy.conf.psd1 - YOUR settings for the cc/cx profile.',
@@ -206,36 +283,16 @@ try {
 } catch {
     Write-Host "[Warn] Could not set the execution policy (managed by group policy?)." -ForegroundColor Yellow
 }
-$tmpProfile = Join-Path $env:TEMP 'claude-proxy.ps1'
-try {
-    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile
-} catch {
+if ($profileErr -eq 'invalid') {
+    Write-Host "[FAIL] The downloaded profile doesn't look valid - not installing it. Re-run the wizard later." -ForegroundColor Red
+    return
+} elseif ($profileErr) {
     Write-Host "[FAIL] Could not download the profile from GitHub." -ForegroundColor Red
-    Write-Host "       Windows said: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "       Windows said: $profileErr" -ForegroundColor Red
     Write-Host "       Check your network / corporate proxy, then re-run the wizard." -ForegroundColor Yellow
     return
 }
-$raw  = Get-Content $tmpProfile -Raw
-$errs = $null
-[System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
-if ($errs.Count -gt 0 -or $raw -notmatch '(?m)^\$script:PROFILE_VERSION\s*=') {
-    Write-Host "[FAIL] The downloaded profile doesn't look valid - not installing it. Re-run the wizard later." -ForegroundColor Red
-    return
-}
 $newVer = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
-
-# Node catalogue (jp / sg / us ...) - best effort, the profile can fetch it later ('proxy-nodes -Refresh').
-$nodesDest = Join-Path $HOME '.claude-proxy.nodes.json'
-try {
-    $tmpNodes = Join-Path $env:TEMP 'claude-proxy.nodes.json'
-    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/nodes.json" -OutFile $tmpNodes
-    if ((Get-Content $tmpNodes -Raw) -match '"nodes"') {
-        Copy-Item -LiteralPath $tmpNodes -Destination $nodesDest -Force
-        Write-Host "[OK] Node catalogue installed: $nodesDest  ('proxy-nodes' lists the nodes, 'proxy-node <name>' switches)" -ForegroundColor Green
-    }
-} catch {
-    Write-Host "[Info] Node catalogue not downloaded (optional) - later: proxy-nodes -Refresh" -ForegroundColor DarkGray
-}
 
 $profileInstalled = $false
 try {
@@ -283,6 +340,16 @@ if ($profileInstalled) {
     if ($needShortcut) {
         Write-Host "[Info] Creating a Desktop shortcut that opens PowerShell with cc/cx ready instead..." -ForegroundColor Cyan
         $shortcutOk = proxy-shortcut
+    }
+
+    # Node catalogue (jp / sg / us ...) + ssh aliases for the other nodes. Best
+    # effort, done by the profile itself (from DNS when a domain is set, else from
+    # this guide's nodes.json); 'proxy-nodes -Refresh' repeats it any time.
+    Write-Host ""
+    try {
+        & { $ErrorActionPreference = 'Continue'; proxy-nodes -Refresh }
+    } catch {
+        Write-Host "[Info] Node catalogue not loaded (optional) - later: proxy-nodes -Refresh" -ForegroundColor DarkGray
     }
 }
 

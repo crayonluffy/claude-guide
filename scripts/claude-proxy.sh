@@ -20,9 +20,14 @@
 # matching ~/.ssh/config aliases; 'proxy-node sg' makes sg the node that cc / cx
 # use; 'chrome-proxy sg' opens a Chrome window through sg on its OWN tunnel and
 # profile, so several regions can be open side by side.
+#
+# v2.2: nodes can come from YOUR DOMAIN instead of GitHub (DNS TXT records at
+# _claude-proxy.<domain>, see CLAUDE_PROXY_DOMAIN), a region can have several
+# VMs (jp, jp2, jp3 ...), and 'chrome-proxy jp --profile work' opens another
+# Chrome profile that goes out through the same node.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.1.1"
+CLAUDE_PROXY_VERSION="2.2.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -58,6 +63,11 @@ CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
 CLAUDE_NODE_SOCKS_BASE=1180
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
+# Where 'proxy-nodes --refresh' gets the catalogue from:
+#   ""            -> $CLAUDE_PROXY_REPO_RAW/nodes.json (this guide's repo)
+#   "example.com" -> DNS TXT records at _claude-proxy.example.com (your admin manages them in DNS)
+CLAUDE_PROXY_DOMAIN=""
+
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
 # `claude` launched from ANY shell (not just this one) uses it. Removed again on
 # proxy-off / cc-stop, so a down tunnel never leaves Claude pointed at a dead proxy.
@@ -87,10 +97,10 @@ fi
 export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
        CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT \
        CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF \
-       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN
+       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
 
 # ============================================================
 # Helpers
@@ -279,13 +289,14 @@ _claude_settings_proxy_off() {
 
 # The catalogue as one line per node, '|'-separated:
 #   idx|name|alias|host|user|ssh_port|proxy_port|region|note|hostkey
-# jq when available; otherwise a small awk parser that relies on the published
-# file keeping ONE node object per line (which nodes.json promises).
+# idx is the node's 'slot' (its Chrome-tunnel port offset), or its position when
+# the catalogue has no slots. jq when available; otherwise a small awk parser
+# that relies on the file keeping ONE node object per line (which nodes.json promises).
 _nodes_tsv() {
     [ -f "$CLAUDE_PROXY_NODES" ] || return 1
     if command -v jq >/dev/null 2>&1; then
         jq -r '.nodes // [] | to_entries[] | [
-            .key, .value.name, .value.alias, (.value.host // ""), (.value.user // ""),
+            (.value.slot // .key), .value.name, .value.alias, (.value.host // ""), (.value.user // ""),
             (.value.ssh_port // 22), (.value.proxy_port // 8888),
             (.value.region // ""), (.value.note // ""), (.value.hostkey // "")
         ] | map(tostring) | join("|")' "$CLAUDE_PROXY_NODES" 2>/dev/null
@@ -300,8 +311,87 @@ _nodes_tsv() {
         /"name"[ \t]*:/ && /"alias"[ \t]*:/ {
             sp = f("ssh_port"); if (sp == "") sp = 22
             pp = f("proxy_port"); if (pp == "") pp = 8888
-            print i++ "|" f("name") "|" f("alias") "|" f("host") "|" f("user") "|" sp "|" pp "|" f("region") "|" f("note") "|" f("hostkey")
+            sl = f("slot"); if (sl == "") sl = i
+            i++
+            print sl "|" f("name") "|" f("alias") "|" f("host") "|" f("user") "|" sp "|" pp "|" f("region") "|" f("note") "|" f("hostkey")
         }' "$CLAUDE_PROXY_NODES"
+    fi
+}
+
+# --- catalogue from DNS (CLAUDE_PROXY_DOMAIN) -----------------------------------
+# One TXT value per node at _claude-proxy.<domain>, space-separated key=value:
+#   v=cp1 name=jp2 slot=3 region=Japan [alias=jpvpn2] [host=jpvpn2.example.com]
+#         [user=] [ssh=22] [proxy=8888] [note=Second_JP_VM] [hostkey=ssh-ed25519:AAAA...]
+# Required: v=cp1, name, slot. alias defaults to <letters>vpn<digits> of the name
+# (jp -> jpvpn, jp2 -> jpvpn2), host to <alias>.<domain>. '_' in region/note is a
+# space; the ':' in hostkey stands for the space between key type and key.
+
+# TXT records of a DNS name, one per line (multi-string records joined, quotes
+# stripped). dig / host when present, else DNS-over-HTTPS through curl.
+_dns_txt() {  # <fqdn>
+    local q="$1" out="" url
+    if command -v dig >/dev/null 2>&1; then
+        out=$(dig +short +time=3 +tries=1 TXT "$q" 2>/dev/null | grep '^"' | sed 's/" "//g; s/^"//; s/"$//')
+    fi
+    if [ -z "$out" ] && command -v host >/dev/null 2>&1; then
+        out=$(host -W 3 -t TXT "$q" 2>/dev/null | sed -n 's/.*descriptive text "\(.*\)"$/\1/p' | sed 's/" "//g')
+    fi
+    if [ -z "$out" ]; then
+        for url in "https://cloudflare-dns.com/dns-query" "https://dns.google/resolve"; do
+            out=$(curl -fsS --max-time 6 -H 'accept: application/dns-json' "$url?name=$q&type=TXT" 2>/dev/null \
+                | grep -oE '"data": ?"(\\.|[^"\\])*"' \
+                | sed 's/^"data": \{0,1\}"//; s/"$//; s/\\" *\\"//g; s/^\\"//; s/\\"$//; s/\\\\/\\/g')
+            [ -n "$out" ] && break
+        done
+    fi
+    [ -n "$out" ] && printf '%s\n' "$out"
+}
+
+# A nodes.json (same shape as the published one, one node per line, sorted by
+# slot) built from the TXT records of _claude-proxy.<domain>. Fails when there are none.
+_nodes_json_from_dns() {  # <domain>
+    local domain="$1" txt body
+    txt=$(_dns_txt "_claude-proxy.$domain") || return 1
+    body=$(printf '%s\n' "$txt" | awk -v dom="$domain" '
+        function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return s }
+        $1 != "v=cp1" { next }
+        {
+            split("", kv)
+            for (i = 2; i <= NF; i++) { p = index($i, "="); if (p > 1) kv[substr($i, 1, p - 1)] = substr($i, p + 1) }
+            name = kv["name"]; slot = kv["slot"]
+            if (name !~ /^[A-Za-z][A-Za-z0-9]*$/ || slot !~ /^[0-9]+$/) {
+                print "[Warn] Ignoring a TXT record without a valid name/slot: " $0 > "/dev/stderr"; next
+            }
+            letters = name; sub(/[0-9]+$/, "", letters); digits = substr(name, length(letters) + 1)
+            alias = ("alias" in kv) ? kv["alias"] : letters "vpn" digits
+            host  = ("host"  in kv) ? kv["host"]  : alias "." dom
+            ssh   = (kv["ssh"]   ~ /^[0-9]+$/) ? kv["ssh"]   : 22
+            proxy = (kv["proxy"] ~ /^[0-9]+$/) ? kv["proxy"] : 8888
+            region = kv["region"]; gsub(/_/, " ", region)
+            note   = kv["note"];   gsub(/_/, " ", note)
+            hk     = kv["hostkey"]; sub(/:/, " ", hk)
+            printf "%d\t    { \"name\": \"%s\", \"alias\": \"%s\", \"host\": \"%s\", \"user\": \"%s\", \"ssh_port\": %d, \"proxy_port\": %d, \"region\": \"%s\", \"note\": \"%s\", \"hostkey\": \"%s\", \"slot\": %d }\n", \
+                slot, esc(name), esc(alias), esc(host), esc(kv["user"]), ssh, proxy, esc(region), esc(note), esc(hk), slot
+        }' | sort -n | cut -f2- | sed '$!s/$/,/')
+    [ -n "$body" ] || return 1
+    printf '{\n  "_comment": "Generated by proxy-nodes from the DNS TXT records at _claude-proxy.%s - edit DNS, not this file.",\n' "$domain"
+    printf '  "version": 1,\n  "source": "dns:%s",\n  "updated": "%s",\n  "nodes": [\n%s\n  ]\n}\n' "$domain" "$(date +%Y-%m-%d)" "$body"
+}
+
+# Download / discover the catalogue into <file>.
+_nodes_fetch() {  # <file>
+    if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
+        echo "[Nodes] Looking up the nodes of $CLAUDE_PROXY_DOMAIN (DNS TXT _claude-proxy.$CLAUDE_PROXY_DOMAIN)..."
+        if ! _nodes_json_from_dns "$CLAUDE_PROXY_DOMAIN" > "$1"; then
+            echo "[Err] No valid 'v=cp1' TXT records at _claude-proxy.$CLAUDE_PROXY_DOMAIN - check the domain (proxy-config set PROXY_DOMAIN <domain>) or ask your admin."
+            return 1
+        fi
+        return 0
+    fi
+    echo "[Nodes] Fetching the node catalogue..."
+    if ! curl -fsSL "$CLAUDE_PROXY_REPO_RAW/nodes.json" -o "$1"; then
+        echo "[Err] Download failed. GitHub not reachable from here? Try 'proxy-up' first, then again."
+        return 1
     fi
 }
 
@@ -462,20 +552,23 @@ _node_tunnels_stop() {
 # --- commands ----------------------------------------------------------------
 proxy-nodes() {
     # (zsh prints a variable when 'local' re-declares it - declare everything once)
-    local refresh=0 tmp updated line idx name alias host user sport pport region note hostkey
-    local tstate hpid hname hport running mark target where found_active=0
-    case "${1:-}" in
-        --refresh|-r|refresh) refresh=1 ;;
-        ""|list) ;;
-        *) echo "usage: proxy-nodes [--refresh]"; return 1 ;;
-    esac
+    local refresh=0 tmp updated source line idx name alias host user sport pport region note hostkey
+    local tstate hpid hname hport running mark target where found_active=0 cur dups
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --refresh|-r|refresh) refresh=1 ;;
+            --domain)   shift; _conf_set CLAUDE_PROXY_DOMAIN "${1:-}"; _conf_reload; refresh=1 ;;
+            --domain=*) _conf_set CLAUDE_PROXY_DOMAIN "${1#--domain=}"; _conf_reload; refresh=1 ;;
+            list) ;;
+            *) echo "usage: proxy-nodes [--refresh] [--domain <domain>]   (--domain '' goes back to the guide's catalogue)"; return 1 ;;
+        esac
+        shift
+    done
 
     if [ $refresh -eq 1 ]; then
         tmp=$(mktemp) || return 1
-        echo "[Nodes] Fetching the node catalogue..."
-        if ! curl -fsSL "$CLAUDE_PROXY_REPO_RAW/nodes.json" -o "$tmp"; then
+        if ! _nodes_fetch "$tmp"; then
             rm -f "$tmp"
-            echo "[Err] Download failed. GitHub not reachable from here? Try 'proxy-up' first, then again."
             return 1
         fi
         if ! grep -q '"nodes"' "$tmp" || { command -v jq >/dev/null 2>&1 && ! jq -e '.nodes | length > 0' "$tmp" >/dev/null 2>&1; }; then
@@ -491,6 +584,11 @@ proxy-nodes() {
             IFS='|' read -r idx name alias host user sport pport region note hostkey <<< "$line"
             if _ssh_config_has_alias "$alias"; then
                 _node_ensure_alias "$line" >/dev/null   # pins the host key if given
+                # Existing aliases are never rewritten - but say so when they point elsewhere.
+                cur=$(_ssh_config_field "$alias" HostName)
+                if _node_provisioned "$host" && [ -n "$cur" ] && [ "$cur" != "$host" ]; then
+                    echo "[Warn] ssh alias '$alias' points to $cur, the catalogue says $host - edit ~/.ssh/config (or delete that Host block and refresh again)"
+                fi
             elif _node_provisioned "$host"; then
                 _node_ensure_alias "$line"
             else
@@ -508,8 +606,17 @@ proxy-nodes() {
     fi
 
     updated=$(sed -n 's/.*"updated"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CLAUDE_PROXY_NODES" | head -1)
+    source=$(sed -n 's/.*"source"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CLAUDE_PROXY_NODES" | head -1)
+    where="the guide's nodes.json"
+    [ -n "$source" ] && where="$source"
+    [ -n "$updated" ] && where="$where, updated $updated"
     echo ""
-    echo "=== Proxy nodes (catalogue: $CLAUDE_PROXY_NODES${updated:+, updated $updated}) ==="
+    echo "=== Proxy nodes (catalogue: $CLAUDE_PROXY_NODES, from $where) ==="
+    if [ -n "$CLAUDE_PROXY_DOMAIN" ] && [ "$source" != "dns:$CLAUDE_PROXY_DOMAIN" ]; then
+        echo "[Info] PROXY_DOMAIN is '$CLAUDE_PROXY_DOMAIN' but this list came from elsewhere - 'proxy-nodes --refresh' reloads it"
+    fi
+    dups=$(_nodes_tsv | cut -d'|' -f1 | sort | uniq -d | tr '\n' ' ')
+    [ -n "$dups" ] && echo "[Warn] Several nodes share slot(s) $dups- their Chrome tunnels would collide. Tell your admin."
     echo ""
     read -r tstate hpid hname hport <<< "$(_tunnel_health)"
     running=$(_node_tunnels_running)
@@ -532,15 +639,17 @@ proxy-nodes() {
         else
             target="<not provisioned>"
         fi
-        printf '  %s %-4s %-8s %-11s %-30s %s\n' "$mark" "$name" "$alias" "$region" "$target" "$where"
-    done <<< "$(_nodes_tsv)"
+        printf '  %s %-5s %-8s %-11s %-30s %s\n' "$mark" "$name" "$alias" "$region" "$target" "$where"
+    done <<< "$(_nodes_tsv | sort -t'|' -k8,8 -k1,1n)"
     if [ $found_active -eq 0 ]; then
         echo "  * ($CLAUDE_SSH_HOST)  - current server, not in the catalogue"
     fi
     echo ""
-    echo "  proxy-node <name>        make it the node cc / cx use (restarts the tunnel if it's up)"
-    echo "  chrome-proxy <name>      open a Chrome window through that node (own tunnel + profile; several can be open)"
-    echo "  proxy-nodes --refresh    re-download the catalogue and create any missing ssh aliases"
+    echo "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)"
+    echo "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)"
+    echo "  chrome-proxy <name> --profile <p>  another Chrome profile through the same node ('chrome-profiles' lists them)"
+    echo "  proxy-nodes --refresh              reload the catalogue and create any missing ssh aliases"
+    echo "  proxy-nodes --domain <domain>      take the nodes from your company's DNS from now on"
     echo ""
 }
 
@@ -955,6 +1064,9 @@ proxy-doctor() {
     elif [ -z "$CLAUDE_SSH_USER" ]; then
         echo "$warn No 'Host $CLAUDE_SSH_HOST' in ~/.ssh/config and CLAUDE_SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set CLAUDE_SSH_USER/KEY (proxy-config edit)"
     fi
+    if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
+        echo "$ok  Nodes come from DNS: TXT _claude-proxy.$CLAUDE_PROXY_DOMAIN ($(_count "$(_dns_txt "_claude-proxy.$CLAUDE_PROXY_DOMAIN" | grep '^v=cp1 ')") node records visible right now)"
+    fi
     if [ -f "$CLAUDE_PROXY_NODES" ]; then
         local nn an
         nn=$(_count "$(_nodes_tsv)"); an=$(_node_active_name)
@@ -1273,21 +1385,55 @@ _chrome_profile_dir() {  # <base linux path> <node name>   (prints the dir to us
     echo "$target"
 }
 
-# chrome-proxy [node] [url ...]
+# Base of the per-node Chrome data dirs (a Linux path; under WSL it is on C:).
+_chrome_base_dir() {
+    if _is_wsl; then
+        echo "/mnt/c/wsl-proxy-profile"
+    elif [ "$(uname)" = "Darwin" ]; then
+        echo "$HOME/.chrome-proxy-profile"
+    else
+        echo "$HOME/.config/google-chrome-vpn"
+    fi
+}
+
+# chrome-proxy [node] [--profile NAME] [url ...]
 #   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
 #   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
 #                           the main tunnel and other nodes' windows are untouched
-#   chrome-proxy sg URL     ...and open URL there (any non-node argument is passed to Chrome)
+#   chrome-proxy sg -p work ...as Chrome profile 'work' (created on first use). Every profile
+#                           of a node lives in that node's data dir, so all of them share its
+#                           tunnel and IP but keep their own logins/cookies/extensions.
+#   chrome-proxy sg URL     ...and open URL there (any other argument is passed to Chrome)
 chrome-proxy() {
-    local a line node="" name idx alias host rest socks port label
-    local extra=()
+    local a line node="" name idx alias host rest socks port label profile="" want_profile=0
+    local extra=() pargs=()
     for a in "$@"; do
+        if [ $want_profile -eq 1 ]; then
+            profile="$a"; want_profile=0
+            continue
+        fi
+        case "$a" in
+            -p|--profile) want_profile=1; continue ;;
+            --profile=*)  profile="${a#--profile=}"; continue ;;
+        esac
         if [ -z "$node" ] && line=$(_node_lookup "$a"); then
             node="$a"
         else
             extra+=("$a")
         fi
     done
+    if [ $want_profile -eq 1 ]; then
+        echo "usage: chrome-proxy [node] --profile <name> [url]   ('chrome-profiles' lists the existing ones)"
+        return 1
+    fi
+    case "$profile" in
+        "") ;;
+        default|Default) profile="Default" ;;
+        *[!A-Za-z0-9._\ -]*|.*)
+            echo "[Err] Profile names may only use letters, digits, space, '.', '_' and '-' (got '$profile')"
+            return 1 ;;
+    esac
+    [ -n "$profile" ] && pargs=(--profile-directory="$profile")
 
     if [ -n "$node" ]; then
         IFS='|' read -r idx name alias host rest <<< "$line"
@@ -1336,14 +1482,15 @@ chrome-proxy() {
             return 1
         }
         # Profile dir is a Windows path; do the one-time rename via /mnt/c.
-        pdir=$(_chrome_profile_dir "/mnt/c/wsl-proxy-profile" "$name")
+        pdir=$(_chrome_profile_dir "$(_chrome_base_dir)" "$name")
         pdir="C:\\${pdir#/mnt/c/}"
         "$win_chrome" \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="$pdir" \
+            --user-data-dir="$pdir" "${pargs[@]}" \
             --no-first-run "${extra[@]}" >/dev/null 2>&1 &
-        echo "[OK] Windows Chrome launched through $label - $socks, profile $pdir"
+        [ -n "$profile" ] && label="$label, profile '$profile'"
+        echo "[OK] Windows Chrome launched through $label - $socks, data dir $pdir"
         return
     fi
 
@@ -1356,25 +1503,68 @@ chrome-proxy() {
         }
         # A dedicated user-data-dir OUTSIDE the real Chrome folder: the proxied
         # Chrome is fully isolated and can never touch your normal profiles.
-        pdir=$(_chrome_profile_dir "$HOME/.chrome-proxy-profile" "$name")
+        pdir=$(_chrome_profile_dir "$(_chrome_base_dir)" "$name")
         open -n -a "$app" --args \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="$pdir" \
+            --user-data-dir="$pdir" "${pargs[@]}" \
             --no-first-run "${extra[@]}"
     else
         local bin
         bin="$CLAUDE_CHROME_BIN"
         [ -n "$bin" ] || bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
         [ -n "$bin" ] || { echo "[Err] Chrome/Chromium not found on PATH - set it: proxy-config set CHROME_BIN /path/to/chrome"; return 1; }
-        pdir=$(_chrome_profile_dir "$HOME/.config/google-chrome-vpn" "$name")
+        pdir=$(_chrome_profile_dir "$(_chrome_base_dir)" "$name")
         nohup "$bin" \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
-            --user-data-dir="$pdir" \
+            --user-data-dir="$pdir" "${pargs[@]}" \
             --no-first-run "${extra[@]}" >/dev/null 2>&1 &
     fi
-    echo "[OK] Chrome launched through $label - $socks, profile $pdir"
+    [ -n "$profile" ] && label="$label, profile '$profile'"
+    echo "[OK] Chrome launched through $label - $socks, data dir $pdir"
+}
+
+# chrome-profiles [node]  - the Chrome profiles that exist in each node's data dir
+chrome-profiles() {
+    local want="${1:-}" base idx name alias rest dir prefs p disp state found=0
+    base=$(_chrome_base_dir)
+    echo ""
+    echo "=== Chrome profiles per node (data dirs: $base-<node>) ==="
+    while IFS='|' read -r idx name alias rest; do
+        [ -n "$idx" ] || continue
+        [ -z "$want" ] || [ "$want" = "$name" ] || [ "$want" = "$alias" ] || continue
+        dir="$base-$name"
+        [ -d "$dir" ] || continue
+        found=1
+        state=""
+        if [ -L "$dir/SingletonLock" ] || [ -e "$dir/lockfile" ]; then state="  (Chrome open)"; fi
+        echo ""
+        echo "  $name ($alias)$state"
+        prefs=$(find "$dir" -mindepth 2 -maxdepth 2 -name Preferences 2>/dev/null | sort)
+        if [ -z "$prefs" ]; then
+            echo "      (no profile yet - opens as 'Default')"
+            continue
+        fi
+        while IFS= read -r p; do
+            p=$(basename "$(dirname "$p")")
+            case "$p" in "System Profile"|"Guest Profile") continue ;; esac
+            disp=""
+            if command -v jq >/dev/null 2>&1 && [ -f "$dir/Local State" ]; then
+                disp=$(jq -r --arg k "$p" '.profile.info_cache[$k].name // empty' "$dir/Local State" 2>/dev/null)
+            fi
+            [ -n "$disp" ] && disp="\"$disp\""
+            printf '      %-20s %s\n' "$p" "$disp"
+        done <<< "$prefs"
+    done <<< "$(_nodes_tsv)"
+    if [ $found -eq 0 ]; then
+        echo ""
+        if [ -n "$want" ]; then echo "  (none yet for '$want')"; else echo "  (none yet)"; fi
+    fi
+    echo ""
+    echo "  chrome-proxy <node> --profile <name>   open one (a new name creates it; 'Default' is the first)"
+    echo "  Profiles added from Chrome's own profile menu show up here too (e.g. 'Profile 1')."
+    echo ""
 }
 
 # ============================================================
@@ -1399,6 +1589,8 @@ cc-help() {
     echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
     echo "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)"
     echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
+    echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
+    echo "  proxy-nodes --domain example.com - take the node list from your company's DNS"
     echo ""
     echo "  -- settings & updates --"
     echo "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~/.claude-proxy.conf"
@@ -1411,7 +1603,7 @@ cc-help() {
     echo "  proxy-off       - Clear proxy env vars + unsync Claude settings.json"
     echo ""
     echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
-    echo "                    chrome-proxy [node] [url]  - e.g. chrome-proxy us https://example.com"
+    echo "                    chrome-proxy [node] [--profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com"
     echo "  cc-help         - Show this list again"
     echo ""
 }

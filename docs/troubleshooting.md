@@ -59,6 +59,10 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 | Node shows `<not provisioned>` | The admin listed it but hasn't filled in its address. Nothing to fix on your side. |
 | `sg tunnel failed to start` / *Permission denied (publickey)* | Your key isn't on that VM yet — ask the admin. Check with `ssh sgvpn` by hand; the `Host sgvpn` block in `~/.ssh/config` reuses the same `IdentityFile` as `jpvpn`. |
 | `Port 1181 (reserved for the sg tunnel) is used by '…'` | Something else lives on `1180`–`1189`: `proxy-config set NODE_SOCKS_BASE 1280` (Windows: same key without prefix). |
+| `No valid 'v=cp1' TXT records at _claude-proxy.<domain>` | The domain is mistyped, or your admin hasn't published the records yet. Check with `dig +short TXT _claude-proxy.<domain>` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.<domain>`). Back to the guide's list: `proxy-nodes --domain ''`. Your previous catalogue is kept. |
+| `ssh alias 'jpvpn' points to X, the catalogue says Y` | Your alias predates the domain setup. Edit `HostName` in `~/.ssh/config` (or delete that `Host` block and run `proxy-nodes --refresh`). |
+| `Several nodes share slot(s) …` | Two published nodes have the same `slot` — tell your admin; until fixed, don't open Chrome through both at once. |
+| `chrome-proxy jp --profile work` opens the wrong profile / no new window | The profile name is the *folder* name (`chrome-profiles` shows it) — Chrome's display name may differ. Chrome must be the one started by `chrome-proxy` for that node; a window you opened by hand with the same data folder but other flags wins. |
 | `chrome-proxy sg` opens a window but it still uses the *other* node | Two windows share one profile folder — Chrome ignores a new `--proxy-server` for a folder that's already open. The profile uses one folder per node (`…-jp`, `…-sg`); if you launched Chrome by hand, close it and use different `--user-data-dir`s. |
 | Switched with `proxy-node`, but another terminal still uses the old node | Each shell loads the settings when it starts: `source ~/.claude-proxy.sh` there (Windows: `. "$HOME\.claude-proxy.ps1"`), or open a new window. |
 

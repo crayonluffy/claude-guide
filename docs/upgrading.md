@@ -2,6 +2,8 @@
 
 ## Getting the newest profile (any time)
 
+> **New in v2.2 — nodes from your domain, several VMs per region, Chrome profiles.** After `proxy-update`: `proxy-nodes --domain example.com` (`-Domain` on Windows) if your company publishes its nodes in DNS; `chrome-proxy jp --profile work` opens another Chrome profile through `jp`; `jp2`, `jp3` … are extra VMs in the same region. Nothing to change if you use none of it. Details: **[Nodes](proxy-nodes.md)**.
+>
 > **New in v2.1 — nodes.** After `proxy-update`, run `proxy-nodes --refresh` (`-Refresh` on Windows) once to download the node catalogue (JP / SG / US …). Then `proxy-node sg` moves Claude/Codex to another region and `chrome-proxy sg` opens a Chrome through it — several regions at once. Your existing `jpvpn` alias, settings and Chrome logins carry over (the Chrome profile folder is renamed to `…-<node>` on first use). Details: **[Nodes](proxy-nodes.md)**.
 
 Since **v2.0** the profile keeps your settings in a separate file (`~/.claude-proxy.conf`, or `~\.claude-proxy.conf.psd1` on Windows), so updating never touches them:

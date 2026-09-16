@@ -63,15 +63,17 @@ proxy-status    # what's running + your external IP
 proxy-doctor    # something wrong? this says exactly what + how to fix
 proxy-update    # get the newest profile — your settings (proxy-config) are kept
 
-proxy-nodes     # which nodes exist (jp / sg / us …) and which one you're on
+proxy-nodes     # which nodes exist (jp / jp2 / sg / us …) and which one you're on
 proxy-node sg   # move Claude/Codex to another node   (or: cc --node sg)
 chrome-proxy us # a Chrome window through 'us' — own tunnel + profile, other nodes stay open
+chrome-proxy jp --profile work   # another Chrome profile through the same node (chrome-profiles lists them)
+proxy-nodes --domain example.com # company node list from your own DNS
 ```
 
 ---
 
 ## 📚 All pages
 
-- **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md) · [🌏 Nodes — JP / SG / US](docs/proxy-nodes.md)
+- **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md) · [🌏 Nodes — regions, VMs & Chrome profiles](docs/proxy-nodes.md)
 - **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
 - **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Updating & upgrading](docs/upgrading.md)

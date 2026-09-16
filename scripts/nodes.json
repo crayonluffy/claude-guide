@@ -1,8 +1,10 @@
 {
   "_comment": [
-    "Node catalogue for claude-proxy (v2.1+). Clients fetch this with 'proxy-nodes --refresh'.",
-    "ORDER MATTERS: a node's position gives it its side-tunnel SOCKS port (NODE_SOCKS_BASE + index),",
-    "so append new nodes at the END and never reorder - reordering changes ports on every client.",
+    "Node catalogue for claude-proxy (v2.1+). Clients fetch this with 'proxy-nodes --refresh' when no PROXY_DOMAIN is set.",
+    "THIS REPO IS PUBLIC: keep real addresses out of it - companies publish their nodes in their own DNS instead",
+    "(TXT records at _claude-proxy.<domain>, see docs/proxy-nodes.md).",
+    "'slot' gives a node its side-tunnel SOCKS port (NODE_SOCKS_BASE + slot) on every client: unique, never changed or reused.",
+    "Several VMs in one region = several nodes: jp, jp2, jp3 ... (aliases jpvpn, jpvpn2, jpvpn3).",
     "'host' may be an IP or a DNS name (a DNS name lets you re-IP a VM without touching clients).",
     "A 'host' left as <...> means 'not provisioned yet' - clients list the node but don't create an alias.",
     "'hostkey' (optional) is the VM's public host key, e.g. from:  ssh-keyscan -t ed25519 <host> | cut -d' ' -f2-",
@@ -12,10 +14,11 @@
     "of their existing jpvpn alias. Set it only if all users share one login on that node."
   ],
   "version": 1,
-  "updated": "2026-09-15",
+  "updated": "2026-09-16",
   "nodes": [
-    { "name": "jp", "alias": "jpvpn", "host": "<jp-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Japan",     "note": "default node", "hostkey": "" },
-    { "name": "sg", "alias": "sgvpn", "host": "<sg-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "",             "hostkey": "" },
-    { "name": "us", "alias": "usvpn", "host": "<us-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "US",        "note": "",             "hostkey": "" }
+    { "name": "jp",  "alias": "jpvpn",  "host": "<jp-vm-ip-or-dns>",  "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Japan",     "note": "default node",  "hostkey": "", "slot": 0 },
+    { "name": "sg",  "alias": "sgvpn",  "host": "<sg-vm-ip-or-dns>",  "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Singapore", "note": "",              "hostkey": "", "slot": 1 },
+    { "name": "us",  "alias": "usvpn",  "host": "<us-vm-ip-or-dns>",  "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "US",        "note": "",              "hostkey": "", "slot": 2 },
+    { "name": "jp2", "alias": "jpvpn2", "host": "<jp2-vm-ip-or-dns>", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Japan",     "note": "second JP VM",  "hostkey": "", "slot": 3 }
   ]
 }
