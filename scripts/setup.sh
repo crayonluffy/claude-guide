@@ -4,6 +4,8 @@
 # ============================================================
 # Run with:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
+# If your company publishes its proxy nodes in DNS, add its domain:
+#   bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh) --domain example.com
 #
 # First run: prompts for your VM details, installs and locks your SSH key,
 # writes an ~/.ssh/config alias, installs the cc/cx profile, and tests the
@@ -22,14 +24,19 @@ PROFILE_DEST="$HOME/.claude-proxy.sh"
 CONF="$HOME/.claude-proxy.conf"
 
 UPDATE_ONLY=0
-for arg in "$@"; do
-    case "$arg" in
+DOMAIN_ARG="${CLAUDE_PROXY_DOMAIN:-}"
+while [ $# -gt 0 ]; do
+    case "$1" in
         --update|-u) UPDATE_ONLY=1 ;;
+        --domain)    shift; DOMAIN_ARG="${1:-}" ;;
+        --domain=*)  DOMAIN_ARG="${1#--domain=}" ;;
         -h|--help)
-            echo "usage: setup.sh [--update]"
-            echo "  --update   keep the existing settings and only refresh ~/.claude-proxy.sh"
+            echo "usage: setup.sh [--update] [--domain <domain>]"
+            echo "  --update            keep the existing settings and only refresh ~/.claude-proxy.sh"
+            echo "  --domain <domain>   take the proxy nodes from that domain's DNS (TXT _claude-proxy.<domain>)"
             exit 0 ;;
     esac
+    shift
 done
 
 # All prompts read from /dev/tty (the keyboard) rather than stdin, so the wizard
@@ -38,9 +45,22 @@ prompt_required() {  # prompt_required <text> <varname>
     local text="$1" __var="$2" reply=""
     while [ -z "$reply" ]; do
         printf '%s: ' "$text" > /dev/tty
-        IFS= read -r reply < /dev/tty || reply=""
+        if ! IFS= read -r reply < /dev/tty; then
+            echo "" > /dev/tty
+            echo "[Err] No more input (keyboard closed) - setup aborted." > /dev/tty
+            exit 1
+        fi
         [ -z "$reply" ] && echo "  (required - please enter a value)" > /dev/tty
     done
+    printf -v "$__var" '%s' "$reply"
+}
+
+prompt_optional() {  # prompt_optional <text> <varname> <default-or-empty>  (Enter keeps the default, '-' clears it)
+    local text="$1" __var="$2" default="$3" reply=""
+    printf '%s: ' "$text" > /dev/tty
+    IFS= read -r reply < /dev/tty || reply=""
+    [ -z "$reply" ] && reply="$default"
+    [ "$reply" = "-" ] && reply=""
     printf -v "$__var" '%s' "$reply"
 }
 
@@ -145,13 +165,71 @@ ensure_deps() {
 }
 ensure_deps
 
+# --- 0b. Fetch the profile now: the node lookup below reuses its functions ---
+tmp_profile=$(mktemp)
+PROFILE_OK=0
+if curl -fsSL "$REPO_RAW/claude-proxy.sh" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
+   && grep -q '^CLAUDE_PROXY_VERSION=' "$tmp_profile"; then
+    PROFILE_OK=1
+fi
+
+# Nodes a company publishes in DNS (TXT _claude-proxy.<domain>), as the profile's
+# catalogue lines "slot|name|alias|host|user|ssh_port|proxy_port|region|...".
+domain_nodes() {  # <domain>
+    [ "$PROFILE_OK" = 1 ] || return 1
+    (
+        set +u
+        _CLAUDE_PROXY_QUIET=1; CLAUDE_PROXY_CONF=/dev/null
+        . "$tmp_profile" >/dev/null 2>&1
+        CLAUDE_PROXY_NODES=$(mktemp)
+        _nodes_json_from_dns "$1" > "$CLAUDE_PROXY_NODES" 2>/dev/null && _nodes_tsv
+        rc=$?
+        rm -f "$CLAUDE_PROXY_NODES"
+        exit $rc
+    )
+}
+
+# Ask for / check the company domain. With full=1 the server questions are
+# pre-filled from the node the user picks.  use_domain <full:0|1>
+DOMAIN=""
+use_domain() {
+    local full="$1" nodes pick line
+    if [ -n "$DOMAIN_ARG" ]; then
+        DOMAIN="$DOMAIN_ARG"
+    else
+        echo ""
+        echo "Does your company publish its proxy nodes in DNS? Then enter its domain (e.g. example.com)."
+        prompt_optional "Company domain (Enter = ${D_DOMAIN:-none}${D_DOMAIN:+, '-' = none})" DOMAIN "$D_DOMAIN"
+    fi
+    [ -n "$DOMAIN" ] || return 0
+    if ! nodes=$(domain_nodes "$DOMAIN") || [ -z "$nodes" ]; then
+        echo "[Warn] No proxy nodes found at _claude-proxy.$DOMAIN (DNS TXT)."
+        if ! confirm "Keep '$DOMAIN' anyway (e.g. the records aren't published yet)?" N; then DOMAIN=""; fi
+        return 0
+    fi
+    echo "[OK] $DOMAIN publishes these nodes:"
+    printf '%s\n' "$nodes" | awk -F'|' '{ printf "       %-5s %-9s %-12s %s\n", $2, $3, $8, $4 }'
+    [ "$full" = 1 ] || return 0
+    # Default pick: the node behind the alias you already have, else the first one.
+    pick=$(printf '%s\n' "$nodes" | awk -F'|' -v a="$D_ALIAS" '$3 == a { print $2; exit }')
+    [ -n "$pick" ] || pick=$(printf '%s\n' "$nodes" | head -1 | cut -d'|' -f2)
+    while :; do
+        prompt_default "Your main node (the one cc / cx use)" pick "$pick"
+        line=$(printf '%s\n' "$nodes" | awk -F'|' -v n="$pick" '$2 == n || $3 == n { print; exit }')
+        [ -n "$line" ] && break
+        echo "  (not in the list above)"
+    done
+    IFS='|' read -r _ _ D_ALIAS D_IP _ D_SSH_PORT D_PROXY_PORT _ <<< "$line"
+}
+
 # --- 1. Existing install? Pre-fill everything from it -----------------------
 # Sources, in order of preference: ~/.claude-proxy.conf, the Settings block of
 # an old-style ~/.claude-proxy.sh, and the ~/.ssh/config alias itself.
-D_ALIAS="jpvpn"; D_SSH_PORT="22"; D_PROXY_PORT="8888"; D_IP=""; D_USER=""; D_KEY=""
+D_ALIAS="jpvpn"; D_SSH_PORT="22"; D_PROXY_PORT="8888"; D_IP=""; D_USER=""; D_KEY=""; D_DOMAIN=""
 FOUND=""
 if [ -f "$CONF" ]; then
     FOUND="$CONF"
+    D_DOMAIN=$(conf_get CLAUDE_PROXY_DOMAIN)
     v=$(conf_get CLAUDE_SSH_HOST);          [ -n "$v" ] && D_ALIAS="$v"
     v=$(conf_get CLAUDE_SSH_PORT);          [ -n "$v" ] && D_SSH_PORT="$v"
     v=$(conf_get CLAUDE_REMOTE_PROXY_PORT); [ -n "$v" ] && D_PROXY_PORT="$v"
@@ -174,6 +252,7 @@ if [ -n "$FOUND" ]; then
     echo ""
     echo "[Found] Existing setup: $FOUND"
     echo "        server alias '$D_ALIAS' -> ${D_USER:-?}@${D_IP:-?} (ssh port $D_SSH_PORT), VM proxy port $D_PROXY_PORT"
+    [ -n "$D_DOMAIN" ] && echo "        nodes from the DNS of: $D_DOMAIN"
     if [ $UPDATE_ONLY -eq 1 ]; then
         QUICK=1
     elif confirm "Keep these settings and only update the cc/cx profile?" Y; then
@@ -185,6 +264,7 @@ fi
 
 if [ $QUICK -eq 0 ]; then
     # --- 2. Collect VM details (defaults = whatever we found) -----------------
+    use_domain 1
     echo ""
     prompt_smart   "Server IP or hostname"                     SERVER_IP  "$D_IP"
     prompt_smart   "SSH username"                              SSH_USER   "$D_USER"
@@ -276,6 +356,12 @@ if [ $QUICK -eq 0 ]; then
     fi
 else
     ALIAS="$D_ALIAS"; SSH_PORT="$D_SSH_PORT"; PROXY_PORT="$D_PROXY_PORT"
+    # Keep the saved domain; only ask when there is none yet (never in --update mode).
+    if [ -n "$DOMAIN_ARG" ] || { [ -z "$D_DOMAIN" ] && [ $UPDATE_ONLY -eq 0 ]; }; then
+        use_domain 0
+    else
+        DOMAIN="$D_DOMAIN"
+    fi
 fi
 
 # --- 6. Save the settings (~/.claude-proxy.conf) ----------------------------
@@ -284,12 +370,11 @@ fi
 conf_set CLAUDE_SSH_HOST          "$ALIAS"
 conf_set CLAUDE_SSH_PORT          "$SSH_PORT"
 conf_set CLAUDE_REMOTE_PROXY_PORT "$PROXY_PORT"
+conf_set CLAUDE_PROXY_DOMAIN      "$DOMAIN"
 echo "[OK] Settings saved: $CONF"
 
 # --- 7. Install / update the cc profile --------------------------------------
-tmp_profile=$(mktemp)
-if curl -fsSL "$REPO_RAW/claude-proxy.sh" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
-   && grep -q '^CLAUDE_PROXY_VERSION=' "$tmp_profile"; then
+if [ "$PROFILE_OK" = 1 ]; then
     if [ -f "$PROFILE_DEST" ]; then
         if cmp -s "$tmp_profile" "$PROFILE_DEST"; then
             echo "[OK] Profile already up to date: $PROFILE_DEST"
@@ -318,15 +403,14 @@ else
     echo "       Install it manually (guide: Proxy setup -> Set up by hand) or re-run this wizard later."
 fi
 
-# --- 7b. Node catalogue (jp / sg / us ...) - best effort, the profile can fetch it later
-NODES_DEST="$HOME/.claude-proxy.nodes.json"
-tmp_nodes=$(mktemp)
-if curl -fsSL "$REPO_RAW/nodes.json" -o "$tmp_nodes" 2>/dev/null && grep -q '"nodes"' "$tmp_nodes"; then
-    mv "$tmp_nodes" "$NODES_DEST"
-    echo "[OK] Node catalogue installed: $NODES_DEST  ('proxy-nodes' lists the nodes, 'proxy-node <name>' switches)"
-else
-    rm -f "$tmp_nodes"
-    echo "[Info] Node catalogue not downloaded (optional) - later: proxy-nodes --refresh"
+# --- 7b. Node catalogue (jp / sg / us ...) + ssh aliases for the other nodes -----
+# Best effort, done by the profile itself (from DNS when a domain is set, else
+# from this guide's nodes.json); 'proxy-nodes --refresh' repeats it any time.
+if [ "$PROFILE_OK" = 1 ]; then
+    echo ""
+    if ! ( set +u; _CLAUDE_PROXY_QUIET=1; . "$PROFILE_DEST"; proxy-nodes --refresh ); then
+        echo "[Info] Node catalogue not loaded (optional) - later: proxy-nodes --refresh"
+    fi
 fi
 
 # --- 8. Verify the connection ----------------------------------------------
