@@ -3,7 +3,7 @@
 Since **v2.1** the profile knows about more than one VM. The list of VMs (the **node catalogue**) comes from one of two places:
 
 - **your company's DNS** (v2.2+): the admin publishes one TXT record per VM under their own domain, and you tell the profile that domain once — see [Nodes from your domain](#-nodes-from-your-domain-dns). Recommended for companies.
-- **this guide's `nodes.json`** (default when no domain is set).
+- **this guide's `nodes.json`** (default when no domain is set). This repo is public, so that list is **empty** — `proxy-nodes` then just shows your current server and tells you to set your company's domain.
 
 Either way you get the same commands:
 
@@ -41,7 +41,9 @@ Nothing changes for people who only use one node: `cc`, `cx` and `chrome-proxy` 
 proxy-nodes                        # list: * marks the active node, plus which tunnels are up
 proxy-nodes --refresh              # reload the catalogue + create any missing ssh aliases        (Windows: -Refresh)
 proxy-nodes --domain example.com   # from now on, take the catalogue from example.com's DNS     (Windows: -Domain example.com)
-proxy-nodes --domain ''            # back to this guide's nodes.json
+proxy-nodes --domain ''            # back to this guide's (empty) list
+# the domain is only saved once its lookup finds nodes; --force (-Force) saves it anyway.
+# Both spellings work on every OS: --domain / -Domain, --refresh / -Refresh, --force / -Force
 
 proxy-node                         # show the active node
 proxy-node jp2                     # switch Claude/Codex to jp2 (saved in your settings; restarts the tunnel if it's running)
@@ -78,7 +80,7 @@ and `chrome-profiles` like this:
       Default              "Person 1"
 ```
 
-`<not provisioned>` means the admin listed the node but hasn't given it an address yet — you can't switch to it until they do.
+`<not provisioned>` means the admin listed the node but hasn't given it an address yet — you can't switch to it until they do. If you already have an `ssh` alias for that node, its address is shown instead, marked `(your alias)`.
 
 **Switching nodes while Claude is running:** `proxy-node` restarts the tunnel underneath the *same* local port, so a running `claude` just sees a brief reconnect. Other terminals keep the old node until they reload the profile (`source ~/.claude-proxy.sh`, or a new window).
 
@@ -186,7 +188,7 @@ proxy-update; . "$HOME\.claude-proxy.ps1"; proxy-nodes -Domain example.com
 
 ## 🛠 For admins — the guide's `nodes.json` (no domain)
 
-Without a domain, the catalogue is [`scripts/nodes.json`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/nodes.json) in this repo (served at `https://claude-guide.vercel.app/scripts/nodes.json` and via the GitHub raw URL the profile already uses for `proxy-update`). **This repo is public** — use placeholders or DNS names there, and prefer the DNS setup above for real addresses. One line per node:
+Without a domain, the catalogue is [`scripts/nodes.json`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/nodes.json) in this repo (served at `https://claude-guide.vercel.app/scripts/nodes.json` and via the GitHub raw URL the profile already uses for `proxy-update`). **This repo is public**, so the published list is intentionally empty (`"nodes": []`) — use the DNS setup above for real VMs. If you fork the guide for private use, the format is one line per node:
 
 ```json
 { "name": "jp2", "alias": "jpvpn2", "host": "jpvpn2.example.com", "user": "", "ssh_port": 22, "proxy_port": 8888, "region": "Japan", "note": "", "hostkey": "ssh-ed25519 AAAA...", "slot": 3 }

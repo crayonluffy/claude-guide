@@ -28,7 +28,7 @@
 # profile that goes out through the same node.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.2.1'
+$script:PROFILE_VERSION = '2.2.2'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -457,27 +457,70 @@ function Stop-NodeTunnels {
 }
 
 # --- commands ----------------------------------------------------------------
+# PowerShell only knows -Name parameters; a bash-style '--domain' would otherwise be
+# taken as the VALUE of the first string parameter. Put such a token back in front
+# of the leftover arguments so the function can parse both spellings.
+function _gnu-rest { param($BoundValue, $Rest)
+    if ("$BoundValue" -like '-*') { return @(@("$BoundValue") + @($Rest)) }
+    return @($Rest)
+}
+
 function proxy-nodes {
-    param([switch]$Refresh, [string]$Domain)
-    # -Domain example.com: take the nodes from that domain's DNS from now on ('' = back to the guide's catalogue)
-    if ($PSBoundParameters.ContainsKey('Domain')) {
-        $script:PROXY_DOMAIN = $Domain
-        _conf-write-all
-        Write-Host "[OK] PROXY_DOMAIN = '$Domain' saved to $($script:PROXY_CONF)" -ForegroundColor Green
+    param([switch]$Refresh, [string]$Domain, [switch]$Force)
+    # -Domain example.com: take the nodes from that domain's DNS from now on ('' = back to the guide's list).
+    # Only saved when the lookup finds nodes (-Force saves it anyway). The bash spellings
+    # --refresh / --domain <d> / --domain=<d> / --force work too.
+    $usage = "usage: proxy-nodes [-Refresh] [-Domain <domain>] [-Force]   (-Domain '' = back to the guide's list)"
+    $setDomain = $PSBoundParameters.ContainsKey('Domain')
+    $rest = @(_gnu-rest $Domain $args)   # @(): a 1-element result would otherwise unwrap to a string
+    if ("$Domain" -like '-*') { $setDomain = $false; $Domain = '' }
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $a = "$($rest[$i])"
+        switch -Regex ($a) {
+            '^-{1,2}(r|refresh)$' { $Refresh = $true }
+            '^-{1,2}force$'       { $Force = $true }
+            '^-{1,2}domain$'      {
+                if ($i + 1 -ge $rest.Count) { Write-Host $usage -ForegroundColor Yellow; return }
+                $i++; $Domain = "$($rest[$i])"; $setDomain = $true
+            }
+            '^-{1,2}domain=(.*)$' { $Domain = $Matches[1]; $setDomain = $true }
+            default               { Write-Host "[Err] Unknown argument '$a'. $usage" -ForegroundColor Red; return }
+        }
+    }
+    if ($setDomain) {
+        $Domain = "$Domain".Trim().TrimEnd('.').ToLower()
+        if ($Domain -and $Domain -notmatch '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$') {
+            Write-Host "[Err] '$Domain' is not a domain name (example: proxy-nodes -Domain example.com) - nothing changed." -ForegroundColor Red
+            return
+        }
         $Refresh = $true
     }
     if ($Refresh) {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.nodes.json.new'
-        if (-not (Get-NodesCatalogue $tmp)) {
-            Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-            return
+        $prevDomain = $script:PROXY_DOMAIN
+        if ($setDomain) { $script:PROXY_DOMAIN = $Domain }
+        $ok = Get-NodesCatalogue $tmp
+        if ($ok) {
+            $ok = $false
+            try { $cat = Get-Content $tmp -Raw | ConvertFrom-Json; $ok = ($null -ne $cat.PSObject.Properties['nodes']) } catch {}
+            if (-not $ok) { Write-Host "[Err] Downloaded file doesn't look like a node catalogue - nothing changed." -ForegroundColor Red }
         }
-        $ok = $false
-        try { $cat = Get-Content $tmp -Raw | ConvertFrom-Json; $ok = (@($cat.nodes).Count -gt 0) } catch {}
         if (-not $ok) {
             Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-            Write-Host "[Err] Downloaded file doesn't look like a node catalogue - nothing changed." -ForegroundColor Red
+            if ($setDomain -and $Force) {
+                _conf-write-all
+                Write-Host "[OK] PROXY_DOMAIN = '$Domain' saved anyway (-Force) - run 'proxy-nodes -Refresh' once its records exist." -ForegroundColor Yellow
+            } elseif ($setDomain) {
+                $script:PROXY_DOMAIN = $prevDomain
+                $was = if ($prevDomain) { "'$prevDomain'" } else { "not set" }
+                Write-Host "[Info] PROXY_DOMAIN not changed (still $was). Publish the node records first (forge: proxydns-manager on each VM), or add -Force to save it anyway." -ForegroundColor Yellow
+            }
             return
+        }
+        if ($setDomain) {
+            _conf-write-all
+            $what = if ($Domain) { "'$Domain' - nodes now come from its DNS" } else { "cleared - back to the guide's list" }
+            Write-Host "[OK] PROXY_DOMAIN $what (saved to $($script:PROXY_CONF))" -ForegroundColor Green
         }
         Move-Item $tmp $script:NODES_CACHE -Force
         Write-Host "[OK] Catalogue saved: $($script:NODES_CACHE)" -ForegroundColor Green
@@ -496,11 +539,25 @@ function proxy-nodes {
         }
     }
 
-    $nodes = Get-ProxyNodes
-    if (-not (Test-Path $script:NODES_CACHE) -or $nodes.Count -eq 0) {
+    $nodes = @(Get-ProxyNodes)
+    $curHost = Get-SshField $script:SSH_HOST 'HostName'
+    $current = "$($script:SSH_HOST)$(if ($curHost) { " -> $curHost" })"
+    if (-not (Test-Path $script:NODES_CACHE)) {
         Write-Host ""
-        Write-Host "[Info] No node catalogue yet - run 'proxy-nodes -Refresh' to download it." -ForegroundColor Yellow
-        Write-Host "       Current server: $($script:SSH_HOST)"
+        Write-Host "[Info] No node list yet - run 'proxy-nodes -Refresh' (or 'proxy-nodes -Domain <your company domain>')." -ForegroundColor Yellow
+        Write-Host "       Current server: $current"
+        Write-Host ""
+        return
+    }
+    if ($nodes.Count -eq 0) {
+        Write-Host ""
+        if ($script:PROXY_DOMAIN) {
+            Write-Host "[Info] $($script:PROXY_DOMAIN) lists no nodes (yet) - 'proxy-nodes -Refresh' after your admin registers the VMs." -ForegroundColor Yellow
+        } else {
+            Write-Host "[Info] No nodes listed. This guide doesn't publish any VMs - your company's list comes from its DNS:" -ForegroundColor Yellow
+            Write-Host "       proxy-nodes -Domain <your company domain>" -ForegroundColor Yellow
+        }
+        Write-Host "       Current server: $current (cc / cx / chrome-proxy keep using it)"
         Write-Host ""
         return
     }
@@ -532,11 +589,13 @@ function proxy-nodes {
         if (Test-NodeProvisioned $n.Host) {
             $target = if ($n.User) { "$($n.User)@$($n.Host)" } else { $n.Host }
             if (-not (Test-SshAlias $n.Alias)) { $where = "$(if ($where) { "$where; " })no ssh alias yet ('proxy-nodes -Refresh' creates it)" }
+        } elseif ($aliasHost = Get-SshField $n.Alias 'HostName') {
+            $target = "$aliasHost (your alias)"     # no address in the list, but your ~/.ssh/config has one
         } else { $target = '<not provisioned>' }
         $color = if ($mark -eq '*') { 'Green' } else { 'Gray' }
         Write-Host ("  {0} {1,-5} {2,-8} {3,-11} {4,-30} {5}" -f $mark, $n.Name, $n.Alias, $n.Region, $target, $where) -ForegroundColor $color
     }
-    if (-not $foundActive) { Write-Host "  * ($($script:SSH_HOST))  - current server, not in the catalogue" -ForegroundColor Green }
+    if (-not $foundActive) { Write-Host "  * ($current)  - current server, not in this list" -ForegroundColor Green }
     Write-Host ""
     Write-Host "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)" -ForegroundColor DarkGray
@@ -721,6 +780,12 @@ function proxy-off {
 
 function proxy-up {
     param([switch]$NoVerify, [string]$Node)
+    # bash spellings too: --no-verify, --node <name>
+    $o = _split-launch-args (_gnu-rest $Node $args)
+    if ("$Node" -like '-*') { $Node = '' }
+    if ($o.NoVerify) { $NoVerify = $true }
+    if ($o.Node) { $Node = $o.Node }
+    if ($o.App.Count) { Write-Host "[Err] Unknown argument(s): $($o.App -join ' ')   usage: proxy-up [-NoVerify] [-Node <name>]" -ForegroundColor Red; return $false }
 
     # Step 0: -Node sg  ==  proxy-node sg first (persists, like running it yourself).
     if ($Node) { if (-not (proxy-node $Node)) { return $false } }
@@ -1152,6 +1217,13 @@ function _fetch-file { param($Uri, $OutFile)
 
 function proxy-update {
     param([switch]$Check, [switch]$Force)
+    foreach ($a in $args) {   # bash spellings too: --check / -n, --force / -f
+        switch -Regex ("$a") {
+            '^-{1,2}(check|n)$' { $Check = $true }
+            '^-{1,2}(force|f)$' { $Force = $true }
+            default { Write-Host "[Err] Unknown argument '$a'. usage: proxy-update [-Check] [-Force]" -ForegroundColor Red; return }
+        }
+    }
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.ps1.new'
     Write-Host "[Update] Fetching latest profile from GitHub..." -ForegroundColor Cyan
     try {
@@ -1422,7 +1494,7 @@ function cc-help {
     Write-Host "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes -Domain example.com - take the node list from your company's DNS" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Domain example.com - take the node list from your company's DNS (--domain works too)" -ForegroundColor DarkGray
     Write-Host "" -ForegroundColor DarkGray
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
     Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray

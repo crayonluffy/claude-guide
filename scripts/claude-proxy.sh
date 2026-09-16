@@ -27,7 +27,7 @@
 # Chrome profile that goes out through the same node.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.2.1"
+CLAUDE_PROXY_VERSION="2.2.2"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -311,7 +311,7 @@ _nodes_tsv() {
         /"name"[ \t]*:/ && /"alias"[ \t]*:/ {
             sp = f("ssh_port"); if (sp == "") sp = 22
             pp = f("proxy_port"); if (pp == "") pp = 8888
-            sl = f("slot"); if (sl == "") sl = i
+            sl = f("slot"); if (sl == "") sl = i + 0
             i++
             print sl "|" f("name") "|" f("alias") "|" f("host") "|" f("user") "|" sp "|" pp "|" f("region") "|" f("note") "|" f("hostkey")
         }' "$CLAUDE_PROXY_NODES"
@@ -554,27 +554,59 @@ proxy-nodes() {
     # (zsh prints a variable when 'local' re-declares it - declare everything once)
     local refresh=0 tmp updated source line idx name alias host user sport pport region note hostkey
     local tstate hpid hname hport running mark target where found_active=0 cur dups
+    local set_domain=0 new_domain="" force=0 prev_domain ok current
+    local usage="usage: proxy-nodes [--refresh] [--domain <domain>] [--force]   (--domain '' = back to the guide's list)"
+    # (the PowerShell spellings -Refresh / -Domain / -Force work too)
     while [ $# -gt 0 ]; do
         case "$1" in
-            --refresh|-r|refresh) refresh=1 ;;
-            --domain)   shift; _conf_set CLAUDE_PROXY_DOMAIN "${1:-}"; _conf_reload; refresh=1 ;;
-            --domain=*) _conf_set CLAUDE_PROXY_DOMAIN "${1#--domain=}"; _conf_reload; refresh=1 ;;
+            --refresh|-r|-Refresh|refresh) refresh=1 ;;
+            --force|-f|-Force) force=1 ;;
+            --domain|-Domain)
+                [ $# -ge 2 ] || { echo "$usage"; return 1; }
+                shift; new_domain="$1"; set_domain=1 ;;
+            --domain=*) new_domain="${1#--domain=}"; set_domain=1 ;;
             list) ;;
-            *) echo "usage: proxy-nodes [--refresh] [--domain <domain>]   (--domain '' goes back to the guide's catalogue)"; return 1 ;;
+            *) echo "[Err] Unknown argument '$1'. $usage"; return 1 ;;
         esac
         shift
     done
+    if [ $set_domain -eq 1 ]; then
+        new_domain=$(printf '%s' "$new_domain" | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g; s/\.$//')
+        if [ -n "$new_domain" ] && ! printf '%s' "$new_domain" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; then
+            echo "[Err] '$new_domain' is not a domain name (example: proxy-nodes --domain example.com) - nothing changed."
+            return 1
+        fi
+        refresh=1
+    fi
 
     if [ $refresh -eq 1 ]; then
         tmp=$(mktemp) || return 1
-        if ! _nodes_fetch "$tmp"; then
+        prev_domain="$CLAUDE_PROXY_DOMAIN"
+        [ $set_domain -eq 1 ] && CLAUDE_PROXY_DOMAIN="$new_domain"
+        ok=1
+        _nodes_fetch "$tmp" || ok=0
+        if [ $ok -eq 1 ] && { ! grep -q '"nodes"' "$tmp" || { command -v jq >/dev/null 2>&1 && ! jq -e '.nodes | type == "array"' "$tmp" >/dev/null 2>&1; }; }; then
+            echo "[Err] Downloaded file doesn't look like a node catalogue - nothing changed."
+            ok=0
+        fi
+        if [ $ok -eq 0 ]; then
             rm -f "$tmp"
+            if [ $set_domain -eq 1 ] && [ $force -eq 1 ]; then
+                _conf_set CLAUDE_PROXY_DOMAIN "$new_domain"; _conf_reload
+                echo "[OK] PROXY_DOMAIN = '$new_domain' saved anyway (--force) - run 'proxy-nodes --refresh' once its records exist."
+            elif [ $set_domain -eq 1 ]; then
+                CLAUDE_PROXY_DOMAIN="$prev_domain"
+                echo "[Info] PROXY_DOMAIN not changed (still ${prev_domain:-not set}). Publish the node records first (forge: proxydns-manager on each VM), or add --force to save it anyway."
+            fi
             return 1
         fi
-        if ! grep -q '"nodes"' "$tmp" || { command -v jq >/dev/null 2>&1 && ! jq -e '.nodes | length > 0' "$tmp" >/dev/null 2>&1; }; then
-            rm -f "$tmp"
-            echo "[Err] Downloaded file doesn't look like a node catalogue - nothing changed."
-            return 1
+        if [ $set_domain -eq 1 ]; then
+            _conf_set CLAUDE_PROXY_DOMAIN "$new_domain"; _conf_reload
+            if [ -n "$new_domain" ]; then
+                echo "[OK] PROXY_DOMAIN '$new_domain' - nodes now come from its DNS (saved to $CLAUDE_PROXY_CONF)"
+            else
+                echo "[OK] PROXY_DOMAIN cleared - back to the guide's list (saved to $CLAUDE_PROXY_CONF)"
+            fi
         fi
         mv "$tmp" "$CLAUDE_PROXY_NODES"
         echo "[OK] Catalogue saved: $CLAUDE_PROXY_NODES"
@@ -597,10 +629,24 @@ proxy-nodes() {
         done <<< "$(_nodes_tsv)"
     fi
 
+    cur=$(_ssh_config_field "$CLAUDE_SSH_HOST" HostName)
+    current="$CLAUDE_SSH_HOST${cur:+ -> $cur}"
     if [ ! -f "$CLAUDE_PROXY_NODES" ]; then
         echo ""
-        echo "[Info] No node catalogue yet - run 'proxy-nodes --refresh' to download it."
-        echo "       Current server: $CLAUDE_SSH_HOST"
+        echo "[Info] No node list yet - run 'proxy-nodes --refresh' (or 'proxy-nodes --domain <your company domain>')."
+        echo "       Current server: $current"
+        echo ""
+        return 0
+    fi
+    if [ -z "$(_nodes_tsv)" ]; then
+        echo ""
+        if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
+            echo "[Info] $CLAUDE_PROXY_DOMAIN lists no nodes (yet) - 'proxy-nodes --refresh' after your admin registers the VMs."
+        else
+            echo "[Info] No nodes listed. This guide doesn't publish any VMs - your company's list comes from its DNS:"
+            echo "       proxy-nodes --domain <your company domain>"
+        fi
+        echo "       Current server: $current (cc / cx / chrome-proxy keep using it)"
         echo ""
         return 0
     fi
@@ -637,12 +683,14 @@ proxy-nodes() {
             target="${user:+$user@}$host"
             _ssh_config_has_alias "$alias" || where="${where:+$where; }no ssh alias yet ('proxy-nodes --refresh' creates it)"
         else
-            target="<not provisioned>"
+            # no address in the list, but your ~/.ssh/config may have one
+            target=$(_ssh_config_field "$alias" HostName)
+            if [ -n "$target" ]; then target="$target (your alias)"; else target="<not provisioned>"; fi
         fi
         printf '  %s %-5s %-8s %-11s %-30s %s\n' "$mark" "$name" "$alias" "$region" "$target" "$where"
     done <<< "$(_nodes_tsv | sort -t'|' -k8,8 -k1,1n)"
     if [ $found_active -eq 0 ]; then
-        echo "  * ($CLAUDE_SSH_HOST)  - current server, not in the catalogue"
+        echo "  * ($current)  - current server, not in this list"
     fi
     echo ""
     echo "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)"
