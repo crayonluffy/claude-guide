@@ -1852,7 +1852,8 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
             echo "[..]  $label $cur is older than $latest, but wasn't installed with npm - update it with: $hint"
             return 0
         fi
-        _tools_ask "Update $label $cur -> $latest?" Y || { _tools_skip; return 0; }
+        echo "[..]  $label $cur is out of date (latest: $latest)"
+        _tools_ask "Update $label to $latest now?" Y || { _tools_skip; return 0; }
     else
         if [ -z "$latest" ]; then
             echo "[Err] $label is not installed and the npm registry can't be reached (is the proxy up? try 'proxy-up')."

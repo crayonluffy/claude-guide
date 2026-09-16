@@ -1750,7 +1750,8 @@ function _tools-pkg { param([string]$Label, [string]$Bin, [string]$Pkg, [string]
             Write-Host "[..]  $Label $cur is older than $latest, but wasn't installed with npm - update it with: $Hint"
             return $true
         }
-        if (-not (_tools-ask "Update $Label $cur -> $($latest)?")) { _tools-skip; return $true }
+        Write-Host "[..]  $Label $cur is out of date (latest: $latest)"
+        if (-not (_tools-ask "Update $Label to $latest now?")) { _tools-skip; return $true }
     } else {
         if (-not $latest) {
             Write-Host "[Err] $Label is not installed and the npm registry can't be reached (is the proxy up? try 'proxy-up')." -ForegroundColor Red
