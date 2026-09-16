@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.3.0"
+CLAUDE_PROXY_VERSION="2.3.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -1451,7 +1451,19 @@ proxy-update() {
 
     if [ $force -eq 0 ] && cmp -s "$tmp" "$self"; then
         rm -f "$tmp"
-        echo "[OK] Already up to date (v$CLAUDE_PROXY_VERSION)"
+        # The file was already updated (e.g. from another shell), but THIS shell
+        # still runs an older copy - load the installed one.
+        local running="$CLAUDE_PROXY_VERSION"
+        if [ -n "$newver" ] && [ "$newver" != "$running" ]; then
+            if [ $check -eq 1 ]; then
+                echo "[Info] $self is already v$newver, but this shell runs v$running - 'proxy-update' loads it"
+            else
+                _conf_reload
+                echo "[OK] $self was already v$newver - loaded it into this shell (it was running v$running)"
+            fi
+            return 0
+        fi
+        echo "[OK] Already up to date (v$running)"
         return 0
     fi
     if [ $check -eq 1 ]; then

@@ -32,7 +32,7 @@
 # read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.3.0'
+$script:PROFILE_VERSION = '2.3.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -1333,7 +1333,20 @@ function proxy-update {
     $current = if (Test-Path $script:PROFILE_PATH) { Get-Content $script:PROFILE_PATH -Raw } else { '' }
     if (-not $Force -and $current -eq $raw) {
         Remove-Item $tmp -Force
-        Write-Host "[OK] Already up to date (v$($script:PROFILE_VERSION))" -ForegroundColor Green
+        # The file was already updated (e.g. from another window), but THIS window
+        # still runs an older copy - load the installed one.
+        $running = $script:PROFILE_VERSION
+        if ($newver -and $newver -ne $running) {
+            if ($Check) {
+                Write-Host "[Info] $($script:PROFILE_PATH) is already v$newver, but this window runs v$running - 'proxy-update' loads it" -ForegroundColor Yellow
+            } elseif (_reload-profile) {
+                Write-Host "[OK] $($script:PROFILE_PATH) was already v$newver - loaded it into this window (it was running v$running)" -ForegroundColor Green
+            } else {
+                Write-Host "[Warn] $($script:PROFILE_PATH) is v$newver, but it could not be loaded here - open a new window, or run:  . '$($script:PROFILE_PATH)'" -ForegroundColor Yellow
+            }
+            return
+        }
+        Write-Host "[OK] Already up to date (v$running)" -ForegroundColor Green
         return
     }
     if ($Check) {
