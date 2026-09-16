@@ -26,9 +26,13 @@
 # _claude-proxy.<domain>, see PROXY_DOMAIN), a region can have several VMs
 # (jp, jp2, jp3 ...), and 'chrome-proxy jp --profile work' opens another Chrome
 # profile that goes out through the same node.
+#
+# v2.3: the node list can come PRIVATELY from one of your VMs over SSH
+# ('proxy-nodes -From jpvpn', see NODES_FROM) - only people who can log in can
+# read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.2.3'
+$script:PROFILE_VERSION = '2.3.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -60,9 +64,13 @@ $script:NODE_SOCKS_BASE   = 1180
 $script:CHROME_EXE        = ''         # chrome.exe path, only if Chrome isn't in one of the usual places
 $script:CHROME_BASE       = 'C:\ChromeVPNProfile'   # per-node Chrome data dirs are <this>-<node>
 
-# Where 'proxy-nodes -Refresh' gets the catalogue from:
-#   ''            -> $REPO_RAW/nodes.json (this guide's repo)
-#   'example.com' -> DNS TXT records at _claude-proxy.example.com (your admin manages them in DNS)
+# Where 'proxy-nodes -Refresh' gets the node list from (set with 'proxy-nodes -From / -Domain'):
+#   NODES_FROM   = 'jpvpn'       -> PRIVATE: asks that VM over SSH ('ssh jpvpn claude-proxy-nodes',
+#                                   forge proxynodes-manager). If it doesn't answer, the other VMs
+#                                   already in your list are tried.
+#   PROXY_DOMAIN = 'example.com' -> PUBLIC DNS TXT records at _claude-proxy.example.com
+#   both empty                   -> $REPO_RAW/nodes.json (this guide's list - empty)
+$script:NODES_FROM        = ''
 $script:PROXY_DOMAIN      = ''
 
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
@@ -90,7 +98,7 @@ $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -304,8 +312,69 @@ function ConvertTo-NodesJsonFromDns { param([string]$Domain)
     ) -join "`n")
 }
 
+# 'ssh <target> claude-proxy-nodes' without any prompt; stdout / stderr go to files.
+# Returns the exit code. (Start-Process: no Windows PowerShell stderr-wrapping quirks.)
+function Invoke-NodesSsh { param([string]$Target, [string]$OutFile, [string]$ErrFile)
+    try {
+        $p = Start-Process -FilePath 'ssh' -NoNewWindow -Wait -PassThru -ErrorAction Stop `
+            -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile `
+            -ArgumentList @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=accept-new', $Target, 'claude-proxy-nodes')
+        return $p.ExitCode
+    } catch {
+        Set-Content -Path $ErrFile -Value $_.Exception.Message
+        return 255
+    }
+}
+
+# The node list from a VM over SSH (forge proxynodes-manager serves it to anyone
+# who can log in, tunnel-only accounts included). $false with a clear reason.
+function Get-NodesViaSsh { param([string]$Target, [string]$OutFile)
+    Write-Host "[Nodes] Fetching the node list from $Target over SSH..." -ForegroundColor Cyan
+    $errFile = "$OutFile.err"
+    $rc  = Invoke-NodesSsh $Target $OutFile $errFile
+    $out = if (Test-Path $OutFile) { "$(Get-Content $OutFile -Raw)" } else { '' }
+    $err = if (Test-Path $errFile) { "$(Get-Content $errFile -Raw)" } else { '' }
+    Remove-Item $errFile -Force -ErrorAction SilentlyContinue
+    if ($rc -eq 0 -and $out -match '"nodes"') {
+        $out = $out -replace '"source":\s*"ssh"', ('"source": "ssh:' + $Target + '"')
+        [System.IO.File]::WriteAllText($OutFile, $out)
+        return $true
+    }
+    if ("$out$err" -match 'tunnel-only account') {
+        Write-Host "[Err] $Target answered, but doesn't serve the node list yet - admin: install forge proxynodes-manager there (and its sshd ForceCommand)" -ForegroundColor Red
+    } elseif ("$out$err" -match 'claude-proxy-nodes.*not found|not found.*claude-proxy-nodes') {
+        Write-Host "[Err] $Target has no 'claude-proxy-nodes' command - admin: install forge proxynodes-manager there" -ForegroundColor Red
+    } else {
+        $last = @($err -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+        Write-Host "[Err] Could not get the node list from $($Target): $last" -ForegroundColor Red
+        Write-Host "      Try 'ssh $Target' by hand (a key with a passphrase has to be loaded in ssh-agent)." -ForegroundColor Yellow
+    }
+    return $false
+}
+
+# How the node list is currently sourced, in words.
+function Get-NodesSourceDesc {
+    if ($script:NODES_FROM) { return "VM $($script:NODES_FROM) (over SSH)" }
+    if ($script:PROXY_DOMAIN) { return "the DNS of $($script:PROXY_DOMAIN)" }
+    return "the guide's list"
+}
+
 # Download / discover the catalogue into $OutFile. $false on failure.
-function Get-NodesCatalogue { param([string]$OutFile)
+# -NoFallback: only the configured source (used while a new source is being set).
+function Get-NodesCatalogue { param([string]$OutFile, [switch]$NoFallback)
+    if ($script:NODES_FROM) {
+        if (Get-NodesViaSsh $script:NODES_FROM $OutFile) { return $true }
+        if ($NoFallback) { return $false }
+        # The chosen VM is down / moved: ask the other VMs we already know.
+        foreach ($n in Get-ProxyNodes) {
+            if (-not $n.Alias -or $n.Alias -eq $script:NODES_FROM -or -not (Test-SshAlias $n.Alias)) { continue }
+            if (Get-NodesViaSsh $n.Alias $OutFile) {
+                Write-Host "[Info] $($script:NODES_FROM) didn't answer - took the list from $($n.Alias) instead (your setting is unchanged; 'proxy-nodes -From $($n.Alias)' switches for good)" -ForegroundColor Yellow
+                return $true
+            }
+        }
+        return $false
+    }
     if ($script:PROXY_DOMAIN) {
         Write-Host "[Nodes] Looking up the nodes of $($script:PROXY_DOMAIN) (DNS TXT _claude-proxy.$($script:PROXY_DOMAIN))..." -ForegroundColor Cyan
         $json = ConvertTo-NodesJsonFromDns $script:PROXY_DOMAIN
@@ -466,40 +535,48 @@ function _gnu-rest { param($BoundValue, $Rest)
 }
 
 function proxy-nodes {
-    param([switch]$Refresh, [string]$Domain, [switch]$Force)
-    # -Domain example.com: take the nodes from that domain's DNS from now on ('' = back to the guide's list).
-    # Only saved when the lookup finds nodes (-Force saves it anyway). The bash spellings
-    # --refresh / --domain <d> / --domain=<d> / --force work too.
-    $usage = "usage: proxy-nodes [-Refresh] [-Domain <domain>] [-Force]   (-Domain '' = back to the guide's list)"
-    $setDomain = $PSBoundParameters.ContainsKey('Domain')
-    $rest = @(_gnu-rest $Domain $args)   # @(): a 1-element result would otherwise unwrap to a string
-    if ("$Domain" -like '-*') { $setDomain = $false; $Domain = '' }
+    # -From <vm alias> : take the node list PRIVATELY from that VM (over SSH) from now on
+    # -Domain <domain> : ... from that domain's public DNS
+    # ('' as the value = back to the guide's list). Saved only when the lookup works
+    # (-Force saves it anyway). The bash spellings --refresh / --from <vm> / --domain <d>
+    # / --force / --from=<vm> work too. -From / -Domain are read from $args on purpose:
+    # as declared [string] parameters, PowerShell would bind '--domain' positionally.
+    param([switch]$Refresh, [switch]$Force)
+    $usage = "usage: proxy-nodes [-Refresh] [-From <vm alias>] [-Domain <domain>] [-Force]   ('' as the value = back to the guide's list)"
+    $setSrc = ''; $newVal = ''
+    $rest = @($args)
     for ($i = 0; $i -lt $rest.Count; $i++) {
         $a = "$($rest[$i])"
-        switch -Regex ($a) {
-            '^-{1,2}(r|refresh)$' { $Refresh = $true }
-            '^-{1,2}force$'       { $Force = $true }
-            '^-{1,2}domain$'      {
-                if ($i + 1 -ge $rest.Count) { Write-Host $usage -ForegroundColor Yellow; return }
-                $i++; $Domain = "$($rest[$i])"; $setDomain = $true
-            }
-            '^-{1,2}domain=(.*)$' { $Domain = $Matches[1]; $setDomain = $true }
-            default               { Write-Host "[Err] Unknown argument '$a'. $usage" -ForegroundColor Red; return }
+        if ($a -match '^-{1,2}(r|refresh)$') { $Refresh = $true }
+        elseif ($a -match '^-{1,2}(f|force)$') { $Force = $true }
+        elseif ($a -match '^-{1,2}(from|domain)$') {
+            if ($i + 1 -ge $rest.Count) { Write-Host $usage -ForegroundColor Yellow; return }
+            $setSrc = $Matches[1].ToLower(); $i++; $newVal = "$($rest[$i])"
         }
+        elseif ($a -match '^-{1,2}(from|domain)[=:](.*)$') { $setSrc = $Matches[1].ToLower(); $newVal = $Matches[2] }
+        else { Write-Host "[Err] Unknown argument '$a'. $usage" -ForegroundColor Red; return }
     }
-    if ($setDomain) {
-        $Domain = "$Domain".Trim().TrimEnd('.').ToLower()
-        if ($Domain -and $Domain -notmatch '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$') {
-            Write-Host "[Err] '$Domain' is not a domain name (example: proxy-nodes -Domain example.com) - nothing changed." -ForegroundColor Red
+    if ($setSrc -eq 'domain') {
+        $newVal = "$newVal".Trim().TrimEnd('.').ToLower()
+        if ($newVal -and $newVal -notmatch '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$') {
+            Write-Host "[Err] '$newVal' is not a domain name (example: proxy-nodes -Domain example.com) - nothing changed." -ForegroundColor Red
             return
         }
-        $Refresh = $true
+    } elseif ($setSrc -eq 'from') {
+        $newVal = "$newVal".Trim()
+        if ($newVal -and $newVal -notmatch '^[A-Za-z0-9_][A-Za-z0-9._@-]*$') {
+            Write-Host "[Err] '$newVal' is not an ssh alias or host (example: proxy-nodes -From jpvpn) - nothing changed." -ForegroundColor Red
+            return
+        }
     }
+    if ($setSrc) { $Refresh = $true }
     if ($Refresh) {
         $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.nodes.json.new'
-        $prevDomain = $script:PROXY_DOMAIN
-        if ($setDomain) { $script:PROXY_DOMAIN = $Domain }
-        $ok = Get-NodesCatalogue $tmp
+        $prevDomain = $script:PROXY_DOMAIN; $prevFrom = $script:NODES_FROM; $prevDesc = Get-NodesSourceDesc
+        # One source at a time: setting one clears the other.
+        if ($setSrc -eq 'domain') { $script:PROXY_DOMAIN = $newVal; $script:NODES_FROM = '' }
+        elseif ($setSrc -eq 'from') { $script:NODES_FROM = $newVal; $script:PROXY_DOMAIN = '' }
+        $ok = Get-NodesCatalogue $tmp -NoFallback:([bool]$setSrc)
         if ($ok) {
             $ok = $false
             try { $cat = Get-Content $tmp -Raw | ConvertFrom-Json; $ok = ($null -ne $cat.PSObject.Properties['nodes']) } catch {}
@@ -507,20 +584,18 @@ function proxy-nodes {
         }
         if (-not $ok) {
             Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-            if ($setDomain -and $Force) {
+            if ($setSrc -and $Force) {
                 _conf-write-all
-                Write-Host "[OK] PROXY_DOMAIN = '$Domain' saved anyway (-Force) - run 'proxy-nodes -Refresh' once its records exist." -ForegroundColor Yellow
-            } elseif ($setDomain) {
-                $script:PROXY_DOMAIN = $prevDomain
-                $was = if ($prevDomain) { "'$prevDomain'" } else { "not set" }
-                Write-Host "[Info] PROXY_DOMAIN not changed (still $was). Publish the node records first (forge: proxydns-manager on each VM), or add -Force to save it anyway." -ForegroundColor Yellow
+                Write-Host "[OK] Node list source saved anyway (-Force): $(Get-NodesSourceDesc) - run 'proxy-nodes -Refresh' once it answers." -ForegroundColor Yellow
+            } elseif ($setSrc) {
+                $script:PROXY_DOMAIN = $prevDomain; $script:NODES_FROM = $prevFrom
+                Write-Host "[Info] Node list source not changed (still: $prevDesc). Fix the problem above, or add -Force to save it anyway." -ForegroundColor Yellow
             }
             return
         }
-        if ($setDomain) {
+        if ($setSrc) {
             _conf-write-all
-            $what = if ($Domain) { "'$Domain' - nodes now come from its DNS" } else { "cleared - back to the guide's list" }
-            Write-Host "[OK] PROXY_DOMAIN $what (saved to $($script:PROXY_CONF))" -ForegroundColor Green
+            Write-Host "[OK] Node list now comes from $(Get-NodesSourceDesc) (saved to $($script:PROXY_CONF))" -ForegroundColor Green
         }
         Move-Item $tmp $script:NODES_CACHE -Force
         Write-Host "[OK] Catalogue saved: $($script:NODES_CACHE)" -ForegroundColor Green
@@ -544,18 +619,20 @@ function proxy-nodes {
     $current = "$($script:SSH_HOST)$(if ($curHost) { " -> $curHost" })"
     if (-not (Test-Path $script:NODES_CACHE)) {
         Write-Host ""
-        Write-Host "[Info] No node list yet - run 'proxy-nodes -Refresh' (or 'proxy-nodes -Domain <your company domain>')." -ForegroundColor Yellow
+        Write-Host "[Info] No node list yet - get it from one of your VMs: proxy-nodes -From $($script:SSH_HOST)" -ForegroundColor Yellow
         Write-Host "       Current server: $current"
         Write-Host ""
         return
     }
     if ($nodes.Count -eq 0) {
         Write-Host ""
-        if ($script:PROXY_DOMAIN) {
+        if ($script:NODES_FROM) {
+            Write-Host "[Info] $($script:NODES_FROM) doesn't list any nodes yet - admin: 'sudo proxynodes-add ...' there, then 'proxy-nodes -Refresh'." -ForegroundColor Yellow
+        } elseif ($script:PROXY_DOMAIN) {
             Write-Host "[Info] $($script:PROXY_DOMAIN) lists no nodes (yet) - 'proxy-nodes -Refresh' after your admin registers the VMs." -ForegroundColor Yellow
         } else {
-            Write-Host "[Info] No nodes listed. This guide doesn't publish any VMs - your company's list comes from its DNS:" -ForegroundColor Yellow
-            Write-Host "       proxy-nodes -Domain <your company domain>" -ForegroundColor Yellow
+            Write-Host "[Info] No nodes listed. This guide doesn't publish any VMs - get your list privately from one of your VMs:" -ForegroundColor Yellow
+            Write-Host "       proxy-nodes -From $($script:SSH_HOST)          (or from public DNS: proxy-nodes -Domain <domain>)" -ForegroundColor Yellow
         }
         Write-Host "       Current server: $current (cc / cx / chrome-proxy keep using it)"
         Write-Host ""
@@ -567,7 +644,9 @@ function proxy-nodes {
     if ($updated) { $from += ", updated $updated" }
     Write-Host ""
     Write-Host "=== Proxy nodes (catalogue: $($script:NODES_CACHE), from $from) ===" -ForegroundColor Cyan
-    if ($script:PROXY_DOMAIN -and $source -ne "dns:$($script:PROXY_DOMAIN)") {
+    if ($script:NODES_FROM -and $source -ne "ssh:$($script:NODES_FROM)") {
+        Write-Host "[Info] Your list source is $($script:NODES_FROM), but this copy came from $(if ($source) { $source } else { 'elsewhere' }) - 'proxy-nodes -Refresh' reloads it" -ForegroundColor Yellow
+    } elseif ($script:PROXY_DOMAIN -and $source -ne "dns:$($script:PROXY_DOMAIN)") {
         Write-Host "[Info] PROXY_DOMAIN is '$($script:PROXY_DOMAIN)' but this list came from elsewhere - 'proxy-nodes -Refresh' reloads it" -ForegroundColor Yellow
     }
     $dups = @($nodes | Group-Object Idx | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
@@ -600,8 +679,8 @@ function proxy-nodes {
     Write-Host "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy <name> -Profile <p>   another Chrome profile through the same node ('chrome-profiles' lists them)" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes -Refresh               reload the catalogue and create any missing ssh aliases" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes -Domain <domain>       take the nodes from your company's DNS from now on" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -Refresh               reload the list and create any missing ssh aliases" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -From <vm>             take the list (privately, over SSH) from another VM from now on" -ForegroundColor DarkGray
     Write-Host ""
 }
 
@@ -1021,7 +1100,7 @@ function proxy-doctor {
 
     # --- profile + settings ---
     Write-Host "[ OK ]  Profile: $($script:PROFILE_PATH) (v$($script:PROFILE_VERSION)) - 'proxy-update -Check' to see if a newer one exists" -ForegroundColor Green
-    $profRaw = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    $profRaw = if ($PROFILE -and (Test-Path $PROFILE)) { Get-Content $PROFILE -Raw } else { '' }
     if ($profRaw -match '\.claude-proxy\.ps1') {
         Write-Host "[ OK ]  `$PROFILE loads it in every new window" -ForegroundColor Green
     } elseif ($profRaw -match '(?m)^\$script:(PROFILE_VERSION|SSH_HOST)\s*=') {
@@ -1039,6 +1118,9 @@ function proxy-doctor {
         Write-Host "[ OK ]  ~/.ssh/config has an alias '$($script:SSH_HOST)'" -ForegroundColor Green
     } elseif (-not $script:SSH_USER) {
         Write-Host "[WARN] No 'Host $($script:SSH_HOST)' in ~/.ssh/config and SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set SSH_USER/SSH_KEY (proxy-config edit)" -ForegroundColor Yellow
+    }
+    if ($script:NODES_FROM) {
+        Write-Host "[ OK ]  Node list comes from VM $($script:NODES_FROM) over SSH ('proxy-nodes -From <vm>' changes it)" -ForegroundColor Green
     }
     if ($script:PROXY_DOMAIN) {
         $recs = @(Get-DnsTxt "_claude-proxy.$($script:PROXY_DOMAIN)" | Where-Object { $_ -match '^v=cp1\s' }).Count
@@ -1528,7 +1610,7 @@ function cc-help {
     Write-Host "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes -Domain example.com - take the node list from your company's DNS (--domain works too)" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes -From jpvpn - get the node list privately from a VM over SSH (-Domain <d>: public DNS)" -ForegroundColor DarkGray
     Write-Host "" -ForegroundColor DarkGray
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
     Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray

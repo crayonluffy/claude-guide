@@ -2,6 +2,8 @@
 
 ## Getting the newest profile (any time)
 
+> **New in v2.3 — a private node list.** `proxy-nodes --from <your VM alias>` (`-From` on Windows) fetches the list over SSH from a VM you choose — nothing public. Your admin sets it up with forge `proxynodes-manager`. On Windows, `proxy-update` now also loads the new version into the open window. Details: **[Nodes](proxy-nodes.md)**.
+>
 > **New in v2.2 — nodes from your domain, several VMs per region, Chrome profiles.** After `proxy-update`: `proxy-nodes --domain example.com` (`-Domain` on Windows) if your company publishes its nodes in DNS; `chrome-proxy jp --profile work` opens another Chrome profile through `jp`; `jp2`, `jp3` … are extra VMs in the same region. Nothing to change if you use none of it. Details: **[Nodes](proxy-nodes.md)**.
 >
 > **New in v2.1 — nodes.** After `proxy-update`, run `proxy-nodes --refresh` (`-Refresh` on Windows) once to download the node catalogue (JP / SG / US …). Then `proxy-node sg` moves Claude/Codex to another region and `chrome-proxy sg` opens a Chrome through it — several regions at once. Your existing `jpvpn` alias, settings and Chrome logins carry over (the Chrome profile folder is renamed to `…-<node>` on first use). Details: **[Nodes](proxy-nodes.md)**.

@@ -25,9 +25,13 @@
 # _claude-proxy.<domain>, see CLAUDE_PROXY_DOMAIN), a region can have several
 # VMs (jp, jp2, jp3 ...), and 'chrome-proxy jp --profile work' opens another
 # Chrome profile that goes out through the same node.
+#
+# v2.3: the node list can come PRIVATELY from one of your VMs over SSH
+# ('proxy-nodes --from jpvpn', see CLAUDE_NODES_FROM) - only people who can log
+# in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.2.3"
+CLAUDE_PROXY_VERSION="2.3.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -63,9 +67,13 @@ CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
 CLAUDE_NODE_SOCKS_BASE=1180
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
-# Where 'proxy-nodes --refresh' gets the catalogue from:
-#   ""            -> $CLAUDE_PROXY_REPO_RAW/nodes.json (this guide's repo)
-#   "example.com" -> DNS TXT records at _claude-proxy.example.com (your admin manages them in DNS)
+# Where 'proxy-nodes --refresh' gets the node list from (set with 'proxy-nodes --from / --domain'):
+#   CLAUDE_NODES_FROM="jpvpn"        -> PRIVATE: asks that VM over SSH ('ssh jpvpn claude-proxy-nodes',
+#                                       forge proxynodes-manager). If it doesn't answer, the other
+#                                       VMs already in your list are tried.
+#   CLAUDE_PROXY_DOMAIN="example.com" -> PUBLIC DNS TXT records at _claude-proxy.example.com
+#   both empty                       -> $CLAUDE_PROXY_REPO_RAW/nodes.json (this guide's list - empty)
+CLAUDE_NODES_FROM=""
 CLAUDE_PROXY_DOMAIN=""
 
 # Also write the proxy into Claude's settings.json while the tunnel is up, so
@@ -97,10 +105,10 @@ fi
 export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
        CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT \
        CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF \
-       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN
+       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN CLAUDE_NODES_FROM
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
 
 # ============================================================
 # Helpers
@@ -378,8 +386,56 @@ _nodes_json_from_dns() {  # <domain>
     printf '  "version": 1,\n  "source": "dns:%s",\n  "updated": "%s",\n  "nodes": [\n%s\n  ]\n}\n' "$domain" "$(date +%Y-%m-%d)" "$body"
 }
 
-# Download / discover the catalogue into <file>.
-_nodes_fetch() {  # <file>
+# The node list from a VM over SSH (forge proxynodes-manager serves it to anyone
+# who can log in, tunnel-only accounts included). Fails with a clear reason.
+_nodes_fetch_ssh() {  # <ssh alias or host> <file>
+    local target="$1" out="$2" err
+    err=$(mktemp) || return 1
+    echo "[Nodes] Fetching the node list from $target over SSH..."
+    _is_wsl && _ensure_ssh_agent
+    if ssh -o BatchMode=yes -o ConnectTimeout=8 -o StrictHostKeyChecking=accept-new \
+           "$target" claude-proxy-nodes > "$out" 2> "$err" && grep -q '"nodes"' "$out"; then
+        sed -i.bak "s|\"source\": *\"ssh\"|\"source\": \"ssh:$target\"|" "$out" && rm -f "$out.bak"
+        rm -f "$err"
+        return 0
+    fi
+    if grep -qs "tunnel-only account" "$out" "$err"; then
+        echo "[Err] $target answered, but doesn't serve the node list yet - admin: install forge proxynodes-manager there (and its sshd ForceCommand)"
+    elif grep -qisE "claude-proxy-nodes.*not found|not found.*claude-proxy-nodes" "$out" "$err"; then
+        echo "[Err] $target has no 'claude-proxy-nodes' command - admin: install forge proxynodes-manager there"
+    else
+        echo "[Err] Could not get the node list from $target: $(sed '/^[[:space:]]*$/d' "$err" | tail -1)"
+        echo "      Try 'ssh $target' by hand (a key with a passphrase has to be loaded in ssh-agent)."
+    fi
+    rm -f "$err"
+    return 1
+}
+
+# How the node list is currently sourced, in words.
+_nodes_source_desc() {
+    if [ -n "$CLAUDE_NODES_FROM" ]; then echo "VM $CLAUDE_NODES_FROM (over SSH)"
+    elif [ -n "$CLAUDE_PROXY_DOMAIN" ]; then echo "the DNS of $CLAUDE_PROXY_DOMAIN"
+    else echo "the guide's list"
+    fi
+}
+
+# Download / discover the catalogue into <file>. With a 2nd argument only the
+# configured source is tried (used when a new source is being set).
+_nodes_fetch() {  # <file> [no-fallback]
+    local idx name alias rest
+    if [ -n "$CLAUDE_NODES_FROM" ]; then
+        _nodes_fetch_ssh "$CLAUDE_NODES_FROM" "$1" && return 0
+        [ -z "${2:-}" ] || return 1
+        # The chosen VM is down / moved: ask the other VMs we already know.
+        while IFS='|' read -r idx name alias rest; do
+            [ -n "$alias" ] && [ "$alias" != "$CLAUDE_NODES_FROM" ] && _ssh_config_has_alias "$alias" || continue
+            if _nodes_fetch_ssh "$alias" "$1"; then
+                echo "[Info] $CLAUDE_NODES_FROM didn't answer - took the list from $alias instead (your setting is unchanged; 'proxy-nodes --from $alias' switches for good)"
+                return 0
+            fi
+        done <<< "$(_nodes_tsv)"
+        return 1
+    fi
     if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
         echo "[Nodes] Looking up the nodes of $CLAUDE_PROXY_DOMAIN (DNS TXT _claude-proxy.$CLAUDE_PROXY_DOMAIN)..."
         if ! _nodes_json_from_dns "$CLAUDE_PROXY_DOMAIN" > "$1"; then
@@ -554,59 +610,66 @@ proxy-nodes() {
     # (zsh prints a variable when 'local' re-declares it - declare everything once)
     local refresh=0 tmp updated source line idx name alias host user sport pport region note hostkey
     local tstate hpid hname hport running mark target where found_active=0 cur dups
-    local set_domain=0 new_domain="" force=0 prev_domain ok current
-    local usage="usage: proxy-nodes [--refresh] [--domain <domain>] [--force]   (--domain '' = back to the guide's list)"
-    # (the PowerShell spellings -Refresh / -Domain / -Force work too)
+    local set_src="" new_val="" force=0 prev_domain prev_from prev_desc ok current
+    local usage="usage: proxy-nodes [--refresh] [--from <vm alias>] [--domain <domain>] [--force]   ('' as the value = back to the guide's list)"
+    # (the PowerShell spellings -Refresh / -From / -Domain / -Force work too)
     while [ $# -gt 0 ]; do
         case "$1" in
             --refresh|-r|-Refresh|refresh) refresh=1 ;;
             --force|-f|-Force) force=1 ;;
-            --domain|-Domain)
+            --domain|-Domain|--from|-From)
                 [ $# -ge 2 ] || { echo "$usage"; return 1; }
-                shift; new_domain="$1"; set_domain=1 ;;
-            --domain=*) new_domain="${1#--domain=}"; set_domain=1 ;;
+                case "$1" in *omain) set_src=domain ;; *) set_src=from ;; esac
+                shift; new_val="$1" ;;
+            --domain=*) new_val="${1#--domain=}"; set_src=domain ;;
+            --from=*)   new_val="${1#--from=}"; set_src=from ;;
             list) ;;
             *) echo "[Err] Unknown argument '$1'. $usage"; return 1 ;;
         esac
         shift
     done
-    if [ $set_domain -eq 1 ]; then
-        new_domain=$(printf '%s' "$new_domain" | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g; s/\.$//')
-        if [ -n "$new_domain" ] && ! printf '%s' "$new_domain" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; then
-            echo "[Err] '$new_domain' is not a domain name (example: proxy-nodes --domain example.com) - nothing changed."
+    if [ "$set_src" = domain ]; then
+        new_val=$(printf '%s' "$new_val" | tr 'A-Z' 'a-z' | sed 's/[[:space:]]//g; s/\.$//')
+        if [ -n "$new_val" ] && ! printf '%s' "$new_val" | grep -Eq '^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$'; then
+            echo "[Err] '$new_val' is not a domain name (example: proxy-nodes --domain example.com) - nothing changed."
             return 1
         fi
-        refresh=1
+    elif [ "$set_src" = from ]; then
+        if [ -n "$new_val" ] && ! printf '%s' "$new_val" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._@-]*$'; then
+            echo "[Err] '$new_val' is not an ssh alias or host (example: proxy-nodes --from jpvpn) - nothing changed."
+            return 1
+        fi
     fi
+    [ -n "$set_src" ] && refresh=1
 
     if [ $refresh -eq 1 ]; then
         tmp=$(mktemp) || return 1
-        prev_domain="$CLAUDE_PROXY_DOMAIN"
-        [ $set_domain -eq 1 ] && CLAUDE_PROXY_DOMAIN="$new_domain"
+        prev_domain="$CLAUDE_PROXY_DOMAIN"; prev_from="$CLAUDE_NODES_FROM"; prev_desc=$(_nodes_source_desc)
+        # One source at a time: setting one clears the other.
+        case "$set_src" in
+            domain) CLAUDE_PROXY_DOMAIN="$new_val"; CLAUDE_NODES_FROM="" ;;
+            from)   CLAUDE_NODES_FROM="$new_val"; CLAUDE_PROXY_DOMAIN="" ;;
+        esac
         ok=1
-        _nodes_fetch "$tmp" || ok=0
+        _nodes_fetch "$tmp" "$set_src" || ok=0
         if [ $ok -eq 1 ] && { ! grep -q '"nodes"' "$tmp" || { command -v jq >/dev/null 2>&1 && ! jq -e '.nodes | type == "array"' "$tmp" >/dev/null 2>&1; }; }; then
             echo "[Err] Downloaded file doesn't look like a node catalogue - nothing changed."
             ok=0
         fi
         if [ $ok -eq 0 ]; then
             rm -f "$tmp"
-            if [ $set_domain -eq 1 ] && [ $force -eq 1 ]; then
-                _conf_set CLAUDE_PROXY_DOMAIN "$new_domain"; _conf_reload
-                echo "[OK] PROXY_DOMAIN = '$new_domain' saved anyway (--force) - run 'proxy-nodes --refresh' once its records exist."
-            elif [ $set_domain -eq 1 ]; then
-                CLAUDE_PROXY_DOMAIN="$prev_domain"
-                echo "[Info] PROXY_DOMAIN not changed (still ${prev_domain:-not set}). Publish the node records first (forge: proxydns-manager on each VM), or add --force to save it anyway."
+            if [ -n "$set_src" ] && [ $force -eq 1 ]; then
+                _conf_set CLAUDE_NODES_FROM "$CLAUDE_NODES_FROM"; _conf_set CLAUDE_PROXY_DOMAIN "$CLAUDE_PROXY_DOMAIN"; _conf_reload
+                echo "[OK] Node list source saved anyway (--force): $(_nodes_source_desc) - run 'proxy-nodes --refresh' once it answers."
+            elif [ -n "$set_src" ]; then
+                CLAUDE_PROXY_DOMAIN="$prev_domain"; CLAUDE_NODES_FROM="$prev_from"
+                echo "[Info] Node list source not changed (still: $prev_desc). Fix the problem above, or add --force to save it anyway."
             fi
             return 1
         fi
-        if [ $set_domain -eq 1 ]; then
-            _conf_set CLAUDE_PROXY_DOMAIN "$new_domain"; _conf_reload
-            if [ -n "$new_domain" ]; then
-                echo "[OK] PROXY_DOMAIN '$new_domain' - nodes now come from its DNS (saved to $CLAUDE_PROXY_CONF)"
-            else
-                echo "[OK] PROXY_DOMAIN cleared - back to the guide's list (saved to $CLAUDE_PROXY_CONF)"
-            fi
+        if [ -n "$set_src" ]; then
+            _conf_set CLAUDE_NODES_FROM "$CLAUDE_NODES_FROM"; _conf_set CLAUDE_PROXY_DOMAIN "$CLAUDE_PROXY_DOMAIN"; _conf_reload
+            echo "[OK] Node list now comes from $(_nodes_source_desc) (saved to $CLAUDE_PROXY_CONF)"
         fi
         mv "$tmp" "$CLAUDE_PROXY_NODES"
         echo "[OK] Catalogue saved: $CLAUDE_PROXY_NODES"
@@ -633,18 +696,20 @@ proxy-nodes() {
     current="$CLAUDE_SSH_HOST${cur:+ -> $cur}"
     if [ ! -f "$CLAUDE_PROXY_NODES" ]; then
         echo ""
-        echo "[Info] No node list yet - run 'proxy-nodes --refresh' (or 'proxy-nodes --domain <your company domain>')."
+        echo "[Info] No node list yet - get it from one of your VMs: proxy-nodes --from $CLAUDE_SSH_HOST"
         echo "       Current server: $current"
         echo ""
         return 0
     fi
     if [ -z "$(_nodes_tsv)" ]; then
         echo ""
-        if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
+        if [ -n "$CLAUDE_NODES_FROM" ]; then
+            echo "[Info] $CLAUDE_NODES_FROM doesn't list any nodes yet - admin: 'sudo proxynodes-add ...' there, then 'proxy-nodes --refresh'."
+        elif [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
             echo "[Info] $CLAUDE_PROXY_DOMAIN lists no nodes (yet) - 'proxy-nodes --refresh' after your admin registers the VMs."
         else
-            echo "[Info] No nodes listed. This guide doesn't publish any VMs - your company's list comes from its DNS:"
-            echo "       proxy-nodes --domain <your company domain>"
+            echo "[Info] No nodes listed. This guide doesn't publish any VMs - get your list privately from one of your VMs:"
+            echo "       proxy-nodes --from $CLAUDE_SSH_HOST          (or from public DNS: proxy-nodes --domain <domain>)"
         fi
         echo "       Current server: $current (cc / cx / chrome-proxy keep using it)"
         echo ""
@@ -658,7 +723,9 @@ proxy-nodes() {
     [ -n "$updated" ] && where="$where, updated $updated"
     echo ""
     echo "=== Proxy nodes (catalogue: $CLAUDE_PROXY_NODES, from $where) ==="
-    if [ -n "$CLAUDE_PROXY_DOMAIN" ] && [ "$source" != "dns:$CLAUDE_PROXY_DOMAIN" ]; then
+    if [ -n "$CLAUDE_NODES_FROM" ] && [ "$source" != "ssh:$CLAUDE_NODES_FROM" ]; then
+        echo "[Info] Your list source is $CLAUDE_NODES_FROM, but this copy came from ${source:-elsewhere} - 'proxy-nodes --refresh' reloads it"
+    elif [ -n "$CLAUDE_PROXY_DOMAIN" ] && [ "$source" != "dns:$CLAUDE_PROXY_DOMAIN" ]; then
         echo "[Info] PROXY_DOMAIN is '$CLAUDE_PROXY_DOMAIN' but this list came from elsewhere - 'proxy-nodes --refresh' reloads it"
     fi
     dups=$(_nodes_tsv | cut -d'|' -f1 | sort | uniq -d | tr '\n' ' ')
@@ -696,8 +763,8 @@ proxy-nodes() {
     echo "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)"
     echo "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)"
     echo "  chrome-proxy <name> --profile <p>  another Chrome profile through the same node ('chrome-profiles' lists them)"
-    echo "  proxy-nodes --refresh              reload the catalogue and create any missing ssh aliases"
-    echo "  proxy-nodes --domain <domain>      take the nodes from your company's DNS from now on"
+    echo "  proxy-nodes --refresh              reload the list and create any missing ssh aliases"
+    echo "  proxy-nodes --from <vm>            take the list (privately, over SSH) from another VM from now on"
     echo ""
 }
 
@@ -1111,6 +1178,9 @@ proxy-doctor() {
         echo "$ok  ~/.ssh/config has an alias '$CLAUDE_SSH_HOST'"
     elif [ -z "$CLAUDE_SSH_USER" ]; then
         echo "$warn No 'Host $CLAUDE_SSH_HOST' in ~/.ssh/config and CLAUDE_SSH_USER is blank - ssh may not know how to reach it. Fix: re-run the setup wizard, or set CLAUDE_SSH_USER/KEY (proxy-config edit)"
+    fi
+    if [ -n "$CLAUDE_NODES_FROM" ]; then
+        echo "$ok  Node list comes from VM $CLAUDE_NODES_FROM over SSH ('proxy-nodes --from <vm>' changes it)"
     fi
     if [ -n "$CLAUDE_PROXY_DOMAIN" ]; then
         echo "$ok  Nodes come from DNS: TXT _claude-proxy.$CLAUDE_PROXY_DOMAIN ($(_count "$(_dns_txt "_claude-proxy.$CLAUDE_PROXY_DOMAIN" | grep '^v=cp1 ')") node records visible right now)"
@@ -1638,7 +1708,7 @@ cc-help() {
     echo "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)"
     echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
     echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
-    echo "  proxy-nodes --domain example.com - take the node list from your company's DNS"
+    echo "  proxy-nodes --from jpvpn - get the node list privately from a VM over SSH (--domain <d>: public DNS)"
     echo ""
     echo "  -- settings & updates --"
     echo "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~/.claude-proxy.conf"

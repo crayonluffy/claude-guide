@@ -1,11 +1,16 @@
 # 🌏 Nodes — JP / SG / US, several VMs per region, several Chrome profiles
 
-Since **v2.1** the profile knows about more than one VM. The list of VMs (the **node catalogue**) comes from one of two places:
+Since **v2.1** the profile knows about more than one VM. The list of VMs (the **node list**) comes from one of three places:
 
-- **your company's DNS** (v2.2+): the admin publishes one TXT record per VM under their own domain, and you tell the profile that domain once — see [Nodes from your domain](#-nodes-from-your-domain-dns). Recommended for companies.
-- **this guide's `nodes.json`** (default when no domain is set). This repo is public, so that list is **empty** — `proxy-nodes` then just shows your current server and tells you to set your company's domain.
+| Source | Who can read the list | Set with |
+|---|---|---|
+| 🔒 **one of your VMs, over SSH** (v2.3+, **recommended**) | only people who can log in to that VM | `proxy-nodes --from jpvpn` (Windows: `-From jpvpn`) |
+| 🌐 your company's **public DNS** (v2.2+) | anyone who knows the name | `proxy-nodes --domain example.com` (Windows: `-Domain`) |
+| this guide's `nodes.json` (default) | public — and therefore **empty** | `proxy-nodes --from ''` |
 
-Either way you get the same commands:
+**Why SSH:** DNS is public by design, and a public list of your proxy VMs makes them easy to find and block. Over SSH, the list is authenticated by the key you already use, travels inside the encrypted connection, and **you choose which VM serves it** — `proxy-nodes --from sgvpn` switches when the old one goes away. If your chosen VM doesn't answer, `proxy-nodes --refresh` asks the other VMs already in your list (your setting stays as it is). Admin side: [forge `proxynodes-manager`](https://github.com/crayonluffy/forge/tree/main/proxynodes-manager) — see [For admins](#-for-admins--the-private-list-over-ssh-recommended).
+
+Whichever source you use, the commands are the same:
 
 | You want… | Command |
 |-----------|---------|
@@ -14,11 +19,11 @@ Either way you get the same commands:
 | a **Chrome window** through a specific VM — *without* touching what `cc` uses, and with several VMs open at once | `chrome-proxy sg` |
 | **another Chrome profile** (other logins) through the **same** VM | `chrome-proxy jp --profile work` (Windows: `-Profile work`) |
 | the Chrome profiles that already exist | `chrome-profiles` |
-| the node list to come from your company's DNS | `proxy-nodes --domain example.com` (Windows: `-Domain example.com`) |
+| to get the node list (privately) from one of your VMs | `proxy-nodes --from jpvpn` (Windows: `-From jpvpn`) — any VM that serves it |
 
 Nothing changes for people who only use one node: `cc`, `cx` and `chrome-proxy` keep working exactly as before.
 
-> **Profile older than 2.2?** `proxy-update` (settings kept), then `proxy-nodes --refresh` (`-Refresh` on Windows) once. The setup wizard also installs the catalogue when it (re)installs the profile.
+> **Profile older than 2.3?** `proxy-update` (settings kept), then `proxy-nodes --from <your VM alias>` once. The setup wizard does this for you when it (re)installs the profile and your VM already serves the list.
 
 ---
 
@@ -39,11 +44,13 @@ Nothing changes for people who only use one node: `cc`, `cx` and `chrome-proxy` 
 
 ```bash
 proxy-nodes                        # list: * marks the active node, plus which tunnels are up
-proxy-nodes --refresh              # reload the catalogue + create any missing ssh aliases        (Windows: -Refresh)
-proxy-nodes --domain example.com   # from now on, take the catalogue from example.com's DNS     (Windows: -Domain example.com)
-proxy-nodes --domain ''            # back to this guide's (empty) list
-# the domain is only saved once its lookup finds nodes; --force (-Force) saves it anyway.
-# Both spellings work on every OS: --domain / -Domain, --refresh / -Refresh, --force / -Force
+proxy-nodes --refresh              # reload the list + create any missing ssh aliases              (Windows: -Refresh)
+proxy-nodes --from jpvpn           # from now on, get the list privately from VM jpvpn over SSH     (Windows: -From jpvpn)
+proxy-nodes --from sgvpn           # ...or from another VM that serves it (e.g. the old one is gone)
+proxy-nodes --domain example.com   # ...or from example.com's PUBLIC DNS instead                   (Windows: -Domain)
+proxy-nodes --from ''              # back to this guide's (empty) list
+# A new source is only saved once it answers; --force (-Force) saves it anyway. One source at a time:
+# --from clears --domain and vice versa. Both spellings work on every OS (--from / -From, ...).
 
 proxy-node                         # show the active node
 proxy-node jp2                     # switch Claude/Codex to jp2 (saved in your settings; restarts the tunnel if it's running)
@@ -59,7 +66,7 @@ chrome-profiles                    # the profiles of every node (chrome-profiles
 `proxy-nodes` output looks like this:
 
 ```
-=== Proxy nodes (catalogue: ~/.claude-proxy.nodes.json, from dns:example.com, updated 2026-09-16) ===
+=== Proxy nodes (catalogue: ~/.claude-proxy.nodes.json, from ssh:jpvpn, updated 2026-09-17) ===
 
   * jp    jpvpn    Japan       jpvpn.example.com              ACTIVE - cc/cx tunnel UP (127.0.0.1:8080 / :1080)
     jp2   jpvpn2   Japan       jpvpn2.example.com             Chrome tunnel UP (:1183)
@@ -93,7 +100,8 @@ and `chrome-profiles` like this:
 | macOS / Linux key | Windows key | Default | Meaning |
 |---|---|---|---|
 | `CLAUDE_SSH_HOST` | `SSH_HOST` | `jpvpn` | the active node's alias — what `proxy-node` changes |
-| `CLAUDE_PROXY_DOMAIN` | `PROXY_DOMAIN` | *(empty)* | take the catalogue from this domain's DNS instead of this guide — what `proxy-nodes --domain` sets |
+| `CLAUDE_NODES_FROM` | `NODES_FROM` | *(empty)* | the VM (ssh alias) that serves the node list over SSH — what `proxy-nodes --from` sets |
+| `CLAUDE_PROXY_DOMAIN` | `PROXY_DOMAIN` | *(empty)* | take the list from this domain's public DNS instead — what `proxy-nodes --domain` sets |
 | `CLAUDE_NODE_SOCKS_BASE` | `NODE_SOCKS_BASE` | `1180` | first port for per-node Chrome tunnels (a node uses base + its slot). Change it if something else lives on `1180`–`1199` |
 | `CLAUDE_CHROME_BIN` | `CHROME_EXE` | *(auto)* | only if Chrome isn't in the usual place (Windows also checks `%LOCALAPPDATA%`) |
 | `CLAUDE_PROXY_NODES` *(env only)* | — | `~/.claude-proxy.nodes.json` | where the catalogue is cached |
@@ -122,9 +130,37 @@ To move **Claude/Codex** to another VM without the profile, just open the [manua
 
 ---
 
-## 🛠 For admins — nodes from your domain (DNS)
+## 🛠 For admins — the private list over SSH (recommended)
 
-Publishing the node list in **your own DNS** means: no IPs in this public repo, one place (your DNS provider, e.g. Cloudflare) to add, move or remove VMs, and users only ever type your domain.
+The list lives in a file on one or more of your VMs and is handed out by a tiny command, `claude-proxy-nodes`, to anyone who can log in — nothing is published anywhere. Everything below is [forge `proxynodes-manager`](https://github.com/crayonluffy/forge/tree/main/proxynodes-manager):
+
+```bash
+# on the VM that keeps the list (any VM - you can have several)
+git clone https://github.com/crayonluffy/forge.git && cd forge
+sudo ./proxynodes-manager/install.sh --sshd      # --sshd: tunnel-only accounts may run claude-proxy-nodes (and nothing else)
+sudo proxynodes-add jp --self --region Japan     # this VM: address, host key, ports filled in automatically
+sudo proxynodes-add jp2 --host jpvpn2.example.com --region Japan --hostkey 'ssh-ed25519 AAAA...'
+sudo proxynodes-remove jp3                       # take a VM out (its slot is never reused)
+proxynodes-list
+
+# on a NEW VM: print the line to paste on the VM that keeps the list
+proxynodes-self --name jp2 --region Japan
+
+# a second VM should serve the list too (or the first one is going away) - from your laptop:
+ssh jpvpn claude-proxy-nodes | ssh sgvpn sudo proxynodes-import -y
+```
+
+Users then run `proxy-nodes --from jpvpn` (or `--from sgvpn`) once; the setup wizard does it for them.
+
+- **Tunnel-only accounts** (`sshu-add --tunnel-only`) have no shell. `install.sh --sshd` changes their `ForceCommand` to `proxynodes-shell`, which answers `claude-proxy-nodes` and refuses everything else; their `ssh -N` tunnels are unaffected.
+- **Changing IPs:** put DNS names in the list (`--host jpvpn2.example.com`) and let [forge `proxydns-manager`](https://github.com/crayonluffy/forge/tree/main/proxydns-manager) keep each VM's **A record** current with `PUBLISH_TXT=0` — it then publishes no node list at all. (An IP works as `--host` too; you then update the list when it changes.)
+- The host key is a *public* key: it lets new laptops pin the right VM so their first connection doesn't ask *"Are you sure…"*. It's optional.
+
+---
+
+## 🛠 For admins — nodes from your domain (public DNS)
+
+Only if a **public** list is fine for you: publishing it in **your own DNS** means one place (your DNS provider, e.g. Cloudflare) to add, move or remove VMs, and users only ever type your domain. Everything in it is readable by anyone who knows the name.
 
 **1. Give every VM a DNS name** — `A` records, one per VM. The profile's default name is `<alias>.<domain>`:
 

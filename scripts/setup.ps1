@@ -3,7 +3,8 @@
 # ============================================================
 # Run with:
 #   irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
-# If your company publishes its proxy nodes in DNS, name its domain first:
+# The node list (jp / jp2 / sg ...) is then fetched privately from your VM over SSH.
+# Only if your company publishes its nodes in PUBLIC DNS instead, name its domain first:
 #   $env:CLAUDE_PROXY_DOMAIN = 'example.com'; irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 #
 # First run: prompts for your VM details, installs and locks your SSH key,
@@ -87,18 +88,11 @@ function Get-DomainNodes($domain) {
     try { return @(($json | ConvertFrom-Json).nodes) } catch { return @() }
 }
 
-# Ask for / check the company domain. Returns @{ Domain; Node } - Node is the
-# node the user picked as their main one (only when $pick is set).
+# Check the public-DNS domain ($env:CLAUDE_PROXY_DOMAIN, or the one saved before -
+# never asked: the default is the private list from your VM). Returns
+# @{ Domain; Node } - Node is the node the user picked as their main one (only when $pick is set).
 function Select-Domain($current, [bool]$pick, $alias) {
-    $d = $domainArg
-    if (-not $d) {
-        Write-Host ""
-        Write-Host "Does your company publish its proxy nodes in DNS? Then enter its domain (e.g. example.com)."
-        $hint = if ($current) { "Enter = $current, '-' = none" } else { 'Enter = none' }
-        $d = (Read-Host "Company domain ($hint)").Trim()
-        if (-not $d) { $d = $current }
-        if ($d -eq '-') { $d = '' }
-    }
+    $d = if ($domainArg) { $domainArg } else { $current }
     $r = @{ Domain = $d; Node = $null }
     if (-not $d) { return $r }
     $nodes = Get-DomainNodes $d
@@ -171,8 +165,8 @@ if ($found) {
 
 if ($quick) {
     $Alias = $dAlias; $SshPort = $dSshPort; $ProxyPort = $dProxyPort
-    # Keep the saved domain; only ask when there is none yet.
-    if ($domainArg -or -not $dDomain) { $Domain = (Select-Domain $dDomain $false $dAlias).Domain }
+    # Keep the saved domain unless $env:CLAUDE_PROXY_DOMAIN gives a new one.
+    if ($domainArg) { $Domain = (Select-Domain $dDomain $false $dAlias).Domain }
     else { $Domain = $dDomain }
 } else {
 
@@ -260,6 +254,7 @@ $existingConf['SSH_HOST']          = $Alias
 $existingConf['SSH_PORT']          = [int]$SshPort
 $existingConf['REMOTE_PROXY_PORT'] = [int]$ProxyPort
 $existingConf['PROXY_DOMAIN']      = "$Domain"
+if ($Domain) { $existingConf['NODES_FROM'] = '' }      # one node-list source at a time
 $confLines = @(
     '@{',
     '    # ~\.claude-proxy.conf.psd1 - YOUR settings for the cc/cx profile.',
@@ -343,12 +338,21 @@ if ($profileInstalled) {
         $shortcutOk = proxy-shortcut
     }
 
-    # Node catalogue (jp / sg / us ...) + ssh aliases for the other nodes. Best
-    # effort, done by the profile itself (from DNS when a domain is set, else from
-    # this guide's nodes.json); 'proxy-nodes -Refresh' repeats it any time.
+    # Node list (jp / jp2 / sg ...) + ssh aliases for the other nodes. Best effort,
+    # done by the profile itself. First choice: privately from the VM just set up
+    # (over SSH); if it doesn't serve a list (yet), this guide's (empty) list.
+    # A saved source (-From / -Domain) is simply refreshed.
     Write-Host ""
     try {
-        & { $ErrorActionPreference = 'Continue'; proxy-nodes -Refresh }
+        & {
+            $ErrorActionPreference = 'Continue'
+            if (-not $script:PROXY_DOMAIN -and -not $script:NODES_FROM) {
+                proxy-nodes -From $Alias
+                if ($script:NODES_FROM) { return }
+                Write-Host "[Info] $Alias doesn't serve a node list (yet) - fine for now. Once your admin sets it up: proxy-nodes -From $Alias" -ForegroundColor DarkGray
+            }
+            proxy-nodes -Refresh
+        }
     } catch {
         Write-Host "[Info] Node catalogue not loaded (optional) - later: proxy-nodes -Refresh" -ForegroundColor DarkGray
     }
