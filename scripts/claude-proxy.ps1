@@ -28,7 +28,7 @@
 # profile that goes out through the same node.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.2.0'
+$script:PROFILE_VERSION = '2.2.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -245,6 +245,7 @@ function Get-DnsTxt { param([string]$Fqdn)
         } catch {}
     }
     if ($out.Count -eq 0) {
+        $ProgressPreference = 'SilentlyContinue'   # see _fetch-file
         foreach ($u in 'https://cloudflare-dns.com/dns-query', 'https://dns.google/resolve') {
             try {
                 $r = Invoke-RestMethod -UseBasicParsing -Uri "$($u)?name=$Fqdn&type=TXT" -Headers @{ accept = 'application/dns-json' } -TimeoutSec 6
@@ -1140,7 +1141,14 @@ function proxy-config {
 # Self-update: fetch the latest profile, keep ~\.claude-proxy.conf.psd1
 # ============================================================
 
-function _fetch-file { param($Uri, $OutFile) Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile }
+# No progress bar: Windows PowerShell 5.1 draws it in the console, and in some
+# windows (very short ones, some terminal panes) drawing it throws - which kills
+# the download AND leaves Write-Host failing afterwards. Also much faster.
+# ($ProgressPreference set here is local to this function.)
+function _fetch-file { param($Uri, $OutFile)
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile
+}
 
 function proxy-update {
     param([switch]$Check, [switch]$Force)
@@ -1163,7 +1171,8 @@ function proxy-update {
         return
     }
     $newver  = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
-    $current = if (Test-Path $PROFILE) { Get-Content $PROFILE -Raw } else { '' }
+    # Compare with the installed profile ($PROFILE itself only holds the one-line loader).
+    $current = if (Test-Path $script:PROFILE_PATH) { Get-Content $script:PROFILE_PATH -Raw } else { '' }
     if (-not $Force -and $current -eq $raw) {
         Remove-Item $tmp -Force
         Write-Host "[OK] Already up to date (v$($script:PROFILE_VERSION))" -ForegroundColor Green

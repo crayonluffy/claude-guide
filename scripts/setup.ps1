@@ -65,7 +65,8 @@ $tmpProfile = Join-Path $env:TEMP 'claude-proxy.ps1'
 $profileErr = $null
 $raw = ''
 try {
-    Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile
+    # No progress bar: Windows PowerShell 5.1 can crash drawing it in some console windows.
+    & { $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile }
     $raw  = Get-Content $tmpProfile -Raw
     $errs = $null
     [System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
