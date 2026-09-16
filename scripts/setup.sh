@@ -417,16 +417,25 @@ else
     echo "       Try once manually:  ssh $ALIAS"
 fi
 
-# --- 9. Next steps ----------------------------------------------------------
-# Non-blocking: the proxy works without these CLIs, so only hint, never abort.
-command -v claude >/dev/null 2>&1 || \
-    echo "[Info] Claude Code CLI not installed - 'cc' needs it:  npm install -g @anthropic-ai/claude-code"
-command -v codex  >/dev/null 2>&1 || \
-    echo "[Info] Codex CLI not installed (optional) - to use 'cx':  npm install -g @openai/codex"
+# --- 9. Node.js / Claude Code / Codex -----------------------------------------
+# Done by the profile's cc-install (asks before changing anything; downloads go
+# through the proxy). --update only reports what's missing or old.
+if [ "$PROFILE_OK" = 1 ]; then
+    echo ""
+    if [ $UPDATE_ONLY -eq 1 ]; then
+        ( set +u; _CLAUDE_PROXY_QUIET=1; . "$PROFILE_DEST"; cc-install --check ) || true
+    elif confirm "Check / install Node.js, Claude Code and Codex now (through the proxy)?" Y; then
+        ( set +u; _CLAUDE_PROXY_QUIET=1; . "$PROFILE_DEST"; cc-install ) || true
+    else
+        echo "[Info] Skipped - run 'cc-install' any time to do it."
+    fi
+fi
+
+# --- 10. Next steps ---------------------------------------------------------
 echo ""
 echo "Done! Reload your shell, then launch Claude (or Codex with 'cx'):"
 echo "    source ${RC:-~/.zshrc}"
 echo "    cc"
 echo ""
-echo "Later: 'proxy-update' fetches the newest profile (settings kept), 'proxy-config' shows/edits them."
+echo "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)."
 echo ""

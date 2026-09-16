@@ -2,6 +2,8 @@
 
 Claude Code is Anthropic's coding agent that runs in your terminal. Installing it takes two steps: **Node.js** first, then the **CLI itself**. Follow your OS section top to bottom — every step ends with a check so you know it worked.
 
+> **🟢 Easiest: you probably don't need this page.** The [installer on the Home page](https://claude-guide.vercel.app/) installs Node.js, Claude Code and Codex for you at the end. Already set up? Just type **`cc-install`** — it checks all three and installs or updates what's missing or old (it asks first). This page is the manual way.
+>
 > **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, signing in (Step 3) only works through the proxy — and if `npm install` times out for you, it needs the proxy too. This page assumes `cc` / `proxy-up` already exist.
 >
 > Already have `claude` working? Skip ahead to **[Install Codex](install-codex.md)**.
@@ -29,7 +31,7 @@ node --version
 npm --version
 ```
 
-You should see version numbers like `v22.x.x` — not an error.
+You should see version numbers like `v22.x.x` or newer (Claude Code needs **Node.js 22+**) — not an error.
 
 ### 🍎 macOS
 

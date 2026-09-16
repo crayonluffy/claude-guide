@@ -50,6 +50,17 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 
 ---
 
+## 🧰 Node.js / Claude Code / Codex (`cc-install`)
+
+| What you see | Fix |
+|---|---|
+| `Node.js vXX is too old (Claude Code needs 22 or newer)` | Answer **Y** — `cc-install` installs the current LTS (Windows: winget or the official installer; macOS: Homebrew or the official installer; Linux: nvm or NodeSource). |
+| `'node' is still vXX in this window` / `isn't found in this window yet` | The new program is installed, but this window started before it. Open a **new** window and run `cc-install` again. |
+| `Global npm packages go to /usr, which needs sudo` (Linux) | Answer **Y** — npm's recommended fix: packages go to `~/.npm-global` (added to your PATH). |
+| `… wasn't installed with npm - update it with: claude update` | Claude/Codex came from another installer (native installer, Homebrew). Use the command shown, so you don't end up with two copies. |
+| `the npm registry can't be reached` | The proxy isn't up: `proxy-doctor`, then `cc-install` again. |
+| `npm install failed` | Read npm's error above it. Network errors → `proxy-doctor`; permission errors on Linux → accept the `~/.npm-global` offer. |
+
 ## 🌏 Nodes (JP / SG / US)
 
 | Symptom | Fix |

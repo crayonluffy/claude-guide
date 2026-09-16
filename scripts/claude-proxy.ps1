@@ -32,7 +32,7 @@
 # read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.3.2'
+$script:PROFILE_VERSION = '2.4.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -1597,6 +1597,225 @@ function chrome-profiles {
 }
 
 # ============================================================
+# cc-install - check / install / update Node.js, Claude Code and Codex
+# ============================================================
+# Downloads go through the proxy (it's started first), so this works on a
+# blocked network too. Nothing is changed without asking (unless -y).
+
+$script:TOOLS_MIN_NODE_FALLBACK = 22   # used when the npm registry can't be asked
+
+# Path of a program ('' if missing). npm / claude / codex are .cmd shims on
+# Windows - calling those avoids execution-policy trouble with their .ps1 twins.
+function _tool-exe { param([string]$Name)
+    foreach ($n in @("$Name.cmd", "$Name.exe", $Name)) {
+        $c = Get-Command $n -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c) { return $c.Source }
+    }
+    return ''
+}
+
+# Run a program. Default: return its stdout as text. -Show: let it print (installs).
+# $global:LASTEXITCODE is set either way (127 when the program is missing).
+function _tool-run { param([string]$Name, [string[]]$ArgList, [switch]$Show)
+    $exe = _tool-exe $Name
+    if (-not $exe) { $global:LASTEXITCODE = 127; return '' }
+    if ($Show) { & $exe @ArgList | Out-Host; return '' }
+    return ((& $exe @ArgList 2>$null) | Out-String).Trim()
+}
+
+# Web request through the proxy when it's up (Windows PowerShell ignores HTTPS_PROXY).
+function _tools-web { param([string]$Uri, [string]$OutFile)
+    $ProgressPreference = 'SilentlyContinue'   # see _fetch-file
+    $p = @{ UseBasicParsing = $true; Uri = $Uri; TimeoutSec = 20; ErrorAction = 'Stop' }
+    if ($env:HTTPS_PROXY) { $p.Proxy = $env:HTTPS_PROXY }
+    if ($OutFile) { $p.OutFile = $OutFile; $p.TimeoutSec = 900 }
+    Invoke-WebRequest @p
+}
+
+function _tools-ask { param([string]$Question)
+    if ($script:TOOLS_CHECK) { return $false }
+    if ($script:TOOLS_YES) { return $true }
+    $r = "$(Read-Host "$Question [Y/n]")".Trim()
+    return (-not $r -or $r -match '^(y|yes)$')
+}
+function _tools-skip { param([string]$Why) if (-not $script:TOOLS_CHECK) { Write-Host "      Skipped$(if ($Why) { " - $Why" })" -ForegroundColor DarkGray } }
+
+function _tools-semver { param([string]$Text) if ("$Text" -match '(\d+\.\d+\.\d+)') { return $Matches[1] } return '' }
+function _tools-older { param([string]$A, [string]$B)   # true when version A < B
+    if (-not $A -or -not $B) { return $false }
+    try { return ([version]$A -lt [version]$B) } catch { return $false }
+}
+
+# Add PATH entries that installers just wrote (Machine / User) to this window.
+function _tools-refresh-path {
+    $parts = @($env:Path -split ';') +
+             @([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') +
+             @([Environment]::GetEnvironmentVariable('Path', 'User') -split ';')
+    $env:Path = (@($parts | Where-Object { $_ } | Select-Object -Unique)) -join ';'
+}
+
+# The Node.js major version Claude Code (and Codex) need, from their npm metadata.
+function _tools-min-node {
+    $best = 0
+    foreach ($pkg in '@anthropic-ai/claude-code', '@openai/codex') {
+        try {
+            $j = (_tools-web "https://registry.npmjs.org/$pkg/latest").Content | ConvertFrom-Json
+            if ("$($j.engines.node)" -match '(\d+)' -and [int]$Matches[1] -gt $best) { $best = [int]$Matches[1] }
+        } catch {}
+    }
+    if ($best -le 0) { $best = $script:TOOLS_MIN_NODE_FALLBACK }
+    return $best
+}
+
+# Newest Node.js LTS, e.g. v24.8.0 ('' if nodejs.org can't be reached).
+function _tools-node-lts {
+    try {
+        # (parentheses: Windows PowerShell 5.1 pipes a JSON array as ONE object otherwise)
+        $releases = ((_tools-web 'https://nodejs.org/dist/index.json').Content | ConvertFrom-Json)
+        foreach ($r in $releases) { if ($r.lts) { return "$($r.version)" } }
+    } catch {}
+    return ''
+}
+
+function _tools-node-major {
+    $v = _tool-run node @('--version')
+    if ($v -match '^v?(\d+)') { return @{ Version = $v; Major = [int]$Matches[1] } }
+    return @{ Version = ''; Major = 0 }
+}
+
+# Install / upgrade Node.js to the current LTS: winget first, the official MSI otherwise.
+function _tools-install-node { param([int]$Min)
+    if (_tool-exe winget) {
+        Write-Host "[Tools] winget: Node.js LTS (Windows may ask for permission)..." -ForegroundColor Cyan
+        $common = @('--id', 'OpenJS.NodeJS.LTS', '-e', '--accept-source-agreements', '--accept-package-agreements', '--silent')
+        $null = _tool-run winget (@('install') + $common) -Show
+        if ($LASTEXITCODE -ne 0) { $null = _tool-run winget (@('upgrade') + $common) -Show }
+        _tools-refresh-path
+        if ((_tools-node-major).Major -ge $Min) { return $true }
+        Write-Host "[Warn] winget didn't get Node.js $Min+ in place - trying the official installer instead." -ForegroundColor Yellow
+    }
+    $ver = _tools-node-lts
+    if (-not $ver) { Write-Host "[Err] Can't reach nodejs.org to find the LTS version." -ForegroundColor Red; return $false }
+    $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+    $msi = Join-Path ([System.IO.Path]::GetTempPath()) "node-$ver-$arch.msi"
+    Write-Host "[Tools] Downloading the official Node.js $ver installer..." -ForegroundColor Cyan
+    try { _tools-web "https://nodejs.org/dist/$ver/node-$ver-$arch.msi" $msi | Out-Null }
+    catch { Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red; return $false }
+    Write-Host "[Tools] Running it (Windows will ask for permission)..." -ForegroundColor Cyan
+    try {
+        $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/passive', '/norestart') -Verb RunAs -Wait -PassThru -ErrorAction Stop
+    } catch {
+        Write-Host "[Err] The installer didn't run: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    } finally {
+        Remove-Item $msi -Force -ErrorAction SilentlyContinue
+    }
+    _tools-refresh-path
+    return ($p.ExitCode -in 0, 3010)
+}
+
+function _tools-node { param([int]$Min)
+    $n = _tools-node-major
+    if ($n.Major -ge $Min) { Write-Host "[OK]  Node.js $($n.Version) (needs $Min or newer)" -ForegroundColor Green; return $true }
+    if (-not $n.Version) {
+        Write-Host "[..]  Node.js is not installed (Claude Code needs version $Min or newer)"
+        if (-not (_tools-ask "Install Node.js LTS now?")) { _tools-skip "Claude Code and Codex can't be installed without it."; return $false }
+    } else {
+        Write-Host "[..]  Node.js $($n.Version) is too old (Claude Code needs $Min or newer)"
+        if (-not (_tools-ask "Upgrade Node.js to the current LTS now?")) { _tools-skip; return $false }
+    }
+    if (-not (_tools-install-node $Min)) { Write-Host "[Err] Node.js installation failed (see above)." -ForegroundColor Red; return $false }
+    $n = _tools-node-major
+    if ($n.Major -ge $Min) { Write-Host "[OK]  Node.js $($n.Version) installed" -ForegroundColor Green; return $true }
+    Write-Host "[Err] 'node' is still $(if ($n.Version) { $n.Version } else { 'missing' }) in this window - open a new PowerShell window and run cc-install again." -ForegroundColor Red
+    return $false
+}
+
+function _tools-pkg { param([string]$Label, [string]$Bin, [string]$Pkg, [string]$Hint, [string]$Via)
+    $latest = _tool-run npm @('view', $Pkg, 'version')
+    if ($LASTEXITCODE -ne 0) { $latest = '' }
+    $latest = _tools-semver $latest
+    if (_tool-exe $Bin) {
+        $cur = _tools-semver (_tool-run $Bin @('--version'))
+        if (-not $latest) {
+            Write-Host "[OK]  $Label $(if ($cur) { $cur } else { '(version unknown)' }) installed (npm registry not reachable - can't check for updates)" -ForegroundColor Green
+            return $true
+        }
+        if (-not (_tools-older $cur $latest)) {
+            Write-Host "[OK]  $Label $(if ($cur) { $cur } else { '?' }) (latest: $latest)" -ForegroundColor Green
+            return $true
+        }
+        $null = _tool-run npm @('ls', '-g', $Pkg, '--depth=0')
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[..]  $Label $cur is older than $latest, but wasn't installed with npm - update it with: $Hint"
+            return $true
+        }
+        if (-not (_tools-ask "Update $Label $cur -> $($latest)?")) { _tools-skip; return $true }
+    } else {
+        if (-not $latest) {
+            Write-Host "[Err] $Label is not installed and the npm registry can't be reached (is the proxy up? try 'proxy-up')." -ForegroundColor Red
+            return $false
+        }
+        Write-Host "[..]  $Label is not installed (latest: $latest)"
+        if (-not (_tools-ask "Install $Label now?")) { _tools-skip; return $true }
+    }
+    Write-Host "[Tools] npm install -g $Pkg@latest" -ForegroundColor Cyan
+    $null = _tool-run npm @('install', '-g', "$Pkg@latest") -Show
+    if ($LASTEXITCODE -ne 0) { Write-Host "[Err] npm install failed (see above)." -ForegroundColor Red; return $false }
+    _tools-refresh-path
+    $cur = _tools-semver (_tool-run $Bin @('--version'))
+    if ($cur) { Write-Host "[OK]  $Label $cur ready - run it through the proxy with '$Via'" -ForegroundColor Green }
+    else { Write-Host "[Warn] $Label installed, but '$Bin' isn't found in this window yet - open a new PowerShell window." -ForegroundColor Yellow }
+    return $true
+}
+
+function cc-install {
+    # cc-install [node] [claude] [codex] [-Check] [-y] [-NoProxy]  (bash spellings work too)
+    $script:TOOLS_YES = $false; $script:TOOLS_CHECK = $false
+    $useProxy = $true; $want = @()
+    foreach ($a in $args) {
+        switch -Regex ("$a") {
+            '^-{1,2}(y|yes)$'        { $script:TOOLS_YES = $true }
+            '^-{1,2}(n|check)$'      { $script:TOOLS_CHECK = $true }
+            '^-{1,2}no-?proxy$'      { $useProxy = $false }
+            '^(node|claude|codex)$'  { $want += "$a".ToLower() }
+            '^-{1,2}(h|help)$'       {
+                Write-Host "usage: cc-install [node] [claude] [codex] [-Check] [-y] [-NoProxy]"
+                Write-Host "  checks Node.js, Claude Code and Codex; installs / updates what's missing or old (asks first)"
+                return
+            }
+            default { Write-Host "[Err] Unknown argument '$a' - see: cc-install -Help" -ForegroundColor Red; return }
+        }
+    }
+    if (-not $want) { $want = @('node', 'claude', 'codex') }
+
+    Write-Host ""
+    Write-Host "=== Node.js / Claude Code / Codex$(if ($script:TOOLS_CHECK) { ' (check only)' }) ===" -ForegroundColor Cyan
+    if ($useProxy -and -not $env:HTTPS_PROXY) {
+        Write-Host "[Tools] Starting the proxy first, so downloads go through your VM..." -ForegroundColor Cyan
+        $up = $false
+        try { $up = [bool](proxy-up -NoVerify 6>$null | Select-Object -Last 1) } catch {}
+        if ($up) { Write-Host "[OK]  Proxy is up" -ForegroundColor Green }
+        else { Write-Host "[Warn] Proxy didn't start - trying the internet directly ('proxy-doctor' explains why)" -ForegroundColor Yellow }
+    }
+    $min = _tools-min-node
+    $nodeOk = $true
+    if ($want -contains 'node') { $nodeOk = _tools-node $min }
+    if ($nodeOk -and -not (_tool-exe npm)) {
+        Write-Host "[Err] npm is missing - it comes with Node.js; reinstall Node.js (cc-install node)." -ForegroundColor Red
+        $nodeOk = $false
+    }
+    if ($nodeOk) {
+        if ($want -contains 'claude') { $null = _tools-pkg 'Claude Code' 'claude' '@anthropic-ai/claude-code' 'claude update' 'cc' }
+        if ($want -contains 'codex')  { $null = _tools-pkg 'Codex' 'codex' '@openai/codex' 'your package manager' 'cx' }
+    } elseif ($want -contains 'claude' -or $want -contains 'codex') {
+        Write-Host "[..]  Claude Code / Codex skipped - they need Node.js $min or newer first."
+    }
+    Write-Host ""
+    if ($script:TOOLS_CHECK) { Write-Host "Check only - nothing was changed. Run 'cc-install' to install / update." -ForegroundColor DarkGray }
+}
+
+# ============================================================
 # Help / command list
 # ============================================================
 
@@ -1613,6 +1832,7 @@ function cc-help {
     Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
+    Write-Host "  cc-install      - Check / install / update Node.js, Claude Code and Codex (-Check: report only)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- nodes (jp / sg / us ...) --" -ForegroundColor DarkGray
     Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray

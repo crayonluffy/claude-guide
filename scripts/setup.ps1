@@ -375,16 +375,22 @@ if ($sshOk) {
     Write-Host "       Try once manually:  ssh $Alias" -ForegroundColor Yellow
 }
 
-# --- 8. Next steps -----------------------------------------------------------
+# --- 8. Node.js / Claude Code / Codex ------------------------------------------
+# Done by the profile's cc-install (asks before changing anything; downloads go
+# through the proxy).
+if ($profileInstalled) {
+    Write-Host ""
+    if (Confirm-Yes "Check / install Node.js, Claude Code and Codex now (through the proxy)?") {
+        try { & { $ErrorActionPreference = 'Continue'; cc-install } }
+        catch { Write-Host "[Warn] cc-install stopped: $($_.Exception.Message) - run 'cc-install' again later." -ForegroundColor Yellow }
+    } else {
+        Write-Host "[Info] Skipped - run 'cc-install' any time to do it." -ForegroundColor DarkGray
+    }
+}
+
+# --- 9. Next steps -----------------------------------------------------------
 if (-not $profileInstalled) {
     Write-Host "[Warn] Profile NOT installed (see the [FAIL] above) - 'cc'/'cx' won't exist until you finish that step." -ForegroundColor Yellow
-}
-# Non-blocking: the proxy works without these CLIs, so only hint, never abort.
-if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
-    Write-Host "[Info] Claude Code CLI not installed - 'cc' needs it:  npm install -g @anthropic-ai/claude-code" -ForegroundColor Yellow
-}
-if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
-    Write-Host "[Info] Codex CLI not installed (optional) - to use 'cx':  npm install -g @openai/codex" -ForegroundColor Yellow
 }
 Write-Host ""
 Write-Host "Done! The profile is loaded in this window - just run:" -ForegroundColor Cyan
@@ -396,4 +402,4 @@ if ($needShortcut -and $shortcutOk) {
 } else {
     Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
 }
-Write-Host "Later: 'proxy-update' fetches the newest profile (settings kept), 'proxy-config' shows/edits them." -ForegroundColor DarkGray
+Write-Host "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)." -ForegroundColor DarkGray

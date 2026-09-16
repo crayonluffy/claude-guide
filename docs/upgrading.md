@@ -2,6 +2,8 @@
 
 ## Getting the newest profile (any time)
 
+> **New in v2.4 — `cc-install`.** One command checks **Node.js**, **Claude Code** and **Codex** and installs or updates what's missing or too old (through the proxy). The setup wizard now ends with it. Update the tools any time with `cc-install`; update this setup with `proxy-update`.
+>
 > **New in v2.3 — a private node list.** `proxy-nodes --from <your VM alias>` (`-From` on Windows) fetches the list over SSH from a VM you choose — nothing public. Your admin sets it up with forge `proxynodes-manager`. On Windows, `proxy-update` now also loads the new version into the open window. Details: **[Nodes](proxy-nodes.md)**.
 >
 > **New in v2.2 — nodes from your domain, several VMs per region, Chrome profiles.** After `proxy-update`: `proxy-nodes --domain example.com` (`-Domain` on Windows) if your company publishes its nodes in DNS; `chrome-proxy jp --profile work` opens another Chrome profile through `jp`; `jp2`, `jp3` … are extra VMs in the same region. Nothing to change if you use none of it. Details: **[Nodes](proxy-nodes.md)**.

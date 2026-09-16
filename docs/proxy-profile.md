@@ -16,7 +16,7 @@ Your server details live in a small **settings file** (`~/.claude-proxy.conf` on
 2. The VM's **IP/hostname** and your **SSH username**.
 3. The VM running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager) (tinyproxy on `:8888`) — your admin's job.
 
-You do **not** need Claude Code or Codex installed yet — do the proxy first. On a blocked network their sign-in (and sometimes `npm install`) only works *through* this proxy, so [install them](install-claude.md) as the next step once `cc`/`cx` exist.
+You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's last step (`cc-install`) installs them **through** the proxy, which matters on a blocked network. (Prefer doing it by hand? [Install Claude Code](install-claude.md).)
 
 ---
 
@@ -33,6 +33,7 @@ You do **not** need Claude Code or Codex installed yet — do the proxy first. O
 | `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly |
 | `proxy-status` | Show what's running + your current external IP |
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
+| `cc-install` | Check **Node.js**, **Claude Code** and **Codex**; install or update whatever is missing or too old (asks first; downloads go through the proxy). `cc-install --check` (`-Check`) only reports; `cc-install claude` does just that one; `-y` answers yes. The setup wizard runs it as its last step |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
 | `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
 | `proxy-config` | Show your settings; `proxy-config edit` opens the settings file, `proxy-config set SSH_HOST myvm` changes one value |
