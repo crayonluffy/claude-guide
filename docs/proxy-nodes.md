@@ -24,12 +24,7 @@ Nothing changes for people who only use one node: `cc`, `cx` and `chrome-proxy` 
 
 ## How it works
 
-```mermaid
-flowchart LR
-    cc([cc / cx / chrome-proxy]) -->|main tunnel :8080 + :1080| active([active node, e.g. jpvpn])
-    chj([chrome-proxy jp2 · profiles Default, work]) -->|own SOCKS tunnel :1183| jp2([jpvpn2 - 2nd JP VM])
-    chu([chrome-proxy us]) -->|own SOCKS tunnel :1182| us([usvpn])
-```
+![How nodes work: cc, cx and a plain chrome-proxy share the main tunnel (-L 8080 + -D 1080) to the active node jpvpn; chrome-proxy jp2 opens its own SOCKS tunnel on :1183 to jpvpn2, a second VM in Japan, and its Chrome profiles Default and work share that tunnel; chrome-proxy us opens :1182 to usvpn. The node list comes from DNS TXT _claude-proxy.example.com or the guide nodes.json.](assets/nodes-flow.svg)
 
 - A **node** is one VM, reached through an `~/.ssh/config` alias (`jpvpn`, `jpvpn2`, `sgvpn`, …) — the same kind the setup wizard created for your first server. All of them reuse the **same SSH key and username**; `proxy-nodes --refresh` copies `IdentityFile` and `User` from your existing alias when it writes the new ones.
 - **Several VMs in one region** are simply several nodes: `jp`, `jp2`, `jp3` (aliases `jpvpn`, `jpvpn2`, `jpvpn3`), each with its own IP. `proxy-nodes` lists them grouped by region.

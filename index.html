@@ -6,32 +6,270 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
   <meta name="description" content="Step-by-step guide to installing Claude Code & Codex and running them via a VM proxy">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
-  
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f8fafc" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0b1120" media="(prefers-color-scheme: dark)">
+
   <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
-  
+
   <style>
-    /* Custom tweaks for Light Theme */
+    /* ============================================================
+       Theme: same palette as the diagrams (docs/assets/*.svg) -
+       slate greys + green / blue / amber accents, light AND dark.
+       ============================================================ */
     :root {
-      --theme-color: #42b983; /* Vue Green */
+      --theme-color: #42b983;
+      --accent: #2f9e6e;            /* links: a bit darker than the brand green for contrast */
+      --accent-soft: rgba(66, 185, 131, .12);
+      --blue: #2563eb;
+      --amber: #b45309;
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-2: #f1f5f9;
+      --border: #e2e8f0;
+      --border-strong: #cbd5e1;
+      --text: #1f2937;
+      --text-strong: #0f172a;
+      --muted: #64748b;
+      --code-bg: #f1f5f9;
+      --code-text: #b45309;
+      --pre-bg: #0f172a;
+      --pre-text: #e2e8f0;
+      --shadow: 0 1px 2px rgba(15, 23, 42, .04), 0 4px 16px rgba(15, 23, 42, .06);
+      --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     }
-    /* Make code blocks look sharper */
-    .markdown-section pre > code {
-      font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
-      font-size: 0.9rem;
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --theme-color: #4ade80;
+        --accent: #4ade80;
+        --accent-soft: rgba(74, 222, 128, .12);
+        --blue: #60a5fa;
+        --amber: #fbbf24;
+        --bg: #0b1120;
+        --surface: #111827;
+        --surface-2: #1e293b;
+        --border: #1f2a3c;
+        --border-strong: #334155;
+        --text: #d1d5db;
+        --text-strong: #f3f4f6;
+        --muted: #94a3b8;
+        --code-bg: #1e293b;
+        --code-text: #fbbf24;
+        --pre-bg: #0f172a;
+        --pre-text: #e2e8f0;
+        --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 4px 16px rgba(0, 0, 0, .25);
+      }
     }
-    /* Copy Button Styling for Light Mode */
+
+    /* ---- base ---- */
+    html, body { background: var(--bg); }
+    body {
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+      -webkit-font-smoothing: antialiased;
+    }
+    ::selection { background: var(--accent-soft); }
+    .progress { background-color: var(--theme-color) !important; }
+
+    /* ---- sidebar ---- */
+    .sidebar {
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+      color: var(--text);
+    }
+    .sidebar > h1 { margin: 22px auto 14px; font-size: 1.15rem; font-weight: 700; letter-spacing: -.01em; }
+    .sidebar > h1 a { color: var(--text-strong); }
+    .sidebar ul li a { color: var(--muted); font-size: 14px; border-radius: 6px; }
+    .sidebar ul li a:hover { color: var(--text-strong); text-decoration: none; }
+    /* section headings in _sidebar.md are **bold** lines */
+    .sidebar li > p { margin: 0; }
+    .sidebar-nav > ul > li > p > strong,
+    .sidebar-nav > ul > li > strong { display: block; color: var(--text-strong); font-weight: 700; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin-top: 20px; }
+    .sidebar ul li.active > a {
+      color: var(--accent);
+      font-weight: 600;
+      border-right: 0;
+      background: var(--accent-soft);
+      padding-left: 8px;
+      margin-left: -8px;
+    }
+    .sidebar ul li a { padding: 2px 8px 2px 0; }
+    .app-sub-sidebar li:before { color: var(--border-strong); }
+    .sidebar::-webkit-scrollbar-thumb { background: var(--border-strong); }
+    .sidebar-toggle { background-color: transparent; }
+    body.close .sidebar-toggle { background-color: var(--surface); }
+    .sidebar-toggle span { background-color: var(--theme-color); }
+    @media screen and (min-width: 769px) {
+      .sidebar-toggle { background-color: var(--surface); border-top: 1px solid var(--border); }
+    }
+
+    /* ---- search (the plugin injects its own CSS later, so be more specific) ---- */
+    body .sidebar .search { border-bottom: 1px solid var(--border); padding: 12px 10px; }
+    body .sidebar .search input {
+      background: var(--surface-2);
+      color: var(--text-strong);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-family: var(--font);
+    }
+    body .sidebar .search input::placeholder { color: var(--muted); }
+    body .sidebar .search input:focus { border-color: var(--theme-color); box-shadow: 0 0 0 3px var(--accent-soft); }
+    body .sidebar .search .matching-post { border-bottom: 1px solid var(--border); }
+    body .sidebar .search .matching-post p, body .sidebar .search h2 { color: var(--text); }
+    body .sidebar .search .search-keyword { color: var(--accent); }
+    body .sidebar .search .clear-button svg circle { fill: var(--muted); }
+
+    /* ---- content ---- */
+    .markdown-section { max-width: 920px; padding: 36px 24px 60px; }
+    .markdown-section p, .markdown-section ul, .markdown-section ol { line-height: 1.7; }
+    .markdown-section h1, .markdown-section h2, .markdown-section h3,
+    .markdown-section h4, .markdown-section strong { color: var(--text-strong); }
+    .markdown-section h1 { font-size: 2.1rem; font-weight: 750; letter-spacing: -.02em; line-height: 1.25; margin-bottom: 1rem; }
+    .markdown-section h2 {
+      font-size: 1.5rem; font-weight: 700; letter-spacing: -.01em;
+      margin: 3rem 0 1rem; padding-bottom: .4rem; border-bottom: 1px solid var(--border);
+    }
+    .markdown-section h3 { font-size: 1.15rem; font-weight: 650; margin: 2rem 0 .6rem; }
+    .markdown-section h1 a, .markdown-section h2 a, .markdown-section h3 a, .markdown-section h4 a { color: inherit; }
+    .markdown-section a { color: var(--accent); font-weight: 500; text-decoration: none; border-bottom: 1px solid transparent; }
+    .markdown-section a:hover { border-bottom-color: currentColor; }
+    .markdown-section h1 a:hover, .markdown-section h2 a:hover, .markdown-section h3 a:hover { border-bottom: 0; }
+    .markdown-section em { color: var(--muted); }
+    .markdown-section hr { border-bottom: 1px solid var(--border); margin: 2.5em 0; }
+    .markdown-section img { border-radius: 14px; }
+
+    /* inline code */
+    .markdown-section code,
+    .markdown-section > :not(h1):not(h2):not(h3):not(h4):not(h5):not(h6) code {
+      background: var(--code-bg);
+      color: var(--code-text);
+      font-family: var(--mono);
+      font-size: .86em;
+      border-radius: 6px;
+      padding: .15em .4em;
+      margin: 0 1px;
+      white-space: normal;
+    }
+    .markdown-section h1 code, .markdown-section h2 code, .markdown-section h3 code { color: inherit; }
+
+    /* code blocks: dark "terminal" cards in both themes */
+    .markdown-section pre {
+      background: var(--pre-bg);
+      border: 1px solid var(--border-strong);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 0 1.1rem;
+      margin: 1.1em 0 1.4em;
+    }
+    /* doubled class: must beat the inline-code rule above (which also matches pre > code) */
+    .markdown-section.markdown-section pre > code {
+      background: transparent;
+      color: var(--pre-text);
+      font-family: var(--mono);
+      font-size: .84rem;
+      line-height: 1.65;
+      padding: 1.1em 0;
+      white-space: pre;
+      border-radius: 0;
+      margin: 0;
+    }
+    .markdown-section pre:after { color: #64748b; text-transform: uppercase; letter-spacing: .06em; padding-top: 8px; padding-right: 12px; }
+    .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #7c8aa0; font-style: italic; }
+    .token.punctuation { color: #94a3b8; }
+    .token.string, .token.attr-value { color: #86efac; }
+    .token.function, .token.keyword { color: #f9a8d4; }
+    .token.builtin, .token.class-name { color: #fcd34d; }
+    .token.variable, .token.placeholder { color: #7dd3fc; }
+    .token.number, .token.boolean { color: #fdba74; }
+    .token.operator, .token.parameter { color: #c4b5fd; }
+    .token.property, .token.tag, .token.attr-name { color: #93c5fd; }
+
+    /* copy button */
     .docsify-copy-code-button {
-      background: #f8f8f8;
-      color: #666;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      transition: all 0.2s;
+      background: rgba(148, 163, 184, .16) !important;
+      color: #e2e8f0 !important;
+      border: 1px solid rgba(148, 163, 184, .3) !important;
+      border-radius: 6px !important;
+      font-family: var(--font) !important;
+      font-size: .72rem !important;
+      transition: all .2s;
     }
     .docsify-copy-code-button:hover {
-      background: #42b983; /* Green on hover */
-      color: white;
-      border-color: #42b983;
+      background: var(--theme-color) !important;
+      border-color: var(--theme-color) !important;
+      color: #06281a !important;
     }
+    .docsify-copy-code-button .label { color: inherit; }
+
+    /* tables: rounded card */
+    .markdown-section table {
+      display: table;
+      width: 100%;
+      border-collapse: separate;
+      border-spacing: 0;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      font-size: .92em;
+      margin: 1.2em 0 1.8em;
+    }
+    .markdown-section th {
+      background: var(--surface-2);
+      color: var(--text-strong);
+      font-weight: 650;
+      text-align: left;
+    }
+    .markdown-section td, .markdown-section th {
+      border: 0;
+      border-bottom: 1px solid var(--border);
+      padding: 9px 14px;
+      vertical-align: top;
+    }
+    .markdown-section tr:last-child td { border-bottom: 0; }
+    .markdown-section tr { border: 0; }
+    .markdown-section tr:nth-child(2n) { background: transparent; }
+    .markdown-section tbody tr:hover { background: var(--accent-soft); }
+    @media screen and (max-width: 768px) {
+      .markdown-section table { display: block; overflow-x: auto; }
+    }
+
+    /* blockquotes: callout cards */
+    .markdown-section blockquote {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-left: 4px solid var(--theme-color);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      color: var(--text);
+      padding: .2em 1.1em;
+      margin: 1.4em 0;
+    }
+    .markdown-section blockquote p { color: var(--text); font-weight: 400; }
+    .markdown-section p.tip, .markdown-section p.warn {
+      background: var(--surface);
+      border-radius: 10px;
+      color: var(--text);
+    }
+
+    /* mermaid diagrams sit on a card too */
+    .markdown-section .mermaid {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 16px;
+      margin: 1.2em 0;
+      text-align: center;
+    }
+
+    /* anchors / misc */
+    .anchor span { color: var(--text-strong); }
+    kbd { background: var(--surface-2); border-color: var(--border-strong); color: var(--text-strong); }
+    div#app:empty:before, div#app { color: var(--muted); }
   </style>
 </head>
 <body>
@@ -98,15 +336,31 @@
       ]
     }
   </script>
-  
+
   <script src="//cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
-  <script>mermaid.initialize({ startOnLoad: false, theme: 'default' });</script>
+  <script>
+    // Match the site (and the SVG diagrams): dark mermaid theme when the OS is dark.
+    (function () {
+      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: dark ? 'dark' : 'default',
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+      });
+      // Switching the OS theme while the page is open: reload so mermaid redraws in the new palette.
+      if (window.matchMedia) {
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var onChange = function () { if (document.querySelector('.markdown-section .mermaid')) location.reload(); };
+        if (mq.addEventListener) mq.addEventListener('change', onChange); else if (mq.addListener) mq.addListener(onChange);
+      }
+    })();
+  </script>
 
   <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
-  
+
   <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
   <script src="//cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
-  
+
   <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
   <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-powershell.min.js"></script>
 </body>
