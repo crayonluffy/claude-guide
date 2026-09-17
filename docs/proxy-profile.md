@@ -30,7 +30,8 @@ You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's
 | `cx` | Proxy ON + launch **Codex** (approvals off). Extra arguments pass through too: `cx resume` |
 | `cx-safe` | Same, but keeps Codex's approval prompts |
 | `proxy-up` | Proxy ON (tunnel + env vars + verify), but don't launch anything |
-| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly |
+| `proxy-restart` | *(macOS / Linux / WSL)* Proxy stuck? Replaces the tunnel for **every** terminal window without touching env vars or `settings.json`, so Claude / Codex running in other tabs keep going |
+| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly. On macOS / Linux it refuses while Claude / Codex still run in other windows (they share the tunnel) — use `proxy-restart`, or `cc-stop --force` |
 | `proxy-status` | Show what's running + your current external IP |
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `cc-install` | Check **Node.js**, **Claude Code** and **Codex**; install or update whatever is missing or too old (asks first; downloads go through the proxy). `cc-install --check` (`-Check`) only reports; `cc-install claude` does just that one; `-y` answers yes. The setup wizard runs it as its last step |

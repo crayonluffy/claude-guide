@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.4.0"
+CLAUDE_PROXY_VERSION="2.5.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -98,6 +98,16 @@ CLAUDE_PROXY_BANNER=1
 # Where the background ssh writes its errors (auth failure vs. network timeout).
 CLAUDE_TUNNEL_LOG="/tmp/claude-tunnel.log"
 
+# v2.5: every terminal tab shares ONE tunnel, so one hung tunnel used to freeze
+# them all. A small background watchdog now owns the ssh process: it restarts
+# ssh the moment it exits, and also when the proxy stops answering for
+# WATCHDOG_FAILS checks in a row (ssh still alive but the link is dead - typical
+# after sleep or a Wi-Fi change). Every tab heals on its own; nobody needs
+# cc-stop. 0 = old behaviour (plain 'ssh -f', no auto-restart).
+CLAUDE_TUNNEL_WATCHDOG=1
+CLAUDE_WATCHDOG_INTERVAL=20      # seconds between health checks
+CLAUDE_WATCHDOG_FAILS=3          # failed checks in a row before the tunnel is restarted
+
 # --- personal overrides ------------------------------------------------------
 if [ -f "$CLAUDE_PROXY_CONF" ]; then
     . "$CLAUDE_PROXY_CONF"
@@ -105,10 +115,12 @@ fi
 export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
        CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT \
        CLAUDE_SYNC_SETTINGS CLAUDE_SETTINGS CLAUDE_NO_PROXY CLAUDE_PROXY_CONF \
-       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN CLAUDE_NODES_FROM
+       CLAUDE_PROXY_NODES CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_PROXY_DOMAIN CLAUDE_NODES_FROM \
+       CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS
+CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS"
 
 # ============================================================
 # Helpers
@@ -202,6 +214,129 @@ _tunnel_health() {
     else
         echo "foreign $pid ${name:-unknown}"
     fi
+}
+
+# Does the proxy on a local port actually answer? A listening port is not enough:
+# after sleep / a Wi-Fi change ssh can keep the port open while the link is dead.
+# Prints: "ok|proxy|dead <curl exit> <CONNECT code> <HTTP code>"
+#   ok    - api.anthropic.com answered through the proxy
+#   proxy - the VM's proxy answered but the request still failed (refused CONNECT,
+#           slow upstream ...) - the TUNNEL is fine, restarting it won't help
+#   dead  - nothing came back at all - tunnel hung, or nothing on the VM's proxy port
+_proxy_probe() {  # <local port> [timeout seconds]
+    local out rc cc hc
+    out=$(curl -s -o /dev/null --max-time "${2:-8}" -w '%{http_connect} %{http_code}' \
+          -x "http://127.0.0.1:$1" https://api.anthropic.com/ 2>/dev/null)
+    rc=$?
+    read -r cc hc <<< "$out"
+    cc=${cc:-000}; hc=${hc:-000}
+    if [ $rc -eq 0 ]; then
+        echo "ok $rc $cc $hc"
+    elif [ "$cc" != "000" ] || [ "$hc" != "000" ]; then
+        echo "proxy $rc $cc $hc"
+    else
+        echo "dead $rc 000 000"
+    fi
+}
+
+# ssh arguments that reach the main server: key/port only when set explicitly,
+# then the destination. Result in the array _CP_SSH_DEST.
+_ssh_dest_args() {
+    _CP_SSH_DEST=()
+    [ -n "$CLAUDE_SSH_KEY" ] && _CP_SSH_DEST+=(-i "$CLAUDE_SSH_KEY" -p "$CLAUDE_SSH_PORT")
+    if [ -n "$CLAUDE_SSH_USER" ]; then _CP_SSH_DEST+=("$CLAUDE_SSH_USER@$CLAUDE_SSH_HOST"); else _CP_SSH_DEST+=("$CLAUDE_SSH_HOST"); fi
+}
+
+# The full ssh command line of the main tunnel (without -f). Result in _CP_SSH_ARGS.
+# ServerAlive 15s x 3: a dead link makes ssh exit within ~45s (was 3 minutes).
+_tunnel_ssh_args() {
+    _ssh_dest_args
+    _CP_SSH_ARGS=(-N -C
+        -L "${CLAUDE_HTTP_PORT}:127.0.0.1:${CLAUDE_REMOTE_PROXY_PORT}"
+        -D "${CLAUDE_SOCKS_PORT}"
+        -o ServerAliveInterval=15
+        -o ServerAliveCountMax=3
+        -o ConnectTimeout=15
+        -o ExitOnForwardFailure=yes
+        -o StrictHostKeyChecking=accept-new
+        "${_CP_SSH_DEST[@]}")
+}
+
+# PID of the running tunnel watchdog (fails if there is none).
+_watchdog_pid() {
+    local wpid
+    wpid=$(cat "$CLAUDE_TUNNEL_PIDFILE" 2>/dev/null)
+    [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null || return 1
+    case "$(_proc_name "$wpid")" in *sh) echo "$wpid" ;; *) return 1 ;; esac
+}
+
+# Interruptible sleep: a signal (tunnel-stop) is handled at once, not after it.
+_wd_sleep() { sleep "$1" & wait $!; }
+
+_wd_log() { echo "[watchdog $(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$CLAUDE_TUNNEL_LOG"; }
+
+# Runs detached (see _watchdog_spawn) and owns the main ssh tunnel: restarts ssh
+# whenever it exits, and kills + restarts it when the proxy stops answering.
+# Closing the terminal tab that started it does not stop it; tunnel-stop does.
+_tunnel_watchdog() {
+    local spid fails state started delay=2
+    trap '' HUP
+    trap '[ -n "$spid" ] && kill "$spid" 2>/dev/null; rm -f "$CLAUDE_TUNNEL_PIDFILE"; exit 0' TERM INT
+    sh -c 'echo $PPID' > "$CLAUDE_TUNNEL_PIDFILE"
+    _tunnel_ssh_args
+    while :; do
+        started=$SECONDS
+        ssh "${_CP_SSH_ARGS[@]}" 2>>"$CLAUDE_TUNNEL_LOG" &
+        spid=$!
+        fails=0
+        while kill -0 "$spid" 2>/dev/null; do
+            _wd_sleep "$CLAUDE_WATCHDOG_INTERVAL"
+            kill -0 "$spid" 2>/dev/null || break
+            state=$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)
+            case "$state" in
+                dead*) fails=$((fails+1)) ;;
+                *)     fails=0 ;;
+            esac
+            if [ "$fails" -ge "$CLAUDE_WATCHDOG_FAILS" ]; then
+                _wd_log "proxy on :$CLAUDE_HTTP_PORT did not answer $fails checks in a row - restarting ssh"
+                kill "$spid" 2>/dev/null
+                break
+            fi
+        done
+        wait "$spid" 2>/dev/null
+        spid=""
+        # Quick reconnect after a long-lived tunnel; back off (max 30s) while it keeps failing.
+        if [ $((SECONDS - started)) -gt 60 ]; then delay=2; else delay=$((delay * 2)); [ $delay -gt 30 ] && delay=30; fi
+        _wd_log "ssh to $CLAUDE_SSH_HOST exited - reconnecting in ${delay}s"
+        _wd_sleep "$delay"
+    done
+}
+
+_watchdog_spawn() {
+    : > "$CLAUDE_TUNNEL_LOG"
+    if [ -n "${ZSH_VERSION:-}" ]; then
+        eval '( _tunnel_watchdog ) </dev/null >/dev/null 2>&1 &!'
+    else
+        ( _tunnel_watchdog ) </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null
+    fi
+}
+
+_watchdog_stop() {
+    local wpid i=0
+    wpid=$(_watchdog_pid) || { rm -f "$CLAUDE_TUNNEL_PIDFILE"; return 0; }
+    kill "$wpid" 2>/dev/null
+    while kill -0 "$wpid" 2>/dev/null && [ $i -lt 15 ]; do sleep 0.2; i=$((i+1)); done
+    kill -9 "$wpid" 2>/dev/null
+    rm -f "$CLAUDE_TUNNEL_PIDFILE"
+    echo "[Kill] PID $wpid (tunnel watchdog)"
+}
+
+# PIDs of Claude / Codex sessions running anywhere (other tabs, IDEs ...).
+# The [e]/[x] keep this awk from matching its own command line.
+_other_agents() {
+    ps -Ao pid=,args= 2>/dev/null | awk '{ b = $2; sub(/.*\//, "", b) }
+        b == "claude" || b == "codex" || $0 ~ /anthropic-ai.claude-cod[e]|openai.code[x]/ { print $1 }'
 }
 
 _is_wsl() {
@@ -823,20 +958,35 @@ tunnel-start() {
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
-    local tstate hpid hname hport newp
+    local tstate hpid hname hport newp healing=""
     read -r tstate hpid hname hport <<< "$(_tunnel_health)"
+    if [ "$tstate" = "ok" ]; then
+        # Listening is not enough: a tunnel that no longer answers is shared by
+        # every tab, so replace it now instead of reusing it.
+        [ -n "$hport" ] || hport=$CLAUDE_HTTP_PORT
+        case "$(_proxy_probe "$hport" 6)" in
+            dead*)
+                echo "[Heal] SSH tunnel (PID $hpid) is up but not answering - restarting it for every window..."
+                export CLAUDE_HTTP_PORT=$hport
+                tstate=stale healing=1
+                ;;
+        esac
+    fi
     case "$tstate" in
         ok)
-            if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
+            if [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
                 echo "[OK]  SSH tunnel already running (PID $hpid) on fallback port $hport - using it"
             else
                 echo "[OK]  SSH tunnel already running (PID $hpid)"
             fi
+            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ] && ! _watchdog_pid >/dev/null; then
+                echo "[Info] This tunnel has no watchdog (started by an older profile) - 'proxy-restart' adds auto-reconnect."
+            fi
             return 0
             ;;
         stale)
-            echo "[Heal] Stale ssh tunnel (PID $hpid) - killing it and starting fresh..."
+            [ -n "$healing" ] || echo "[Heal] Stale ssh tunnel (PID $hpid) - killing it and starting fresh..."
             tunnel-stop
             ;;
         foreign)
@@ -868,21 +1018,16 @@ tunnel-start() {
     _is_wsl && _ensure_ssh_agent
 
     echo "[SSH] Starting tunnel to $CLAUDE_SSH_HOST..."
-    local args=(-N -f -C
-        -L "${CLAUDE_HTTP_PORT}:127.0.0.1:${CLAUDE_REMOTE_PROXY_PORT}"
-        -D "${CLAUDE_SOCKS_PORT}"
-        -o ServerAliveInterval=60
-        -o ServerAliveCountMax=3
-        -o ExitOnForwardFailure=yes
-        -o StrictHostKeyChecking=accept-new)
-    # Explicit key/port/user are optional - leave CLAUDE_SSH_KEY/USER blank to use an ~/.ssh/config alias
-    [ -n "$CLAUDE_SSH_KEY" ] && args+=(-i "$CLAUDE_SSH_KEY" -p "$CLAUDE_SSH_PORT")
-    if [ -n "$CLAUDE_SSH_USER" ]; then args+=("$CLAUDE_SSH_USER@$CLAUDE_SSH_HOST"); else args+=("$CLAUDE_SSH_HOST"); fi
     # stderr -> log so a failed tunnel is debuggable (auth error vs. network timeout).
-    ssh "${args[@]}" 2>"$CLAUDE_TUNNEL_LOG"
+    if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ]; then
+        _watchdog_spawn
+    else
+        _tunnel_ssh_args
+        ssh -f "${_CP_SSH_ARGS[@]}" 2>"$CLAUDE_TUNNEL_LOG"
+    fi
 
     local attempts=0
-    while ! _port_in_use "$CLAUDE_HTTP_PORT" && [ $attempts -lt 10 ]; do
+    while ! _port_in_use "$CLAUDE_HTTP_PORT" && [ $attempts -lt 20 ]; do
         sleep 0.5
         attempts=$((attempts+1))
     done
@@ -891,8 +1036,13 @@ tunnel-start() {
         echo "[OK]  SSH tunnel up:"
         echo "       HTTP  127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT   (Claude / Codex)"
         echo "       SOCKS 127.0.0.1:$CLAUDE_SOCKS_PORT                                   (Chrome / apps)"
+        if _watchdog_pid >/dev/null; then
+            echo "       Watchdog on: reconnects by itself if the link drops (log: $CLAUDE_TUNNEL_LOG)"
+        fi
     else
-        echo "[Err] SSH tunnel failed to start within 5s. ssh said:"
+        # Don't leave a watchdog retrying a tunnel that can't start (bad key, host down ...).
+        _watchdog_stop >/dev/null
+        echo "[Err] SSH tunnel failed to start within 10s. ssh said:"
         sed 's/^/       /' "$CLAUDE_TUNNEL_LOG" 2>/dev/null | head -5
         echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
         return 1
@@ -903,8 +1053,12 @@ tunnel-stop() {
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
-    local pid name port still p
+    local pid name port still p wd_msg
     local ssh_pids=() survivors=()
+
+    # The watchdog goes first, or it would just start ssh again (it takes its ssh with it).
+    wd_msg=$(_watchdog_stop)
+    [ -n "$wd_msg" ] && echo "$wd_msg"
 
     for pid in $( { _listeners "$CLAUDE_HTTP_PORT"; _listeners "$CLAUDE_SOCKS_PORT"; } | sort -u ); do
         name=$(_proc_name "$pid")
@@ -916,7 +1070,7 @@ tunnel-stop() {
     done
 
     if [ ${#ssh_pids[@]} -eq 0 ]; then
-        echo "[Info] No tunnel running on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT"
+        if [ -n "$wd_msg" ]; then echo "[OK] Tunnel stopped"; else echo "[Info] No tunnel running on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT"; fi
         return 0
     fi
 
@@ -1090,7 +1244,20 @@ cx-safe() { cx --safe "$@"; }
 cc-stop() {
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
     # result so cc-stop never falsely claims success when a port is still held.
-    local rc=0
+    local rc=0 force=0 others
+    case "${1:-}" in --force|-f) force=1 ;; esac
+
+    # The tunnel and settings.json are shared by every window. Stopping them
+    # while Claude/Codex runs elsewhere is what used to kill the other tabs.
+    others=$(_other_agents)
+    if [ -n "$others" ] && [ $force -eq 0 ]; then
+        echo "[Stop] $(_count "$others") Claude/Codex session(s) still running in other windows (PID $(printf '%s\n' "$others" | tr '\n' ' '| sed 's/ $//'))."
+        echo "       They use this same tunnel - stopping it would cut them off."
+        echo "       Proxy stuck?  proxy-restart     (fresh tunnel for every window, sessions keep running)"
+        echo "       Stop anyway?  cc-stop --force"
+        return 1
+    fi
+
     tunnel-stop || rc=1
     _node_tunnels_stop      # per-node Chrome tunnels (chrome-proxy <node>) go too
     proxy-off
@@ -1098,6 +1265,22 @@ cc-stop() {
         echo "[OK] All proxy services stopped"
     else
         echo "[Err] Env cleared, but the tunnel did NOT fully stop (see above). Run 'proxy-doctor' to see what's stuck."
+        return 1
+    fi
+}
+
+# Replace a hung tunnel for EVERY window without touching env vars or
+# settings.json, so Claude/Codex running in other tabs just carry on.
+proxy-restart() {
+    echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
+    tunnel-stop >/dev/null || { tunnel-stop; return 1; }
+    tunnel-start || return 1
+    local state rc cc hc
+    read -r state rc cc hc <<< "$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)"
+    if [ "$state" = "ok" ]; then
+        echo "[OK]  api.anthropic.com answers through the new tunnel - other windows recover on their next request."
+    else
+        echo "[FAIL] New tunnel is up, but api.anthropic.com still doesn't answer (curl exit $rc, CONNECT $cc) - the problem is on the VM side. Run 'proxy-doctor'."
         return 1
     fi
 }
@@ -1120,6 +1303,16 @@ proxy-status() {
             fi
             echo "[ON]  HTTP tunnel   : 127.0.0.1:$CLAUDE_HTTP_PORT -> VM tinyproxy:$CLAUDE_REMOTE_PROXY_PORT (Claude / Codex)$note"
             echo "[ON]  SOCKS tunnel  : 127.0.0.1:$CLAUDE_SOCKS_PORT (Chrome / apps)"
+            if _watchdog_pid >/dev/null; then
+                echo "[ON]  Watchdog      : PID $(_watchdog_pid) - reconnects by itself"
+            else
+                echo "[OFF] Watchdog      : none - a dropped link won't heal by itself ('proxy-restart' adds it)"
+            fi
+            case "$(_proxy_probe "$CLAUDE_HTTP_PORT" 6)" in
+                ok*)    echo "[OK]  Proxy answers : yes" ;;
+                proxy*) echo "[!!]  Proxy answers : VM proxy answers but the request fails - run 'proxy-doctor'" ;;
+                *)      echo "[!!]  Proxy answers : NO - tunnel hung. Run 'proxy-restart' (safe with Claude open in other windows)" ;;
+            esac
             ;;
         down)
             echo "[OFF] HTTP tunnel   : not running"
@@ -1305,18 +1498,72 @@ proxy-doctor() {
     fi
 
     # --- end-to-end: can we actually reach the API through the proxy? ---
+    if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" != "1" ]; then
+        echo "$warn Tunnel watchdog disabled (CLAUDE_TUNNEL_WATCHDOG=0) - a dropped link freezes every window until 'proxy-restart'"
+    elif _watchdog_pid >/dev/null; then
+        echo "$ok  Tunnel watchdog running (PID $(_watchdog_pid)) - reconnects by itself"
+    elif [ -n "$http_pid" ]; then
+        echo "$warn Tunnel has no watchdog (started by an older profile) - a dropped link won't heal by itself. Fix: proxy-restart"
+    fi
+    if grep -q "administratively prohibited" "$CLAUDE_TUNNEL_LOG" 2>/dev/null; then
+        echo "$bad The VM refuses port forwarding for this login ('administratively prohibited' in $CLAUDE_TUNNEL_LOG)."
+        echo "       Fix on the VM: AllowTcpForwarding yes in /etc/ssh/sshd_config (or its Match block for this user), then restart sshd"
+    fi
+
+    # --- end-to-end: can we actually reach the API through the proxy? ---
     if [ -n "$http_pid" ]; then
-        local code
-        code=$(curl -s --max-time 8 -o /dev/null -w '%{http_code}' \
-               -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" https://api.anthropic.com/ 2>/dev/null)
-        if [ -n "$code" ] && [ "$code" != "000" ]; then
-            echo "$ok  api.anthropic.com reachable through the proxy (HTTP $code)"
-        else
-            echo "$bad Proxy up but can't reach api.anthropic.com (curl code ${code:-none})."
-            echo "       Check the VM: run 'webproxy-status' there, confirm tinyproxy is up and allows CONNECT 443."
-        fi
+        local pstate prc pcc phc
+        read -r pstate prc pcc phc <<< "$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)"
+        case "$pstate" in
+            ok)
+                echo "$ok  api.anthropic.com reachable through the proxy (HTTP $phc)"
+                ;;
+            proxy)
+                echo "$bad The VM's proxy answered but api.anthropic.com could not be reached (curl exit $prc, proxy CONNECT reply $pcc)."
+                _doctor_vm_check
+                ;;
+            *)
+                echo "$bad Proxy port is open but NOTHING comes back (curl exit $prc) - checking the VM directly..."
+                _doctor_vm_check
+                ;;
+        esac
     fi
     echo ""
+}
+
+# Ask the VM itself (over a separate ssh) whether ITS proxy reaches the API, to
+# tell a hung local tunnel apart from a problem on the VM.
+_doctor_vm_check() {
+    local out rc cc hc direct
+    _ssh_dest_args
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${_CP_SSH_DEST[@]}" \
+          "curl -s -o /dev/null -m 10 -w '%{http_connect} %{http_code}' -x http://127.0.0.1:$CLAUDE_REMOTE_PROXY_PORT https://api.anthropic.com/; echo \" \$?\"" 2>/dev/null)
+    if [ -z "$out" ]; then
+        echo "       Can't open a new ssh session to $CLAUDE_SSH_HOST right now (network down, VM down, or the key needs a passphrase: try 'ssh $CLAUDE_SSH_HOST')."
+        echo "       Once ssh works again: proxy-restart"
+        return
+    fi
+    read -r cc hc rc <<< "$out"
+    if [ "$rc" = "0" ]; then
+        echo "       On the VM, its proxy reaches api.anthropic.com fine (HTTP $hc) -> YOUR TUNNEL is the problem (hung after sleep / Wi-Fi change)."
+        echo "       Fix: proxy-restart   (safe while Claude runs in other windows; they recover on their next request)"
+    elif [ "$cc" = "403" ]; then
+        echo "       On the VM, tinyproxy REFUSES the request (CONNECT 403)."
+        echo "       Fix on the VM: /etc/tinyproxy/tinyproxy.conf needs 'Allow 127.0.0.1', and 'ConnectPort 443' if any ConnectPort lines exist; then 'webproxy-status'"
+    elif [ "$cc" = "000" ] && [ "$hc" = "000" ] && { [ "$rc" = "7" ] || [ "$rc" = "52" ] || [ "$rc" = "56" ]; }; then
+        echo "       On the VM, nothing answers on port $CLAUDE_REMOTE_PROXY_PORT (curl exit $rc) -> tinyproxy is down or on another port."
+        echo "       Fix on the VM: run 'webproxy-status' and start it; or match the port here: proxy-config set REMOTE_PROXY_PORT <port>"
+    else
+        direct=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "${_CP_SSH_DEST[@]}" \
+                 "curl -s -o /dev/null -m 10 -w '%{http_code}' https://api.anthropic.com/" 2>/dev/null)
+        if [ -n "$direct" ] && [ "$direct" != "000" ]; then
+            echo "       On the VM, the API is reachable directly (HTTP $direct) but not through tinyproxy (curl exit $rc, CONNECT $cc)."
+            echo "       Fix on the VM: check tinyproxy's log and config ('webproxy-status')"
+        else
+            echo "       The VM itself can't reach api.anthropic.com (curl exit $rc) - VM network / firewall / DNS problem, not your Mac."
+            echo "       Try another node meanwhile: proxy-nodes, then proxy-node <name>"
+        fi
+    fi
 }
 
 # ============================================================
@@ -1931,7 +2178,8 @@ cc-help() {
     echo "  cx-safe         - Same, but keeps Codex's approval prompts"
     echo "                    (anything after cc/cx is passed to claude/codex as-is)"
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
-    echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)"
+    echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
+    echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"

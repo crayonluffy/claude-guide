@@ -4,6 +4,10 @@
 
 **Stale tunnels self-heal.** `cc` / `cx` / `tunnel-start` check the *health* of whatever holds the tunnel port, not just that the port is busy: a healthy tunnel is reused (even one running on a fallback port from an earlier shell), a **stale ssh** (dropped connection, missing SOCKS forward) is killed and restarted automatically, and a **foreign app** on the port is left alone — the tunnel simply falls back to the next free port (`8081`, `8082`, …) and every downstream piece (env vars, `settings.json`, status, doctor) follows it.
 
+**One tunnel serves every terminal window** — so when it hangs (typically after the laptop sleeps or changes Wi-Fi), Claude freezes in *all* tabs at once. On macOS / Linux / WSL (v2.5+) a small **watchdog** owns the tunnel: it reconnects as soon as ssh drops, and also when the proxy stops answering for three checks in a row (~1 minute), so every tab recovers by itself. If you don't want to wait, run **`proxy-restart`** in any window — it replaces the tunnel for everyone and leaves env vars and `settings.json` alone. Don't use `cc-stop` for this: it turns the proxy *off* for every window (it now refuses while Claude runs elsewhere; `--force` overrides). The watchdog logs to `/tmp/claude-tunnel.log`; `CLAUDE_TUNNEL_WATCHDOG=0` in `~/.claude-proxy.conf` turns it off.
+
+**`Proxy up but can't reach api.anthropic.com`** — `proxy-doctor` now asks the VM directly and tells you which side is broken: *your tunnel* (fix: `proxy-restart`), *tinyproxy refusing* (`Allow 127.0.0.1` / `ConnectPort 443`), *tinyproxy down* (`webproxy-status` on the VM), or *the VM's own internet*.
+
 If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both ports (other apps are reported and left alone), escalates to `kill -9`, and tells you if an ssh survived (and how to inspect it) instead of falsely reporting success.
 
 ---
