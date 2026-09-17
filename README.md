@@ -1,79 +1,92 @@
-# Claude Code + Codex — Install & Proxy Guide
+# Claude Code + Codex — Setup Guide
 
-A copy-paste, step-by-step guide to running **Claude Code** (Anthropic) and **Codex** (OpenAI) through an SSH tunnel to a remote VM proxy — connect the proxy first, then install and sign in to both CLIs through it.
-
-**How traffic flows once everything is running** (animated — packets move along the two forwards; the red one shows what happens without the tunnel):
-
-<p align="center"><img src="docs/assets/traffic-flow.svg" alt="One SSH connection carries two forwards: -L 8080 to the VM's tinyproxy for Claude and Codex, and -D 1080 SOCKS5 for Chrome; direct traffic to the API is blocked by the network" width="960"></p>
-
-After a one-time setup you just type **`cc`** (Claude) or **`cx`** (Codex) and all of that happens automatically.
-
-> **One tunnel, two forwards.** A single SSH connection carries both:
-> - **`-L 8080 → VM:8888`** — an HTTP proxy for **Claude & Codex** ([Claude Code doesn't
->   support SOCKS proxies](https://code.claude.com/docs/en/network-config.md), so the HTTP proxy runs on the VM — set it up
->   with [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager)).
-> - **`-D 1080`** — a **SOCKS5** proxy for **Chrome** / other apps (full traffic, remote DNS).
-
-## ❓ Why a proxy (tinyproxy) on the VM?
-
-Claude Code only speaks the **HTTP proxy protocol** — `HTTPS_PROXY=socks5://…` doesn't work. And SSH itself can't be an HTTP proxy: `-D` speaks only SOCKS, `-L` is just a dumb pipe to one destination. So an HTTP proxy must exist **somewhere**, and there are exactly two ways to do it:
-
-| | HTTP proxy lives where? | Client runs | VM runs |
-|---|---|---|---|
-| **A — current** | on the VM (tinyproxy `:8888`) | plain `ssh` only | tinyproxy (one-time install) |
-| **B — old** | on your laptop (`npx http-proxy-to-socks` bridge over `-D 1080`) | ssh **+ a Node bridge process** | nothing |
-
-It's one **or** the other — with tinyproxy there is **no npx bridge anywhere**. `ssh -L 8080:127.0.0.1:8888` simply makes the VM's tinyproxy appear at `127.0.0.1:8080` on your machine, and Claude/Codex talk HTTP-proxy straight to it. This guide used design B before and [migrated to A](docs/upgrading.md) because the client-side bridge was the fragile part (orphaned node processes, `npx` startup failures on Windows). The `-D 1080` forward is kept only for `chrome-proxy` — Claude and Codex never touch it.
-
-## 🔐 Security — how auth works
-
-The proxy has no username/password because **your SSH key is the auth**, and nothing is exposed:
-
-- tinyproxy binds to `127.0.0.1:8888` **on the VM** — unreachable from the internet; the only way in is an SSH-authenticated tunnel.
-- your local `127.0.0.1:8080` is loopback — only processes on your own machine, only while your tunnel is up.
-- tinyproxy only relays `CONNECT` traffic — TLS stays end-to-end, so the proxy can't read your API tokens or conversations.
-
-One caveat: on a **shared** client machine, other local users could use your `127.0.0.1:8080` while the tunnel is up. For a personal laptop this is a non-issue.
+Use **Claude Code** and **Codex** from a network that blocks them. You run **one installer**, and after that you just type **`cc`**.
 
 ---
 
-## 🚀 Start here — follow in order
+## ✅ Before you start
 
-**The proxy comes first.** If your network can't reach `api.anthropic.com` / OpenAI directly (that's why this guide exists), signing in to Claude or Codex — and sometimes even `npm install` — only works *through* the proxy. So bring the tunnel up before installing anything.
+Ask your admin for three things:
 
-| | Page | What you'll do | Time |
-|---|------|----------------|------|
-| 1 | **[Proxy setup — one command](docs/proxy-profile.md)** | Run the wizard once (Windows, macOS, Linux or WSL), get `cc` / `cx` forever | ~5 min |
-| 2 | **[Install Claude Code](docs/install-claude.md)** | Node.js → `claude` CLI → sign in via `cc` | ~5 min |
-| 3 | **[Install Codex](docs/install-codex.md)** *(optional)* | `codex` CLI → sign in via `cx` | ~3 min |
-
-Prefer nothing installed in your shell? Use **[Proxy — manual, no profile](docs/proxy-manual.md)** instead of step 1 — the same thing as plain step-by-step commands, fully written out (no collapsed sections).
+1. **Your key file** (for example `alice_ed25519`). Save it in your **Downloads** folder.
+2. **The server address** (for example `vpn.example.com`).
+3. **Your username** (for example `alice`).
 
 ---
 
-## Daily usage (after setup)
+## 1️⃣ Run the installer
 
-```bash
-cc              # proxy ON + launch Claude   (cc-safe keeps permission prompts)
-cc -c           # …and continue the last session (cc -r: pick one; any claude flag passes through)
-cx              # proxy ON + launch Codex    (cx-safe keeps approval prompts)
-proxy-up        # proxy ON, launch nothing
-cc-stop         # proxy OFF — one off-switch for both (per-node Chrome tunnels included)
-proxy-status    # what's running + your external IP
-proxy-doctor    # something wrong? this says exactly what + how to fix
-proxy-update    # get the newest profile — your settings (proxy-config) are kept
+### 🪟 Windows
 
-proxy-nodes     # which nodes exist (jp / jp2 / sg / us …) and which one you're on
-proxy-node sg   # move Claude/Codex to another node   (or: cc --node sg)
-chrome-proxy us # a Chrome window through 'us' — own tunnel + profile, other nodes stay open
-chrome-proxy jp --profile work   # another Chrome profile through the same node (chrome-profiles lists them)
-proxy-nodes --from jpvpn         # get the node list privately from one of your VMs (over SSH)
+Open **PowerShell** (press the Windows key, type `PowerShell`, press Enter), then paste this line and press Enter:
+
+```powershell
+irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 ```
 
+### 🍎 Mac
+
+Open **Terminal** (press ⌘ + Space, type `Terminal`, press Enter), then paste this line and press Enter:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)
+```
+
+### 🐧 Linux / WSL
+
+Same line as the Mac, in your terminal.
+
+### What the installer asks
+
+| It asks… | You answer |
+|---|---|
+| Server IP or hostname | the server address from your admin |
+| SSH username | your username from your admin |
+| Use this key? | **Enter** (it found the key in Downloads) |
+| Anything with `[…]` in it | just press **Enter** — that's the suggested answer |
+| Check / install Node.js, Claude Code and Codex now? | **Enter** — it installs whatever is missing (Windows may ask for permission, a Mac may ask for your password) |
+
+When it says **Done!**, close the window.
+
 ---
 
-## 📚 All pages
+## 2️⃣ Use it
 
-- **Proxy:** [One-command setup (profile)](docs/proxy-profile.md) · [Manual — no profile](docs/proxy-manual.md) · [🌏 Nodes — regions, VMs & Chrome profiles](docs/proxy-nodes.md)
-- **Install:** [Claude Code](docs/install-claude.md) · [Codex](docs/install-codex.md)
-- **Reference:** [🚑 Troubleshooting](docs/troubleshooting.md) · [💡 Tips & commands](docs/tips.md) · [🔄 Updating & upgrading](docs/upgrading.md)
+Open a **new** PowerShell / Terminal window and type:
+
+| Type | To start |
+|---|---|
+| `cc` | **Claude Code** |
+| `cx` | **Codex** |
+
+The first time, each one asks you to sign in (your browser opens) — sign in once and you're done.
+
+To continue your last Claude conversation: `cc -c`
+
+---
+
+## 🆘 Something doesn't work?
+
+1. Type **`proxy-doctor`** — it checks everything and tells you exactly what's wrong.
+2. Still stuck? **Run the installer again** (step 1) — it's safe, it keeps your settings.
+3. Then send your admin what `proxy-doctor` printed.
+
+## 🔄 Keeping up to date
+
+| Type | Updates |
+|---|---|
+| `proxy-update` | this setup |
+| `cc-install` | Node.js, Claude Code and Codex |
+
+---
+
+## 📚 More (optional)
+
+For the curious and for admins — you don't need any of this to use `cc`:
+
+- **[How it works](docs/how-it-works.md)** — the tunnel, why a proxy, security
+- **[All commands](docs/proxy-profile.md)** — every command and setting, per OS
+- **[Several servers & Chrome profiles](docs/proxy-nodes.md)** — JP / SG / US, `chrome-proxy`
+- **[Manual setup](docs/proxy-manual.md)** — the same without the installer
+- **[Install Claude Code](docs/install-claude.md)** · **[Install Codex](docs/install-codex.md)** — by hand, step by step
+- **[Troubleshooting](docs/troubleshooting.md)** · **[Tips](docs/tips.md)** · **[Updating](docs/upgrading.md)**

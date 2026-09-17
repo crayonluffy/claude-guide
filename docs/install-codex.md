@@ -2,6 +2,8 @@
 
 Codex is OpenAI's coding agent for the terminal. Like Claude Code, it needs **Node.js** first, then the **CLI**, then a **sign-in**. Every step ends with a check so you know it worked.
 
+> **🟢 Easiest: you probably don't need this page.** The [installer on the Home page](https://claude-guide.vercel.app/) installs Node.js, Claude Code and Codex for you at the end. Already set up? Just type **`cc-install`** — it checks all three and installs or updates what's missing or old (it asks first). This page is the manual way.
+>
 > **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, signing in (Step 3) only works through the proxy — the `cx` command launches Codex through the same tunnel `cc` uses for Claude. This page assumes `cx` / `proxy-up` already exist.
 
 ---

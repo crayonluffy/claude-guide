@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.3.2"
+CLAUDE_PROXY_VERSION="2.4.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -1698,6 +1698,226 @@ chrome-profiles() {
 }
 
 # ============================================================
+# cc-install - check / install / update Node.js, Claude Code and Codex
+# ============================================================
+# Downloads go through the proxy (it's started first), so this works on a
+# blocked network too. Nothing is changed without asking (unless -y).
+
+CLAUDE_TOOLS_MIN_NODE_FALLBACK=22   # used when the npm registry can't be asked
+
+_tools_ask() {  # <question> [Y|N] - honours $_TOOLS_YES / $_TOOLS_CHECK
+    [ "${_TOOLS_CHECK:-0}" = 1 ] && return 1
+    [ "${_TOOLS_YES:-0}" = 1 ] && return 0
+    local def="${2:-Y}" hint r
+    [ "$def" = Y ] && hint="[Y/n]" || hint="[y/N]"
+    { printf '%s %s: ' "$1" "$hint" > /dev/tty; } 2>/dev/null || return 1
+    IFS= read -r r < /dev/tty || r=""
+    [ -n "$r" ] || r="$def"
+    case "$r" in [Yy]*) return 0 ;; *) return 1 ;; esac
+}
+
+_tools_skip() { [ "${_TOOLS_CHECK:-0}" = 1 ] || echo "      Skipped${1:+ - $1}"; }
+
+_tools_major() { printf '%s' "$1" | sed -n 's/^v\{0,1\}\([0-9][0-9]*\).*/\1/p'; }
+_tools_semver() { printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1; }
+_tools_older() {  # <a> <b> : true when version a < b
+    [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ] &&
+        [ "$(printf '%s\n%s\n' "$1" "$2" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)" = "$1" ]
+}
+
+# The Node.js major version Claude Code (and Codex) need, from their npm metadata.
+_tools_min_node() {
+    local m best=0 pkg
+    for pkg in @anthropic-ai/claude-code @openai/codex; do
+        m=$(curl -fsS --max-time 8 "https://registry.npmjs.org/$pkg/latest" 2>/dev/null |
+            sed -n 's/.*"engines":{[^}]*"node":"[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
+        [ -n "$m" ] && [ "$m" -gt "$best" ] && best=$m
+    done
+    [ "$best" -gt 0 ] || best=$CLAUDE_TOOLS_MIN_NODE_FALLBACK
+    echo "$best"
+}
+
+# Newest Node.js LTS, e.g. v24.8.0 ("" if nodejs.org can't be reached).
+_tools_node_lts() {
+    curl -fsS --max-time 10 https://nodejs.org/dist/index.json 2>/dev/null |
+        tr '{' '\n' | grep -m1 '"lts":"' | sed -n 's/.*"version":"\(v[0-9.]*\)".*/\1/p'
+}
+
+_tools_node_version() { command -v node >/dev/null 2>&1 && node --version 2>/dev/null; }
+
+# Install / upgrade Node.js to the current LTS with whatever this machine uses.
+_tools_install_node() {
+    local ver tmp
+    if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+        echo "[Tools] Using nvm: nvm install --lts"
+        # shellcheck disable=SC1090,SC1091
+        . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm install --lts && nvm alias default 'lts/*'
+        return
+    fi
+    if [ "$(uname)" = "Darwin" ]; then
+        if command -v brew >/dev/null 2>&1; then
+            if brew list --formula node >/dev/null 2>&1; then
+                echo "[Tools] brew upgrade node"; brew upgrade node
+            else
+                echo "[Tools] brew install node"; brew install node
+            fi
+            return
+        fi
+        ver=$(_tools_node_lts)
+        [ -n "$ver" ] || { echo "[Err] Can't reach nodejs.org to find the LTS version."; return 1; }
+        tmp=$(mktemp -d)
+        echo "[Tools] Downloading the official Node.js $ver installer (you'll be asked for your Mac password)..."
+        curl -fL --progress-bar -o "$tmp/node.pkg" "https://nodejs.org/dist/$ver/node-$ver.pkg" &&
+            sudo installer -pkg "$tmp/node.pkg" -target /
+        local rc=$?; rm -rf "$tmp"; return $rc
+    fi
+    if command -v apt-get >/dev/null 2>&1; then
+        tmp=$(mktemp)
+        echo "[Tools] Installing Node.js LTS from NodeSource (apt; you may be asked for your password)..."
+        curl -fsSL https://deb.nodesource.com/setup_lts.x -o "$tmp" &&
+            sudo -E bash "$tmp" && sudo -E apt-get install -y nodejs
+        local rc=$?; rm -f "$tmp"; return $rc
+    fi
+    if command -v dnf >/dev/null 2>&1; then
+        tmp=$(mktemp)
+        echo "[Tools] Installing Node.js LTS from NodeSource (dnf; you may be asked for your password)..."
+        curl -fsSL https://rpm.nodesource.com/setup_lts.x -o "$tmp" &&
+            sudo -E bash "$tmp" && sudo -E dnf install -y nodejs
+        local rc=$?; rm -f "$tmp"; return $rc
+    fi
+    echo "[Err] Don't know how to install Node.js here - install the LTS from https://nodejs.org, then run cc-install again."
+    return 1
+}
+
+_tools_node() {  # <min major>
+    local min="$1" cur major
+    cur=$(_tools_node_version)
+    major=$(_tools_major "$cur")
+    if [ -n "$major" ] && [ "$major" -ge "$min" ]; then
+        echo "[OK]  Node.js $cur (needs $min or newer)"
+        return 0
+    fi
+    if [ -z "$cur" ]; then
+        echo "[..]  Node.js is not installed (Claude Code needs version $min or newer)"
+        _tools_ask "Install Node.js LTS now?" Y || { _tools_skip "Claude Code and Codex can't be installed without it."; return 1; }
+    else
+        echo "[..]  Node.js $cur is too old (Claude Code needs $min or newer)"
+        _tools_ask "Upgrade Node.js to the current LTS now?" Y || { _tools_skip; return 1; }
+    fi
+    _tools_install_node || { echo "[Err] Node.js installation failed (see above)."; return 1; }
+    hash -r 2>/dev/null
+    cur=$(_tools_node_version); major=$(_tools_major "$cur")
+    if [ -n "$major" ] && [ "$major" -ge "$min" ]; then
+        echo "[OK]  Node.js $cur installed"
+        return 0
+    fi
+    echo "[Err] 'node' is still ${cur:-missing} in this shell."
+    command -v node >/dev/null 2>&1 && echo "      Another node comes first on PATH: $(command -v node) - open a new terminal, or remove the old one."
+    return 1
+}
+
+# Global npm installs must not need sudo: offer npm's own ~/.npm-global setup.
+_tools_npm_prefix() {
+    local p rc
+    p=$(npm prefix -g 2>/dev/null) || return 1
+    if [ -w "$p/lib/node_modules" ] || { [ ! -e "$p/lib/node_modules" ] && [ -w "$p/lib" ]; } ||
+       { [ ! -e "$p/lib" ] && [ -w "$p" ]; }; then
+        return 0
+    fi
+    echo "[..]  Global npm packages go to $p, which needs sudo."
+    _tools_ask "Use ~/.npm-global for them instead (npm's recommended fix, no sudo)?" Y || return 1
+    mkdir -p "$HOME/.npm-global" && npm config set prefix "$HOME/.npm-global" || return 1
+    export PATH="$HOME/.npm-global/bin:$PATH"
+    case "$(basename "${SHELL:-}")" in zsh) rc="$HOME/.zshrc" ;; *) rc="$HOME/.bashrc" ;; esac
+    if ! grep -q '.npm-global/bin' "$rc" 2>/dev/null; then
+        printf '\nexport PATH="$HOME/.npm-global/bin:$PATH"   # npm global packages (cc-install)\n' >> "$rc"
+    fi
+    echo "[OK]  npm global prefix: ~/.npm-global (PATH added to $rc)"
+}
+
+_tools_pkg() {  # <label> <command> <npm package> <update hint when not installed by npm>
+    local label="$1" bin="$2" pkg="$3" hint="$4" latest cur
+    latest=$(npm view "$pkg" version 2>/dev/null)
+    if command -v "$bin" >/dev/null 2>&1; then
+        cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+        if [ -z "$latest" ]; then
+            echo "[OK]  $label ${cur:-(version unknown)} installed (npm registry not reachable - can't check for updates)"
+            return 0
+        fi
+        if ! _tools_older "$cur" "$latest"; then
+            echo "[OK]  $label ${cur:-?} (latest: $latest)"
+            return 0
+        fi
+        if ! npm ls -g "$pkg" --depth=0 >/dev/null 2>&1; then
+            echo "[..]  $label $cur is older than $latest, but wasn't installed with npm - update it with: $hint"
+            return 0
+        fi
+        echo "[..]  $label $cur is out of date (latest: $latest)"
+        _tools_ask "Update $label to $latest now?" Y || { _tools_skip; return 0; }
+    else
+        if [ -z "$latest" ]; then
+            echo "[Err] $label is not installed and the npm registry can't be reached (is the proxy up? try 'proxy-up')."
+            return 1
+        fi
+        echo "[..]  $label is not installed (latest: $latest)"
+        _tools_ask "Install $label now?" Y || { _tools_skip; return 0; }
+    fi
+    _tools_npm_prefix || { echo "[Err] Can't install without a writable npm prefix."; return 1; }
+    echo "[Tools] npm install -g $pkg@latest"
+    npm install -g "$pkg@latest" || { echo "[Err] npm install failed (see above)."; return 1; }
+    hash -r 2>/dev/null
+    cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+    if [ -n "$cur" ]; then
+        echo "[OK]  $label $cur ready - run it through the proxy with '${5:-$bin}'"
+    else
+        echo "[Warn] $label installed, but '$bin' isn't found in this shell yet - open a new terminal."
+    fi
+}
+
+cc-install() {
+    local want="" a node_ok=1 min rc=0
+    _TOOLS_YES=0 _TOOLS_CHECK=0
+    local proxy=1
+    for a in "$@"; do
+        case "$a" in
+            -y|--yes) _TOOLS_YES=1 ;;
+            -n|--check) _TOOLS_CHECK=1 ;;
+            --no-proxy) proxy=0 ;;
+            node|claude|codex) want="$want $a" ;;
+            -h|--help)
+                echo "usage: cc-install [node] [claude] [codex] [--check] [-y] [--no-proxy]"
+                echo "  checks Node.js, Claude Code and Codex; installs / updates what's missing or old (asks first)"
+                return 0 ;;
+            *) echo "[Err] Unknown argument '$a' - see: cc-install --help"; return 1 ;;
+        esac
+    done
+    [ -n "$want" ] || want=" node claude codex"
+
+    echo ""
+    echo "=== Node.js / Claude Code / Codex$([ "$_TOOLS_CHECK" = 1 ] && echo ' (check only)') ==="
+    if [ $proxy = 1 ] && [ -z "${HTTPS_PROXY:-}" ]; then
+        echo "[Tools] Starting the proxy first, so downloads go through your VM..."
+        proxy-up --no-verify >/dev/null 2>&1 && echo "[OK]  Proxy is up" ||
+            echo "[Warn] Proxy didn't start - trying the internet directly ('proxy-doctor' explains why)"
+    fi
+    min=$(_tools_min_node)
+    case "$want" in *node*) _tools_node "$min" || { node_ok=0; rc=1; } ;; esac
+    if [ $node_ok = 1 ] && ! command -v npm >/dev/null 2>&1; then
+        echo "[Err] npm is missing - it comes with Node.js; reinstall Node.js (cc-install node)."
+        node_ok=0; rc=1
+    fi
+    if [ $node_ok = 1 ]; then
+        case "$want" in *claude*) _tools_pkg "Claude Code" claude @anthropic-ai/claude-code "claude update" cc || rc=1 ;; esac
+        case "$want" in *codex*)  _tools_pkg "Codex" codex @openai/codex "brew upgrade codex (or your package manager)" cx || rc=1 ;; esac
+    else
+        case "$want" in *claude*|*codex*) echo "[..]  Claude Code / Codex skipped - they need Node.js $min or newer first." ;; esac
+    fi
+    echo ""
+    [ "$_TOOLS_CHECK" = 1 ] && echo "Check only - nothing was changed. Run 'cc-install' to install / update."
+    return $rc
+}
+
+# ============================================================
 # Help / command list
 # ============================================================
 
@@ -1714,6 +1934,7 @@ cc-help() {
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
+    echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"
     echo ""
     echo "  -- nodes (jp / sg / us ...) --"
     echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
