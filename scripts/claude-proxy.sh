@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.5.0"
+CLAUDE_PROXY_VERSION="2.5.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -1844,7 +1844,7 @@ chrome-proxy() {
     fi
     socks="socks5://127.0.0.1:$port"
 
-    local c pdir
+    local c pdir dock_tip=""
     if _is_wsl; then
         # WSL has no Linux Chrome; drive Windows Chrome instead. It reaches the
         # WSL-side SOCKS port via WSL2 localhost forwarding (on by default).
@@ -1881,6 +1881,14 @@ chrome-proxy() {
         # A dedicated user-data-dir OUTSIDE the real Chrome folder: the proxied
         # Chrome is fully isolated and can never touch your normal profiles.
         pdir=$(_chrome_profile_dir "$(_chrome_base_dir)" "$name")
+        # macOS gives an app ONE Dock icon: if the normal Chrome is not running,
+        # the proxied one takes that icon over and a click on it only re-focuses
+        # the proxied window - the normal Chrome then needs 'open -n' to start.
+        local procs bundle="${app##*/}"
+        bundle="${bundle%.app}.app/Contents/MacOS/"
+        procs=$(ps -axo command= 2>/dev/null)
+        printf '%s\n' "$procs" | grep -F -- "$bundle" | grep -qv -- '--user-data-dir=' \
+            || dock_tip="open -n -a \"$app\""
         open -n -a "$app" --args \
             --proxy-server="$socks" \
             --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
@@ -1900,6 +1908,7 @@ chrome-proxy() {
     fi
     [ -n "$profile" ] && label="$label, profile '$profile'"
     echo "[OK] Chrome launched through $label - $socks, data dir $pdir"
+    [ -z "$dock_tip" ] || echo "[Tip] The Dock's Chrome icon now points at this proxied Chrome. To open your normal Chrome next to it:  $dock_tip"
 }
 
 # chrome-profiles [node]  - the Chrome profiles that exist in each node's data dir
