@@ -96,7 +96,11 @@ CLAUDE_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 CLAUDE_PROXY_BANNER=1
 
 # Where the background ssh writes its errors (auth failure vs. network timeout).
-CLAUDE_TUNNEL_LOG="/tmp/claude-tunnel.log"
+# Per-UID: a single shared /tmp/claude-tunnel.log is created by whoever runs
+# first (often root, mode 644), and then every `ssh 2>$CLAUDE_TUNNEL_LOG` by any
+# other user fails on the REDIRECT - before ssh even starts - so the tunnel dies
+# with no usable error. The pidfile below derives from this, so it splits too.
+CLAUDE_TUNNEL_LOG="${CLAUDE_TUNNEL_LOG:-${TMPDIR:-/tmp}/claude-tunnel-$(id -u).log}"
 
 # v2.5: every terminal tab shares ONE tunnel, so one hung tunnel used to freeze
 # them all. A small background watchdog now owns the ssh process: it restarts
@@ -140,8 +144,25 @@ _listeners() {
     lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null
 }
 
+# Is ANYONE listening on this TCP port - including another user?
+# lsof and ss only NAME processes you own, but both still SEE the socket, so
+# "can I bind here?" must not be answered from a PID list. A root-owned :8080
+# looked FREE to a normal user, so the fallback below never fired and ssh died
+# with "bind: Address already in use" seconds AFTER reporting [OK].
+_port_bound() {
+    local p=$1
+    if command -v ss >/dev/null 2>&1; then
+        # $4 is "Local Address:Port" ([::1]:8080, 0.0.0.0:8080, *:8080).
+        # The [:.] guard stops :80 matching :8080.
+        ss -ltn 2>/dev/null | awk -v port="$p" '$4 ~ ("[:.]" port "$") { f = 1 } END { exit !f }'
+        return $?
+    fi
+    # No ss: lsof still sees only our own sockets, but it beats nothing.
+    [ -n "$(_listeners "$p")" ]
+}
+
 _port_in_use() {
-    [ -n "$(_listeners "$1")" ]
+    _port_bound "$1"
 }
 
 # Short command name of a PID ("" if gone).
@@ -1308,6 +1329,18 @@ proxy-node() {
 # ============================================================
 
 tunnel-start() {
+    # Everything below needs an ssh client, and without this guard the failure
+    # is opaque: the backgrounded start swallows "command not found" and you get
+    # a bare "tunnel failed to start" instead.
+    if ! command -v ssh >/dev/null 2>&1; then
+        echo "[Err] 'ssh' not found - no tunnel is possible. Install an OpenSSH client:"
+        echo "       Debian/Ubuntu: sudo apt install openssh-client"
+        echo "       Fedora/RHEL:   sudo dnf install openssh-clients"
+        echo "       Alpine:        sudo apk add openssh-client"
+        echo "       macOS:         included with the system (check your PATH)"
+        return 1
+    fi
+
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
@@ -1794,6 +1827,16 @@ proxy-doctor() {
     fi
 
     # --- tools ---
+    if command -v ssh >/dev/null 2>&1; then
+        echo "$ok  ssh installed ($(ssh -V 2>&1 | head -1))"
+    else
+        echo "$bad ssh NOT installed - the tunnel cannot be built at all. Fix: sudo apt install openssh-client"
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        echo "$ok  ss installed - ports held by OTHER users are detected (fallback works)"
+    else
+        echo "$warn ss NOT installed - port checks fall back to lsof, which cannot see other users' sockets, so a port held by root may look free and collide at bind time. Fix: sudo apt install iproute2"
+    fi
     if command -v lsof >/dev/null 2>&1; then
         echo "$ok  lsof installed"
     else
