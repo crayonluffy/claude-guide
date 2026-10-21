@@ -32,7 +32,7 @@
 # read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-$script:PROFILE_VERSION = '2.4.0'
+$script:PROFILE_VERSION = '2.4.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -1511,7 +1511,11 @@ function chrome-proxy {
         }
         if ($a -match '^-{1,2}profile[=:](.+)$') { $profileName = $Matches[1]; continue }
         $n = if ($null -eq $node) { Find-ProxyNode $a } else { $null }
-        if ($n) { $node = $n } else { $extra += $a }
+        if ($n) { $node = $n }
+        elseif ($null -eq $node -and $a -match '^[A-Za-z][A-Za-z0-9]*$') {
+            Write-Host "[Err] Unknown proxy node '$a' - Chrome not launched. Run 'proxy-nodes -Refresh' in this window and check the list. For a website, use an explicit URL such as https://$a/ ." -ForegroundColor Red
+            return
+        } else { $extra += $a }
     }
     if ($profileName -ieq 'default') { $profileName = 'Default' }
     if ($profileName -and ($profileName -notmatch '^[A-Za-z0-9_ -][A-Za-z0-9._ -]*$')) {

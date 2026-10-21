@@ -2,6 +2,39 @@
 
 ## Getting the newest profile (any time)
 
+### Windows 2.4.1 / macOS, Linux and WSL 2.5.2
+
+`chrome-proxy` now stops with a clear error when a bare node name is missing
+from the loaded catalogue, instead of passing it to Chrome as a website such
+as `http://sg/`. Node names (`sg`) and SSH aliases (`sgvpn`) both work when
+listed in the catalogue. Existing settings and Chrome profiles are kept.
+
+Update and reload in the affected terminal:
+
+```powershell
+proxy-update
+. "$HOME\.claude-proxy.ps1"
+proxy-nodes -Refresh
+chrome-proxy sg -Profile sg https://www.google.com/
+```
+
+```bash
+proxy-update
+source ~/.claude-proxy.sh
+proxy-nodes --refresh
+chrome-proxy sg --profile sg https://www.google.com/
+```
+
+Close the affected proxy Chrome windows before retrying. Refreshing nodes
+updates the catalogue; reloading the profile updates the launcher function.
+See [node troubleshooting](proxy-nodes.md#chrome-opens-httpsg-or-reports-err_socks_connection_failed)
+for SSH and SOCKS checks if the browser still fails.
+
+Version tags identify each script independently: `powershell-v2.4.1` for
+`claude-proxy.ps1` and `bash-v2.5.2` for `claude-proxy.sh`. Both tags point to
+the repository commit containing this update; future upgrades use the same
+`powershell-v<version>` and `bash-v<version>` naming convention.
+
 > **New in v2.4 — `cc-install`.** One command checks **Node.js**, **Claude Code** and **Codex** and installs or updates what's missing or too old (through the proxy). The setup wizard now ends with it. Update the tools any time with `cc-install`; update this setup with `proxy-update`.
 >
 > **New in v2.3 — a private node list.** `proxy-nodes --from <your VM alias>` (`-From` on Windows) fetches the list over SSH from a VM you choose — nothing public. Your admin sets it up with forge `proxynodes-manager`. On Windows, `proxy-update` now also loads the new version into the open window. Details: **[Nodes](proxy-nodes.md)**.
