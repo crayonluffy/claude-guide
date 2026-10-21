@@ -91,3 +91,19 @@ Assert ($script:AppCalls -eq 1) 'healthy launch missing'
 Assert ($script:AppArgs.Count -eq 1 -and $script:AppArgs[0] -eq 'hello world') 'arguments changed'
 Assert ($global:LASTEXITCODE -eq 17) 'exit code changed by cleanup'
 Write-Host 'PASS: PowerShell mandatory preflight, arguments, and native exit code'
+if (-not (Get-Command proxy-test -ErrorAction SilentlyContinue)) {throw 'safe simulation is missing'}
+function Wait-RecoveryDemo {}
+function curl.exe {throw 'demo called live curl'}
+function Start-RecoverySsh {throw 'demo called live SSH'}
+foreach ($scenario in @('recover','prolonged')) {
+ $demo=@(proxy-test $scenario --fast)
+ Assert (($demo -match 'Proxy connection lost').Count -eq 1) 'lost warning missing or duplicated'
+ Assert (($demo -match 'Proxy connection restored').Count -eq 1) 'restored warning missing'
+ Assert (($demo -notmatch '^\[SIMULATION\]').Count -eq 0) 'unlabelled demo output'
+ if ($scenario -eq 'prolonged') {
+  Assert (($demo -match 'session has not been terminated').Count -eq 1) 'prolonged warning must appear once'
+  Assert (($demo -match 't=75.*retry').Count -eq 1) 'retries stopped at grace threshold'
+ }
+}
+try {proxy-test unknown;throw 'invalid scenario accepted'} catch {if ($_ -notmatch 'usage:') {throw}}
+Write-Host 'PASS: PowerShell isolated simulations and retries beyond grace period'

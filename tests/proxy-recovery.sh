@@ -109,3 +109,18 @@ assert test "$(grep -c 'session has not been terminated' "$scratch/notices")" = 
 assert test "$(grep -c 'Proxy connection lost' "$scratch/notices")" = 1
 assert test "$(cut -d'|' -f1 "$scratch/notifications/claude.state")" = prolonged
 echo 'PASS: real Bash subscriber de-duplicates prolonged warning and leaves shared state intact'
+assert declare -F proxy-test
+_recovery_demo_sleep() { :; }
+curl() { echo 'FAIL: demo called real transport' >&2;return 90; }
+ssh() { echo 'FAIL: demo called SSH' >&2;return 90; }
+for scenario in recover prolonged; do
+ proxy-test "$scenario" --fast > "$scratch/demo.$scenario"
+ assert grep -q 'Proxy connection lost' "$scratch/demo.$scenario"
+ assert grep -q 'Proxy connection restored' "$scratch/demo.$scenario"
+ assert grep -q 'simulated retry' "$scratch/demo.$scenario"
+ assert test "$(grep -vc '^\[SIMULATION\]' "$scratch/demo.$scenario" || :)" = 0
+done
+assert test "$(grep -c 'session has not been terminated' "$scratch/demo.prolonged")" = 1
+assert grep -q 't=75.*retry' "$scratch/demo.prolonged"
+if proxy-test unknown > /dev/null;then echo 'FAIL: invalid demo accepted';exit 1;fi
+echo 'PASS: Bash isolated simulations and retries beyond grace period'

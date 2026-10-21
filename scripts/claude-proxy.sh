@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.5.2"
+CLAUDE_PROXY_VERSION="2.6.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -460,6 +460,29 @@ _recovery_subscribe() {
 _recovery_unsubscribe() {
     # Caller supplies the start identity captured immediately after subscribing.
     _recovery_signal_owned "$1" "$2" || :
+}
+_recovery_demo_sleep() { sleep "$1"; }
+proxy-test() {
+    local scenario="${1:-}" fast=0 t end=20 state='' kind event retries=0 tick=5
+    case "$scenario" in recover) end=20;; prolonged) end=80;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+    shift
+    if [ $# -gt 0 ]; then
+        case "$1" in --fast|-Fast) fast=1; tick=.5;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+        shift
+    fi
+    [ $# -eq 0 ] || { echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2; }
+    echo '[SIMULATION] Isolated in-memory demo; no real network, process, or settings changes.'
+    [ "$fast" -eq 0 ] || echo '[SIMULATION] Fast mode: 60 simulated seconds = 6 wall-clock seconds.'
+    for ((t=0; t<=end; t+=5)); do
+        kind=healthy
+        if [ "$t" -ge 5 ] && [ "$t" -lt "$end" ]; then kind=tunnel; retries=$((retries+1)); fi
+        state=$(_recovery_step "$state" "$kind|0|000|000|simulation" "$t" 60)
+        event=$(printf '%s' "$state" | cut -d'|' -f9)
+        [ "$event" = none ] || printf '[SIMULATION] t=%s %s\n' "$t" "$(_recovery_message "$event")"
+        [ "$kind" = healthy ] || printf '[SIMULATION] t=%s simulated retry %s; session stays open.\n' "$t" "$retries"
+        [ "$t" -eq "$end" ] || _recovery_demo_sleep "$tick" || return
+    done
+    echo '[SIMULATION] Complete; no user session was launched or closed.'
 }
 # END PROXY RECOVERY
 
@@ -2362,6 +2385,7 @@ cc-help() {
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
     echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
+    echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"

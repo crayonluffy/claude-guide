@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.4.1'
+$script:PROFILE_VERSION = '2.5.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -369,6 +369,26 @@ function Start-RecoverySubscriber {
 function Stop-RecoverySubscriber {
     param($Handle)
     if ($Handle) { try { $Handle.PowerShell.Stop() } finally { $Handle.PowerShell.Dispose() } }
+}
+
+function Wait-RecoveryDemo { param([double]$Seconds) Start-Sleep -Milliseconds ([int]($Seconds*1000)) }
+function proxy-test {
+    param([string]$Scenario,[switch]$Fast)
+    if ($Scenario -notin @('recover','prolonged')) { throw 'usage: proxy-test <recover|prolonged> [--fast]' }
+    foreach ($a in $args) { if ($a -eq '--fast') {$Fast=$true} else {throw 'usage: proxy-test <recover|prolonged> [--fast]'} }
+    $end=if($Scenario -eq 'recover'){20}else{80}
+    $tick=if($Fast){.5}else{5};$state=$null;$retries=0
+    '[SIMULATION] Isolated in-memory demo; no real network, process, or settings changes.'
+    if ($Fast) {'[SIMULATION] Fast mode: 60 simulated seconds = 6 wall-clock seconds.'}
+    for ($t=0; $t -le $end; $t+=5) {
+        $kind=if($t -ge 5 -and $t -lt $end){'tunnel'}else{'healthy'}
+        $r=Get-RecoveryTransition -State $state -Sample @{kind=$kind} -Now $t -NoticeAfter 60
+        $state=$r.State
+        if ($r.Event -ne 'none') {"[SIMULATION] t=$t $(Get-RecoveryMessage $r.Event)"}
+        if ($kind -ne 'healthy') {$retries++;"[SIMULATION] t=$t simulated retry $retries; session stays open."}
+        if ($t -lt $end) {Wait-RecoveryDemo $tick}
+    }
+    '[SIMULATION] Complete; no user session was launched or closed.'
 }
 
 function Get-TunnelHealth {
@@ -2109,6 +2129,7 @@ function cc-help {
     Write-Host "                    (anything after cc/cx is passed to claude/codex as-is)" -ForegroundColor DarkGray
     Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch anything" -ForegroundColor DarkGray
     Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
+    Write-Host "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host "  cc-install      - Check / install / update Node.js, Claude Code and Codex (-Check: report only)" -ForegroundColor DarkGray
