@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.5.0'
+$script:PROFILE_VERSION = '2.6.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -106,11 +106,12 @@ $script:WATCHDOG_NOTICE_AFTER=60
 $script:WATCHDOG_PROBE_TIMEOUT=3
 $script:WATCHDOG_PROGRESS_INTERVAL=30
 $script:WATCHDOG_MAX_BACKOFF=30
+$script:DESKTOP_NOTIFICATIONS='auto' # auto or off
 $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','TUNNEL_LOG')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -226,7 +227,7 @@ function Open-RecoveryLock {
 }
 function Write-RecoveryStatus {
     param([string]$Identity,[string]$Provider,$State)
-    if ($Provider -notin @('claude','codex','owner','descriptor')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop')) { throw 'Invalid recovery record' }
     $dest = Join-Path $Identity "$Provider.json"
     $tmp = "$dest.$([guid]::NewGuid()).tmp"
     try {
@@ -237,7 +238,7 @@ function Write-RecoveryStatus {
 }
 function Get-RecoveryStatus {
     param([string]$Identity,[string]$Provider)
-    if ($Provider -notin @('claude','codex','owner','descriptor')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop')) { throw 'Invalid recovery record' }
     try { return ([IO.File]::ReadAllText((Join-Path $Identity "$Provider.json")) | ConvertFrom-Json -ErrorAction Stop) }
     catch { return [pscustomobject]@{ phase='unknown'; generation=-1; event='none' } }
 }
@@ -331,10 +332,12 @@ function Invoke-RecoveryWorker {
     $dir = Split-Path -Parent $DescriptorPath
     $lease = Open-RecoveryLock $dir
     if (-not $lease) { return }
-    $ssh = $null; $started=''; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0
+    $ssh = $null; $started=''; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
     try {
         $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
         foreach ($k in $script:CONF_KEYS) { if ($null -ne $cfg.$k) { Set-Variable -Scope Script -Name $k -Value $cfg.$k } }
+        $desktop=New-RecoveryDesktopContext
+        Write-RecoveryStatus $dir desktop (Get-RecoveryDesktopStatus $desktop)
         Write-RecoveryStatus $dir owner @{ProcessId=$PID;Started="$((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)"}
         while (-not (Test-Path (Join-Path $dir 'stopped'))) {
             $now = Get-RecoveryTime
@@ -361,6 +364,15 @@ function Invoke-RecoveryWorker {
                 $states[$provider]=$s
                 Write-RecoveryStatus $dir $provider $s
             }
+            $attention=Get-RecoveryDesktopTransition -State $desktopState -States $states -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
+            $desktopState=$attention.State
+            if ($attention.Event -in @('lost','prolonged','restored') -and $desktop.Backend -ne 'off') {
+                if (-not (Send-RecoveryDesktopNotification $desktop $attention.Event (Get-RecoveryDesktopScope $states))) {
+                    $desktop.LastSubmission='failed'
+                    Add-Content (Join-Path $dir 'events.log') '[Notify] Desktop submission unavailable or failed; terminal/status/log fallbacks remain enabled. Try proxy-notify test.'
+                }
+            }
+            Write-RecoveryStatus $dir desktop (Get-RecoveryDesktopStatus $desktop)
             if ($allTunnel) { $fails++ } else { $fails=0 }
             if ($fails -ge $script:WATCHDOG_FAILS -and $ssh -and -not $ssh.HasExited) {
                 Stop-RecoveryProcess $ssh.Id $started | Out-Null
@@ -373,6 +385,7 @@ function Invoke-RecoveryWorker {
             if (Stop-RecoveryProcess $ssh.Id $started) { $null=$ssh.WaitForExit(5000) }
             $ssh.Dispose()
         }
+        Stop-RecoveryDesktopContext $desktop
         $lease.Dispose()
     }
 }
@@ -382,6 +395,133 @@ function proxy-restart {
     elseif (-not (tunnel-stop)) { throw 'Previous tunnel could not be stopped; restart was not started.' }
     Start-RecoveryOwner | Out-Null
     Write-Host '[Recovery] Restart requested on the same ports; proxy settings remain enabled.'
+}
+
+function Get-RecoveryDesktopTransition {
+    param([hashtable]$State,[hashtable]$States,[double]$Now,[int]$NoticeAfter=60)
+    $kind=if ($States.claude.phase -eq 'healthy' -and $States.codex.phase -eq 'healthy') {'healthy'}else{'unavailable'}
+    return (Get-RecoveryTransition -State $State -Sample @{kind=$kind} -Now $Now -NoticeAfter $NoticeAfter)
+}
+function Get-RecoveryDesktopScope {
+    param([hashtable]$States)
+    if ($States.claude.phase -eq 'healthy' -and $States.codex.phase -ne 'healthy') {return 'Codex'}
+    if ($States.codex.phase -eq 'healthy' -and $States.claude.phase -ne 'healthy') {return 'Claude'}
+    return 'Claude and Codex'
+}
+function Get-RecoveryDesktopMessage {
+    param([string]$Event,[string]$Providers)
+    switch ($Event) {
+        lost {return @{Title='Proxy connection lost';Body="${Providers}: reconnecting. Sessions stay open.";Icon='Warning';Tooltip='Proxy recovery: reconnecting';Event=$Event}}
+        prolonged {return @{Title='Proxy still unavailable';Body="${Providers}: retrying for a prolonged outage. Keep waiting or exit normally; sessions stay open.";Icon='Warning';Tooltip='Proxy recovery: reconnecting';Event=$Event}}
+        restored {return @{Title='Proxy connection restored';Body="${Providers}: connected again. Retry any failed request your CLI did not retry.";Icon='Info';Tooltip='Proxy recovery: connected';Event=$Event}}
+        test {return @{Title='[TEST] Proxy desktop notifications';Body='This is a test. No proxy, network, or session was changed.';Icon='Info';Tooltip='Proxy notification test';Event=$Event}}
+    }
+    return $null
+}
+function New-RecoveryDesktopContext {
+    $mode=if ($null -eq $script:DESKTOP_NOTIFICATIONS) {'auto'}else{"$script:DESKTOP_NOTIFICATIONS"}
+    $ctx=@{Backend='unavailable';Reason='Windows desktop notifications require an interactive Windows session. Linux/macOS use the Bash profile.';LastSubmission='not-tested';PowerShell=$null;Runspace=$null}
+    if ($mode -in @('off','0')) {$ctx.Backend='off';$ctx.Reason='Disabled in settings.';return $ctx}
+    if ($mode -notin @('auto','1')) {$ctx.Reason='Use DESKTOP_NOTIFICATIONS=auto or off.';return $ctx}
+    if ($env:OS -ne 'Windows_NT' -or -not [Environment]::UserInteractive) {return $ctx}
+    try {
+        $ctx.Queue=New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $ctx.Stop=New-Object System.Threading.ManualResetEventSlim($false)
+        $ctx.Sync=[hashtable]::Synchronized(@{Ready=$false;Error='';LastSubmission='not-tested'})
+        $ctx.Runspace=[RunspaceFactory]::CreateRunspace()
+        $ctx.Runspace.ApartmentState='STA';$ctx.Runspace.ThreadOptions='ReuseThread';$ctx.Runspace.Open()
+        $ctx.PowerShell=[PowerShell]::Create();$ctx.PowerShell.Runspace=$ctx.Runspace
+        [void]$ctx.PowerShell.AddScript({
+            param($queue,$stop,$sync)
+            $icon=$null
+            try {
+                Add-Type -AssemblyName System.Windows.Forms,System.Drawing -ErrorAction Stop
+                $icon=New-Object System.Windows.Forms.NotifyIcon
+                $icon.Icon=[Drawing.SystemIcons]::Information
+                $icon.Text='Proxy recovery: connected'
+                # Visible only after the first alert; kept alive until owner shutdown.
+                $sync.Ready=$true
+                while (-not $stop.Wait(100)) {
+                    $item=$null
+                    while ($queue.TryDequeue([ref]$item)) {
+                        $icon.Icon=if ($item.Icon -eq 'Warning') {[Drawing.SystemIcons]::Warning}else{[Drawing.SystemIcons]::Information}
+                        $icon.Text=$item.Tooltip
+                        $icon.Visible=$true
+                        $tip=[Enum]::Parse([System.Windows.Forms.ToolTipIcon],$item.Icon)
+                        $icon.ShowBalloonTip(10000,$item.Title,$item.Body,$tip)
+                        $sync.LastSubmission='submitted'
+                    }
+                    # This dedicated UI thread owns the tray window and message pump.
+                    [System.Windows.Forms.Application]::DoEvents()
+                }
+            } catch {$sync.Error=$_.Exception.Message;$sync.LastSubmission='failed'}
+            finally {if ($icon) {$icon.Visible=$false;$icon.Dispose()};$sync.Ready=$false}
+        }).AddArgument($ctx.Queue).AddArgument($ctx.Stop).AddArgument($ctx.Sync)
+        $ctx.Async=$ctx.PowerShell.BeginInvoke()
+        for ($i=0;$i -lt 20 -and -not $ctx.Sync.Ready -and -not $ctx.Async.IsCompleted;$i++) {Start-Sleep -Milliseconds 100}
+        $ctx.Backend='windows-tray';$ctx.Reason='OS taskbar notification; Windows notification settings control visibility.'
+    } catch {
+        $ctx.Reason="Desktop initialization failed: $($_.Exception.Message)"
+        Stop-RecoveryDesktopContext $ctx
+        $ctx.Backend='unavailable'
+    }
+    return $ctx
+}
+function Send-RecoveryDesktopNotification {
+    param($Context,[string]$Event,[string]$Providers,[switch]$Simulation)
+    $message=Get-RecoveryDesktopMessage $Event $Providers
+    if (-not $message) {return $false}
+    if ($Simulation) {$message.Title="[SIMULATION] $($message.Title)"}
+    try {
+        if ($Context.Backend -ne 'windows-tray' -or $Context.Closed -or $Context.Sync.Error) {return $false}
+        if (-not $Context.Sync.Ready -and (-not $Context.Async -or $Context.Async.IsCompleted)) {return $false}
+        $Context.Queue.Enqueue($message)
+        $Context.LastSubmission='queued'
+        return $true
+    } catch {$Context.LastSubmission='failed';return $false}
+}
+function Get-RecoveryDesktopStatus {
+    param($Context)
+    $result=$Context.LastSubmission;$reason=$Context.Reason
+    if ($Context.Sync) {
+        if ($Context.Sync.LastSubmission -ne 'not-tested') {$result=$Context.Sync.LastSubmission}
+        if ($Context.Sync.Error) {$result='failed';$reason=$Context.Sync.Error}
+    }
+    return @{backend=$Context.Backend;submission=$result;reason=$reason}
+}
+function Stop-RecoveryDesktopContext {
+    param($Context)
+    if (-not $Context -or $Context.Closed) {return}
+    $Context.Closed=$true
+    try {if ($Context.Stop) {$Context.Stop.Set()}} catch { }
+    try {if ($Context.Async) {$null=$Context.Async.AsyncWaitHandle.WaitOne(1500)}} catch { }
+    if ($Context.PowerShell) {
+        try {$Context.PowerShell.Stop()} catch { }
+        try {$Context.PowerShell.Dispose()} catch { }
+    }
+    try {if ($Context.Runspace) {$Context.Runspace.Dispose()}} catch { }
+    try {if ($Context.Stop) {$Context.Stop.Dispose()}} catch { }
+}
+
+function proxy-notify {
+    param([string]$Action='status')
+    if ($Action -notin @('status','test') -or $args.Count) {throw 'usage: proxy-notify [status|test]'}
+    $ctx=New-RecoveryDesktopContext
+    try {
+        $available=Get-RecoveryDesktopStatus $ctx
+        Write-Host "[Notify] Desktop backend: $($available.backend). $($available.reason)"
+        if ($Action -eq 'test') {
+            if (-not (Send-RecoveryDesktopNotification $ctx test 'Claude and Codex')) {Write-Warning 'Test could not be submitted. Terminal warnings, proxy-status, and logs remain available.';return $false}
+            Write-Host '[Notify] Test queued. Confirm you see a Windows taskbar notification; OS settings can hide it. Waiting 10 seconds to keep its tray icon alive.'
+            Start-Sleep -Seconds 10
+            $status=Get-RecoveryDesktopStatus $ctx
+            if ($status.submission -eq 'failed') {Write-Warning $status.reason;return $false}
+            return $true
+        }
+        $identity=Get-RecoveryIdentity
+        Write-Host "[Notify] Last owner status: $((Get-RecoveryStatus $identity desktop) | ConvertTo-Json -Compress)"
+        Write-Host '[Notify] Try proxy-notify test in another terminal while cc/cx is open. Desktop alerts never take over CLI input.'
+    } finally {Stop-RecoveryDesktopContext $ctx}
 }
 
 function Start-RecoverySubscriber {
@@ -415,22 +555,36 @@ function Stop-RecoverySubscriber {
 
 function Wait-RecoveryDemo { param([double]$Seconds) Start-Sleep -Milliseconds ([int]($Seconds*1000)) }
 function proxy-test {
-    param([string]$Scenario,[switch]$Fast)
-    if ($Scenario -notin @('recover','prolonged')) { throw 'usage: proxy-test <recover|prolonged> [--fast]' }
-    foreach ($a in $args) { if ($a -eq '--fast') {$Fast=$true} else {throw 'usage: proxy-test <recover|prolonged> [--fast]'} }
+    param([string]$Scenario,[switch]$Fast,[switch]$Desktop)
+    $usage='usage: proxy-test <recover|prolonged> [--fast] [--desktop]'
+    if ($Scenario -notin @('recover','prolonged')) {throw $usage}
+    foreach ($a in $args) {switch ($a) {'--fast' {$Fast=$true} '--desktop' {$Desktop=$true} default {throw $usage}}}
     $end=if($Scenario -eq 'recover'){20}else{80}
-    $tick=if($Fast){.5}else{5};$state=$null;$retries=0
-    '[SIMULATION] Isolated in-memory demo; no real network, process, or settings changes.'
+    $tick=if($Fast){.5}else{5};$state=$null;$retries=0;$context=$null
+    '[SIMULATION] Isolated in-memory demo; no real SSH, CLI, network, or settings changes.'
     if ($Fast) {'[SIMULATION] Fast mode: 60 simulated seconds = 6 wall-clock seconds.'}
-    for ($t=0; $t -le $end; $t+=5) {
-        $kind=if($t -ge 5 -and $t -lt $end){'tunnel'}else{'healthy'}
-        $r=Get-RecoveryTransition -State $state -Sample @{kind=$kind} -Now $t -NoticeAfter 60
-        $state=$r.State
-        if ($r.Event -ne 'none') {"[SIMULATION] t=$t $(Get-RecoveryMessage $r.Event)"}
-        if ($kind -ne 'healthy') {$retries++;"[SIMULATION] t=$t simulated retry $retries; session stays open."}
-        if ($t -lt $end) {Wait-RecoveryDemo $tick}
-    }
-    '[SIMULATION] Complete; no user session was launched or closed.'
+    try {
+        if ($Desktop) {
+            $context=New-RecoveryDesktopContext
+            "[SIMULATION] Real desktop alerts enabled ($($context.Backend)); proxy/network/session actions remain simulated."
+        }
+        for ($t=0; $t -le $end; $t+=5) {
+            $kind=if($t -ge 5 -and $t -lt $end){'tunnel'}else{'healthy'}
+            $r=Get-RecoveryTransition -State $state -Sample @{kind=$kind} -Now $t -NoticeAfter 60
+            $state=$r.State
+            if ($r.Event -ne 'none') {"[SIMULATION] t=$t $(Get-RecoveryMessage $r.Event)"}
+            if ($Desktop -and $r.Event -in @('lost','prolonged','restored')) {
+                if (-not (Send-RecoveryDesktopNotification $context $r.Event 'Claude and Codex' -Simulation)) {'[SIMULATION] Desktop submission unavailable/failed; use proxy-notify status and check OS notification settings.'}
+            }
+            if ($kind -ne 'healthy') {$retries++;"[SIMULATION] t=$t simulated retry $retries; session stays open."}
+            if ($t -lt $end) {Wait-RecoveryDemo $tick}
+        }
+        if ($context -and $context.Backend -eq 'windows-tray') {
+            '[SIMULATION] Keeping the test tray icon alive for 10 seconds so the final alert can display; Ctrl+C cancels only this demo.'
+            Wait-RecoveryDemo 10
+        }
+        '[SIMULATION] Complete; no user session was launched or closed.'
+    } finally {if ($context) {Stop-RecoveryDesktopContext $context}}
 }
 
 function Get-TunnelHealth {
@@ -1240,7 +1394,11 @@ function cc {
     Write-Host ""
 
     $subscriber=$null
-    if ($script:TUNNEL_WATCHDOG) { $subscriber=Start-RecoverySubscriber (Start-RecoveryOwner claude) claude }
+    if ($script:TUNNEL_WATCHDOG) {
+        $identity=Start-RecoveryOwner claude
+        $subscriber=Start-RecoverySubscriber $identity claude
+        Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
+    }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
     try {
     $app = $o.App
@@ -1280,7 +1438,11 @@ function cx {
     Write-Host ""
 
     $subscriber=$null
-    if ($script:TUNNEL_WATCHDOG) { $subscriber=Start-RecoverySubscriber (Start-RecoveryOwner codex) codex }
+    if ($script:TUNNEL_WATCHDOG) {
+        $identity=Start-RecoveryOwner codex
+        $subscriber=Start-RecoverySubscriber $identity codex
+        Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
+    }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
     try {
     $app = $o.App
@@ -1375,6 +1537,7 @@ function cc-stop {
 # ============================================================
 
 function proxy-status {
+    proxy-notify status
     $identity=Get-RecoveryIdentity
     Write-Host "[Recovery] State: $identity"
     foreach ($provider in @('claude','codex')) { Write-Host "${provider}: $((Get-RecoveryStatus $identity $provider) | ConvertTo-Json -Compress)" }
@@ -2171,6 +2334,7 @@ function cc-help {
     Write-Host "                    (anything after cc/cx is passed to claude/codex as-is)" -ForegroundColor DarkGray
     Write-Host "  proxy-up        - Turn the proxy ON, but DON'T launch anything" -ForegroundColor DarkGray
     Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
+    Write-Host "  proxy-notify test - show a real desktop test alert (no proxy/session changes)" -ForegroundColor DarkGray
     Write-Host "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)" -ForegroundColor DarkGray
     Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray

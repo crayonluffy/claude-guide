@@ -2,7 +2,25 @@
 
 ## Getting the newest profile (any time)
 
-### Prepared: PowerShell 2.5.0 / Bash 2.6.0
+### Prepared: PowerShell 2.6.0 / Bash 2.7.0 — desktop alerts
+
+Adds native desktop notifications for lost connection, prolonged outage and
+restoration while `cc`/`cx` remains in the foreground. The shared owner groups
+provider failures and avoids duplicate popups across terminal tabs. Windows
+uses a tray notification, macOS Notification Center, and Linux `notify-send`.
+
+After this version is published, update/reload your profile, then run
+`proxy-restart` once for the existing owner to adopt the notifier. Keep `cx`
+open and run `proxy-notify test` from another terminal to confirm visibility.
+Use `proxy-test prolonged --fast --desktop` for simulated lost/prolonged/restored
+alerts without changing real proxy/session state. `DESKTOP_NOTIFICATIONS=off`
+disables desktop alerts while preserving terminal/log fallbacks.
+
+Prepared tag names: `powershell-v2.6.0` and `bash-v2.7.0`. Native Windows/macOS
+visual delivery still needs manual testing; OS settings can suppress popups.
+See [desktop UI, settings and verification](proxy-profile.md#desktop-alerts-while-the-cli-owns-the-terminal).
+
+### PowerShell 2.5.0 / Bash 2.6.0
 
 Adds shared fixed-port SSH recovery, provider-specific live outage warnings,
 a configurable 60-second prolonged warning, mandatory proxy transport checks,
@@ -10,12 +28,12 @@ and safe `proxy-test recover --fast` / `proxy-test prolonged --fast` demos.
 Running sessions remain open and keep their proxy settings while retries continue.
 See [recovery behavior and settings](proxy-profile.md#recovery-while-claude-or-codex-is-running).
 
-After this version is published, run `proxy-update` and reload your profile.
+Run `proxy-update` and reload your profile.
 If a previous profile owns the tunnel, use `proxy-restart` once to replace it.
 Load passphrase-protected keys into the SSH agent before starting the worker.
 
-Prepared tag names: `powershell-v2.5.0` and `bash-v2.6.0`. These are local release
-preparations; this change does not publish a release or remote tags.
+Version identifiers: `powershell-v2.5.0` and `bash-v2.6.0`. Profile changes were
+merged in PR #22; version tags are managed separately.
 
 ### Windows 2.4.1 / macOS, Linux and WSL 2.5.2
 

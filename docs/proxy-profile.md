@@ -22,7 +22,7 @@ You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's
 
 ## Recovery while Claude or Codex is running
 
-PowerShell 2.5.0 and Bash 2.6.0 share one recovery owner per SSH destination
+PowerShell 2.5.0+ and Bash 2.6.0+ share one recovery owner per SSH destination
 and local port pair. It checks both providers about every five seconds (plus
 probe time), reconnects an exited SSH process, and restarts only its own SSH
 child after two consecutive tunnel failures. Reconnects keep the established
@@ -95,6 +95,98 @@ covers Linux Bash and Linux-hosted PowerShell 7.6.7 with fake SSH/transport
 adapters; native Windows PowerShell 5.1/OpenSSH, macOS console behavior, and
 real interrupted-network recovery still need platform smoke tests.
 
+## Desktop alerts while the CLI owns the terminal
+
+PowerShell 2.6.0 and Bash 2.7.0 add desktop alerts so Codex/Claude screen
+redraws cannot erase the only warning. One shared tunnel owner sends alerts;
+opening more `cc`/`cx` tabs does not create extra desktop popups for that owner.
+
+| Situation | Alert | User action |
+|---|---|---|
+| First failed check | **Proxy connection lost** — reconnecting; sessions stay open | Continue waiting |
+| Still down after the configured threshold (60 seconds by default) | **Proxy still unavailable** — retries continue | Keep waiting or exit the CLI normally |
+| All affected provider transports recover | **Proxy connection restored** — retry a failed request if needed | Continue working |
+
+The owner groups Claude/Codex failures into one desktop outage. Partial recovery
+does not produce an "all restored" alert, reset the outage timer, or duplicate
+the prolonged warning. Routine retry progress stays in the terminal/log; it
+never produces a desktop popup on every poll. No alert grabs focus, opens a
+modal dialog, injects keystrokes, or terminates a CLI session.
+
+| Platform | Desktop UI | Availability |
+|---|---|---|
+| Windows PowerShell / pwsh | Native taskbar notification with a tray status icon; warning while reconnecting, information after restoration | Built-in .NET WinForms, no BurntToast module required; icon appears after the first alert and is disposed when its owner stops |
+| macOS Bash / zsh | Notification Center banner/alert via `osascript` | User notification permissions and Focus settings apply |
+| Linux Bash | Desktop notification via `notify-send` | Requires libnotify's client, a session D-Bus and a running notification service |
+| Headless SSH / WSL without a desktop notification service | Terminal warnings, persistent status and logs | Cannot display a notification on the client PC merely because that PC opened SSH; use the Windows profile on Windows for its native UI |
+
+Windows uses the documented
+[NotifyIcon taskbar notification API](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.notifyicon.showballoontip).
+macOS uses Apple's
+[scripted Notification Center interface](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/DisplayNotifications.html).
+Linux follows the
+[desktop notification service model](https://specifications.freedesktop.org/notification/latest-single/).
+Windows accessibility settings and desktop notification preferences control
+visibility and duration. Focus / Do Not Disturb can suppress alerts. A successful
+submission means the OS adapter accepted the request, not proof that you saw it.
+The tray icon is supplemental; Windows can hide it in the overflow area.
+
+### Check visibility while `cx` is running
+
+Leave `cx` open in one terminal. In a second terminal loaded with the new
+profile, run:
+
+```sh
+proxy-notify status
+proxy-notify test
+```
+
+`test` sends one clearly labelled **[TEST]** desktop notification without touching
+SSH, network settings or the CLI. On Windows it keeps its separate test tray
+icon alive for ten seconds, then removes that icon. Verify you can actually see
+the alert while Codex stays open. If not, check desktop notification permissions,
+Do Not Disturb, and whether the shell has a desktop session. `status` shows the
+selected adapter plus the live owner's last submission/error; backend selection
+alone does not prove that a notification service is reachable.
+
+To preview all three alert states:
+
+```sh
+proxy-test prolonged --fast --desktop
+```
+
+PowerShell also accepts `-Fast -Desktop`. These desktop alerts are labelled
+**[SIMULATION]**. The flag intentionally sends real desktop notifications while
+all proxy/network/session actions remain simulated. Windows waits an additional
+ten seconds for the final test alert before disposing its test icon. Ctrl+C
+cleans up only the demo's notifier. Without `--desktop`, the existing simulation
+remains entirely desktop-silent and isolated from the live owner.
+
+### Settings and updating an existing owner
+
+Desktop alerts default to `auto`. To opt out:
+
+```powershell
+proxy-config set DESKTOP_NOTIFICATIONS off
+```
+
+```bash
+proxy-config set DESKTOP_NOTIFICATIONS off
+```
+
+Bash stores this as `CLAUDE_DESKTOP_NOTIFICATIONS=off`; PowerShell stores
+`DESKTOP_NOTIFICATIONS = 'off'`. Use `auto` to enable again. Reload the profile
+and run `proxy-restart` once for a running shared owner to adopt the new setting
+or notification implementation. This retains proxy settings and keeps CLI
+sessions open, though requests in flight may need retrying. Terminal warnings
+and logs remain enabled when desktop alerts are off or fail.
+
+Verification covers aggregated transitions, native-command arguments, failed
+submissions, notifier cleanup and opt-in demo isolation through automated
+adapters. A real Linux notification submission timed out in this environment.
+Actual Windows/macOS visual delivery and Windows tray behavior require the
+manual visibility check above; parser and mocked tests do not establish them.
+
 ## The commands you get
 
 | Command | What it does |
@@ -107,6 +199,8 @@ real interrupted-network recovery still need platform smoke tests.
 | `proxy-up` | Proxy ON (tunnel + env vars + verify), but don't launch anything |
 | `proxy-restart` | Proxy stuck? Replaces the tunnel for **every** terminal window without touching env vars or `settings.json`, so Claude / Codex running in other tabs keep going |
 | `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly. It refuses while Claude / Codex still run in other windows (they share the tunnel) — use `proxy-restart`, or `cc-stop --force` |
+| `proxy-notify status` / `proxy-notify test` | Inspect desktop notification availability / send one real test alert without changing the proxy |
+| `proxy-test prolonged --fast --desktop` | Preview desktop outage/recovery alerts with simulated network actions |
 | `proxy-status` | Show what's running + your current external IP |
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `cc-install` | Check **Node.js**, **Claude Code** and **Codex**; install or update whatever is missing or too old (asks first; downloads go through the proxy). `cc-install --check` (`-Check`) only reports; `cc-install claude` does just that one; `-y` answers yes. The setup wizard runs it as its last step |
