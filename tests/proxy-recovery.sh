@@ -63,7 +63,7 @@ CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
 export HTTPS_PROXY=http://127.0.0.1:8080
 mkdir "$scratch/worker"
 (_recovery_worker "$scratch/worker") & worker=$!
-for ((n=0;n<100;n++)); do [ -s "$scratch/worker/claude.state" ] && break; sleep .02; done
+for ((n=0;n<100;n++)); do [ -s "$scratch/worker/codex.state" ] && break; sleep .02; done
 assert test -s "$scratch/worker/codex.state"
 sleep .15
 assert test "$(wc -l < "$scratch/ssh.calls" | tr -d ' ')" = 1

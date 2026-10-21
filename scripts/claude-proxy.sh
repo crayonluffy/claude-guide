@@ -409,7 +409,7 @@ _recovery_worker() {
             sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT")
             case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
             case "$sample" in healthy\|*) delay=2; retries=0;; esac
-            old=$(_recovery_status "$dir" "$provider")
+            old=$(_recovery_status "$dir" "$provider") || old=''
             state=$(_recovery_step "$old" "$sample" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
             event=$(printf '%s' "$state" | cut -d'|' -f9)
             if [ "$event" = none ] && [ -n "$old" ]; then
