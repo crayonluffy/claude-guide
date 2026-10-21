@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.6.0"
+CLAUDE_PROXY_VERSION="2.7.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -112,6 +112,7 @@ CLAUDE_WATCHDOG_NOTICE_AFTER=60
 CLAUDE_WATCHDOG_PROBE_TIMEOUT=3
 CLAUDE_WATCHDOG_PROGRESS_INTERVAL=30
 CLAUDE_WATCHDOG_MAX_BACKOFF=30
+CLAUDE_DESKTOP_NOTIFICATIONS=auto  # auto or off; never changes CLI input
 
 # --- personal overrides ------------------------------------------------------
 if [ -f "$CLAUDE_PROXY_CONF" ]; then
@@ -125,7 +126,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_TUNNEL_LOG"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -319,8 +320,8 @@ _recovery_process_identity() {
     kill -0 "$1" 2>/dev/null || return 1
     if [ -r "/proc/$1/stat" ]; then
         # Strip comm (which may contain spaces), then use start ticks since boot.
-        sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'
-        return
+        sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | awk '{print $20}'
+        return 0
     fi
     # ps start time is portable to macOS and includes the date (PID reuse guard).
     LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//'
@@ -418,11 +419,14 @@ _recovery_port_conflict() {
 }
 _recovery_worker() {
     local dir="$1" me spid='' stamp='' now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
+    local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
     trap '' HUP
     trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
+    desktop_backend=$(_recovery_desktop_backend)
+    [ "$desktop_backend" != off ] || desktop_result=off
     while [ ! -e "$dir/stopped" ]; do
         now=$(_recovery_now)
         conflict=0
@@ -454,6 +458,17 @@ _recovery_worker() {
             state=$(_recovery_retry_record "$state" "$retries" "$next")
             _recovery_write "$dir/$provider.state" "$state" "$me"
         done
+        cs=$(_recovery_status "$dir" claude); xs=$(_recovery_status "$dir" codex)
+        desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
+        case "${desktop_state##*|}" in
+            lost|prolonged|restored)
+                desktop_event=${desktop_state##*|}; scope=$(_recovery_desktop_scope "$cs" "$xs")
+                if [ "$desktop_backend" != off ]; then
+                    if _recovery_desktop_send "$desktop_backend" "$desktop_event" "$scope"; then desktop_result=submitted
+                    else desktop_result=failed; echo '[Notify] Desktop submission unavailable or failed; terminal/status/log fallbacks remain enabled. Try proxy-notify test.'; fi
+                fi;;
+        esac
+        _recovery_write "$dir/desktop.status" "$desktop_backend|$desktop_result|$desktop_event|$now" "$me"
         if [ "$all_tunnel" -eq 1 ]; then fails=$((fails+1)); else fails=0; fi
         if [ "$fails" -ge "${CLAUDE_WATCHDOG_FAILS:-2}" ]; then
             _recovery_signal_owned "$spid" "$stamp" || :
@@ -494,26 +509,136 @@ _recovery_unsubscribe() {
 }
 _recovery_demo_sleep() { sleep "$1"; }
 proxy-test() {
-    local scenario="${1:-}" fast=0 t end=20 state='' kind event retries=0 tick=5
-    case "$scenario" in recover) end=20;; prolonged) end=80;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+    local scenario="${1:-}" fast=0 desktop=0 backend='' t end=20 state='' kind event retries=0 tick=5
+    local usage='usage: proxy-test <recover|prolonged> [--fast] [--desktop]'
+    case "$scenario" in recover) end=20;; prolonged) end=80;; *) echo "$usage"; return 2;; esac
     shift
-    if [ $# -gt 0 ]; then
-        case "$1" in --fast|-Fast) fast=1; tick=.5;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+    while [ $# -gt 0 ]; do
+        case "$1" in --fast|-Fast) fast=1; tick=.5;; --desktop|-Desktop) desktop=1;; *) echo "$usage"; return 2;; esac
         shift
-    fi
-    [ $# -eq 0 ] || { echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2; }
-    echo '[SIMULATION] Isolated in-memory demo; no real network, process, or settings changes.'
+    done
+    echo '[SIMULATION] Isolated in-memory demo; no real SSH, CLI, network, or settings changes.'
     [ "$fast" -eq 0 ] || echo '[SIMULATION] Fast mode: 60 simulated seconds = 6 wall-clock seconds.'
+    if [ "$desktop" -eq 1 ]; then
+        backend=$(_recovery_desktop_backend)
+        echo "[SIMULATION] Real desktop alerts enabled ($backend); proxy/network/session actions remain simulated."
+    fi
     for ((t=0; t<=end; t+=5)); do
         kind=healthy
         if [ "$t" -ge 5 ] && [ "$t" -lt "$end" ]; then kind=tunnel; retries=$((retries+1)); fi
         state=$(_recovery_step "$state" "$kind|0|000|000|simulation" "$t" 60)
         event=$(printf '%s' "$state" | cut -d'|' -f9)
         [ "$event" = none ] || printf '[SIMULATION] t=%s %s\n' "$t" "$(_recovery_message "$event")"
+        if [ "$desktop" -eq 1 ]; then
+            case "$event" in lost|prolonged|restored)
+                if ! _recovery_desktop_send "$backend" "$event" 'Claude and Codex' 1; then echo '[SIMULATION] Desktop submission unavailable/failed; use proxy-notify status and check OS notification settings.'; fi;;
+            esac
+        fi
         [ "$kind" = healthy ] || printf '[SIMULATION] t=%s simulated retry %s; session stays open.\n' "$t" "$retries"
         [ "$t" -eq "$end" ] || _recovery_demo_sleep "$tick" || return
     done
     echo '[SIMULATION] Complete; no user session was launched or closed.'
+}
+
+# Desktop alerts belong to the shared owner, never to individual CLI windows.
+_recovery_desktop_step() {
+    local kind=unavailable
+    case "$2:$3" in healthy\|*:healthy\|*) kind=healthy;; esac
+    _recovery_step "$1" "$kind" "$4" "$5"
+}
+_recovery_desktop_scope() {
+    case "$1:$2" in
+        healthy\|*:healthy\|*) echo 'Claude and Codex';;
+        healthy\|*:*) echo Codex;;
+        *:healthy\|*) echo Claude;;
+        *) echo 'Claude and Codex';;
+    esac
+}
+_recovery_desktop_backend() {
+    case "${CLAUDE_DESKTOP_NOTIFICATIONS:-auto}" in off|0) echo off; return;; auto|1) :;; *) echo invalid-setting; return;; esac
+    case "$(uname)" in
+        Darwin) if command -v osascript >/dev/null 2>&1; then echo macos; else echo unavailable; fi;;
+        Linux)
+            if command -v notify-send >/dev/null 2>&1 && { [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || [ -S "${XDG_RUNTIME_DIR:-/nonexistent}/bus" ]; }; then echo linux
+            else echo unavailable; fi;;
+        *) echo unavailable;;
+    esac
+}
+_recovery_desktop_message() {
+    case "$1" in
+        lost) printf 'Proxy connection lost|%s: reconnecting. Sessions stay open.\n' "$2";;
+        prolonged) printf 'Proxy still unavailable|%s: retrying for a prolonged outage. Keep waiting or exit normally; sessions stay open.\n' "$2";;
+        restored) printf 'Proxy connection restored|%s: connected again. Retry any failed request your CLI did not retry.\n' "$2";;
+        test) echo '[TEST] Proxy desktop notifications|This is a test. No proxy, network, or session was changed.';;
+        *) return 1;;
+    esac
+}
+_recovery_desktop_cancel() {
+    local pid="$1" stamp="$2" actual n=0
+    [ -n "$pid" ] && [ -n "$stamp" ] || return 0
+    if _recovery_signal_owned "$pid" "$stamp"; then
+        while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 5 ]; do sleep .05; n=$((n+1)); done
+    fi
+    actual=$(_recovery_process_identity "$pid") || actual=''
+    if [ -n "$actual" ] && [ "$actual" = "$stamp" ]; then
+        kill -KILL "$pid" 2>/dev/null || :
+    fi
+    wait "$pid" 2>/dev/null || :
+}
+_recovery_desktop_exec() (
+    # Isolate cancellation traps from the shell/CLI and own only this OS adapter.
+    local pid='' stamp='' n=0 rc
+    trap '_recovery_desktop_cancel "$pid" "$stamp"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    "$@" </dev/null >/dev/null 2>&1 & pid=$!
+    stamp=$(_recovery_process_identity "$pid") || stamp=''
+    while kill -0 "$pid" 2>/dev/null && [ "$n" -lt 20 ]; do sleep .1; n=$((n+1)); done
+    if kill -0 "$pid" 2>/dev/null; then return 1; fi
+    if wait "$pid"; then return 0; else rc=$?; return "$rc"; fi
+)
+_recovery_desktop_send() {
+    local backend="$1" event="$2" scope="$3" title body icon=network-error
+    IFS='|' read -r title body <<< "$(_recovery_desktop_message "$event" "$scope")"
+    [ -n "$title" ] || return 1
+    [ "${4:-0}" != 1 ] || title="[SIMULATION] $title"
+    case "$backend" in
+        linux)
+            case "$event" in restored|test) icon=network-transmit-receive;; esac
+            _recovery_desktop_exec notify-send --app-name='Claude Proxy' --urgency=normal --expire-time=10000 --icon="$icon" -- "$title" "$body";;
+        macos)
+            # Pass all text as argv; never interpolate notification text into code.
+            _recovery_desktop_exec osascript -e 'on run argv
+                display notification (item 2 of argv) with title (item 1 of argv)
+            end run' -- "$title" "$body";;
+        *) return 1;;
+    esac
+}
+proxy-notify() {
+    local action="${1:-status}" backend identity result
+    [ $# -le 1 ] || { echo 'usage: proxy-notify [status|test]'; return 2; }
+    case "$action" in status|test) :;; *) echo 'usage: proxy-notify [status|test]'; return 2;; esac
+    backend=$(_recovery_desktop_backend)
+    echo "[Notify] Desktop backend: $backend (setting: ${CLAUDE_DESKTOP_NOTIFICATIONS:-auto})."
+    if [ "$backend" = unavailable ] || [ "$backend" = invalid-setting ]; then
+        echo '[Notify] Requires macOS osascript, or Linux notify-send and a desktop D-Bus session. Headless/SSH/WSL shells may have no desktop service.'
+    fi
+    if [ "$action" = test ]; then
+        if _recovery_desktop_send "$backend" test 'Claude and Codex'; then
+            echo '[Notify] Test submitted to the desktop. Confirm you saw it; OS notification settings can hide it.'
+        else
+            echo '[Notify] Test could not be submitted. Terminal warnings, proxy-status, and logs remain available.'
+            return 1
+        fi
+    else
+        identity=$(_recovery_identity) || return 1
+        if [ -r "$identity/desktop.status" ]; then
+            printf '[Notify] Last owner result (backend | submission | event | observed): '
+            cat "$identity/desktop.status"
+        fi
+        echo '[Notify] Try proxy-notify test in another terminal while cc/cx is open. Desktop alerts never take over CLI input.'
+    fi
 }
 # END PROXY RECOVERY
 
@@ -1469,6 +1594,7 @@ _launch_via_proxy() {
         identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
+        echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
     else
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
@@ -1542,6 +1668,7 @@ proxy-restart() {
 # ============================================================
 
 proxy-status() {
+    proxy-notify status
     local identity provider
     identity=$(_recovery_identity)
     echo "[Recovery] State: $identity (phase | outage start | observed | notice | retries | next | generation | failure | event)"
@@ -2450,6 +2577,7 @@ cc-help() {
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
     echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
+    echo "  proxy-notify test - show a real desktop test alert (no proxy/session changes)"
     echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"

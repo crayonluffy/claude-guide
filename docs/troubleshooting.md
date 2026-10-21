@@ -2,6 +2,20 @@
 
 **Start here: run `proxy-doctor`.** It checks each part in turn — `jq`/`lsof`/`codex` present, both tunnel ports listening (and held by the *same* `ssh` process — a mismatch flags a stale leftover, a non-ssh owner flags a port conflict), your shell env vars, whether `settings.json` has the proxy, and finally whether the API is actually reachable *through* the proxy — printing an `[ OK ]` / `[WARN]` / `[FAIL]` line with a concrete fix for each.
 
+**Warnings disappear behind Codex / Claude:** use desktop alerts in PowerShell
+2.6.0 / Bash 2.7.0. Leave `cx` open and run `proxy-notify test` in another terminal.
+The test must be visible outside Codex's screen. `proxy-notify status` reports
+the selected adapter and last owner submission/error; `submitted` does not
+prove visibility if Focus / Do Not Disturb is active. Check Windows notification
+settings, macOS Notifications permissions for the displayed sender, or Linux's
+`notify-send` / D-Bus notification service. Headless SSH/WSL may have no desktop
+service. See [desktop alerts and testing](proxy-profile.md#desktop-alerts-while-the-cli-owns-the-terminal).
+
+After upgrading/reloading, `proxy-restart` replaces the old shared owner so it
+uses desktop alerts. To simulate the complete popup flow without disrupting
+real sessions, run `proxy-test prolonged --fast --desktop`; every popup is
+labelled `[SIMULATION]`. The same command without `--desktop` sends no popups.
+
 **Stale tunnels self-heal.** `cc` / `cx` / `tunnel-start` check the *health* of whatever holds the tunnel port, not just that the port is busy: a healthy tunnel is reused (even one running on a fallback port from an earlier shell), a **stale ssh** (dropped connection, missing SOCKS forward) is killed and restarted automatically, and a **foreign app** on the port is left alone — the tunnel simply falls back to the next free port (`8081`, `8082`, …) and every downstream piece (env vars, `settings.json`, status, doctor) follows it.
 
 **Proxy dies during `cc` or `cx`:** the terminal warns and the shared recovery
