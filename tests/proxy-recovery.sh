@@ -38,3 +38,41 @@ s=$(_recovery_probe claude 18080 11080)
 assert test "$(field "$s" 1)" = proxy
 assert grep -q -- '--socks5-hostname 127.0.0.1:11080' "$scratch/args"
 echo 'PASS: Bash recovery transitions, backwards time, and explicit proxy probes'
+if ! declare -F _recovery_claim >/dev/null; then echo 'FAIL: shared recovery ownership is missing'; exit 1; fi
+owner="$scratch/owner"; mkdir "$owner"
+assert _recovery_claim "$owner" "$$"
+if _recovery_claim "$owner" "$$"; then echo 'FAIL: second owner acquired an occupied lock'; exit 1; fi
+assert test "$(_recovery_owner_pid "$owner")" = "$$"
+printf '99999999\nbogus\n' > "$owner/lock/owner"
+assert _recovery_claim "$owner" "$$"
+printf 'recovering|5|10|5|2|12|1|proxy|lost\n' > "$owner/claude.state"
+assert test "$(_recovery_status "$owner" claude | cut -d '|' -f1)" = recovering
+# A stale PID identity must not authorize a signal to the live test process.
+if _recovery_signal_owned "$$" bogus; then echo 'FAIL: stale process identity accepted'; exit 1; fi
+printf 'recovering|5|10|5|0|0|1|tunnel|lost\n' > "$scratch/state"
+assert test "$(_recovery_retry_record "$(cat "$scratch/state")" 2 30 | cut -d '|' -f5)" = 2
+echo 'PASS: Bash shared ownership, stale identity, and recovery status'
+# The actual worker runs with fake transport/process adapters in a private directory.
+# A proxy-only outage must never restart SSH or clear inherited proxy variables.
+_wd_sleep() { sleep .02; }
+_tunnel_ssh_args() { _CP_SSH_ARGS=(-L '8080:127.0.0.1:8888' -D 1080 example); }
+ssh() { printf '%s\n' "$*" >> "$scratch/ssh.calls"; sleep 100 & wait $!; }
+_recovery_probe() { echo 'proxy|0|407|000|proxy'; }
+CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
+CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
+export HTTPS_PROXY=http://127.0.0.1:8080
+mkdir "$scratch/worker"
+(_recovery_worker "$scratch/worker") & worker=$!
+for ((n=0;n<100;n++)); do [ -s "$scratch/worker/claude.state" ] && break; sleep .02; done
+assert test -s "$scratch/worker/codex.state"
+sleep .15
+assert test "$(wc -l < "$scratch/ssh.calls" | tr -d ' ')" = 1
+assert test "$HTTPS_PROXY" = http://127.0.0.1:8080
+assert test "$(cut -d'|' -f8 "$scratch/worker/claude.state")" = proxy
+assert grep -q 'BatchMode=yes.*8080:127.0.0.1:8888.*1080' "$scratch/ssh.calls"
+_recovery_owner_stop "$scratch/worker"
+wait "$worker" || :
+sleep .05
+assert test "$(wc -l < "$scratch/ssh.calls" | tr -d ' ')" = 1
+assert test ! -e "$scratch/worker/lock"
+echo 'PASS: real Bash worker preserves ports/settings during proxy failure and stops without respawn'
