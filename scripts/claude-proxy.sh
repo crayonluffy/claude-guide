@@ -262,6 +262,55 @@ _tunnel_ssh_args() {
         "${_CP_SSH_DEST[@]}")
 }
 
+# BEGIN PROXY RECOVERY
+# State is data, never sourced/evaluated. Fields: phase/start/observed/notice/
+# retries/next-retry/generation/failure/event. No application PID is signalled.
+_recovery_now() {
+    local up
+    if [ -r /proc/uptime ]; then read -r up _ < /proc/uptime; echo "${up%%.*}"
+    else osascript -l JavaScript -e 'ObjC.import("Foundation"); Math.floor($.NSProcessInfo.processInfo.systemUptime);' 2>/dev/null; fi
+}
+_recovery_step() {
+    local phase=healthy start=- observed=0 notice=0 retries=0 next=0 gen=0 failure=healthy old_event kind event=none now="$3" grace="$4"
+    [ -z "$1" ] || IFS='|' read -r phase start observed notice retries next gen failure old_event <<< "$1"
+    IFS='|' read -r kind _ <<< "$2"
+    [ "$now" -ge "$observed" ] || now=$observed
+    if [ "$kind" = healthy ]; then
+        if [ "$phase" != healthy ]; then event=restored; gen=$((gen+1)); fi
+        phase=healthy; start=-; failure=healthy; retries=0; next=0
+    else
+        failure=$kind
+        if [ "$phase" = healthy ]; then phase=recovering; start=$now; event=lost
+        elif [ "$phase" = recovering ] && [ $((now-start)) -ge "$grace" ]; then phase=prolonged; event=prolonged
+        elif [ $((now-notice)) -ge "${CLAUDE_WATCHDOG_PROGRESS_INTERVAL:-30}" ]; then event=progress; fi
+        if [ "$event" != none ]; then notice=$now; gen=$((gen+1)); fi
+    fi
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$phase" "$start" "$now" "$notice" "$retries" "$next" "$gen" "$failure" "$event"
+}
+_recovery_message() {
+    case "$1" in
+        lost) echo 'Proxy connection lost. Retrying; proxy settings remain enabled.' ;;
+        prolonged) echo 'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.' ;;
+        restored) echo 'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.' ;;
+        progress) echo 'Proxy recovery is still in progress; retrying without closing your session.' ;;
+    esac
+}
+_recovery_probe() {
+    local endpoint out rc cc hc kind=tunnel timeout="${CLAUDE_WATCHDOG_PROBE_TIMEOUT:-3}"
+    case "$1" in claude) endpoint=https://api.anthropic.com/ ;; codex) endpoint=https://api.openai.com/ ;; *) return 2;; esac
+    if out=$(curl -q -sS -o /dev/null --connect-timeout 2 --max-time "$timeout" --noproxy '' --proxy "http://127.0.0.1:$2" -w '%{http_connect} %{http_code}' "$endpoint" 2>/dev/null); then rc=0; else rc=$?; fi
+    read -r cc hc <<< "$out"; cc=${cc:-000}; hc=${hc:-000}
+    if [ "$rc" -eq 0 ] && [ "$cc" = 200 ] && [ "$hc" != 000 ]; then kind=healthy
+    elif [ "$cc" != 000 ] && [ "$cc" != 200 ]; then kind=proxy
+    elif [ "$cc" = 200 ]; then kind=proxy
+    else
+        # A second, explicitly proxied transport proves whether SSH still works.
+        if out=$(curl -q -sS -o /dev/null --connect-timeout 2 --max-time "$timeout" --noproxy '' --proxy '' --socks5-hostname "127.0.0.1:$3" -w '%{http_code}' "$endpoint" 2>/dev/null); then kind=proxy; fi
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$kind" "$rc" "$cc" "$hc" "$kind"
+}
+# END PROXY RECOVERY
+
 # PID of the running tunnel watchdog (fails if there is none).
 _watchdog_pid() {
     local wpid

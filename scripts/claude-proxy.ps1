@@ -141,6 +141,51 @@ function Find-FreePort {
 #             back to another port instead
 # Anchored on the SOCKS port: its ssh owner identifies OUR tunnel even when the
 # HTTP forward went to a fallback port in an earlier shell.
+# Recovery helpers never signal applications or change proxy settings.
+function Get-RecoveryTime { return [Math]::Floor([Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency) }
+function Get-RecoveryTransition {
+    param([hashtable]$State, [hashtable]$Sample, [double]$Now, [int]$NoticeAfter = 60)
+    if (-not $State) { $State=@{phase='healthy';outage_start=$null;observed_at=0;last_notice_at=0;retry_count=0;next_retry=0;generation=0;failure_kind='healthy'} }
+    $s=$State.Clone(); $Now=[Math]::Max($Now,$s.observed_at);$event='none'
+    if ($Sample.kind -eq 'healthy') {
+        if ($s.phase -ne 'healthy') {$event='restored';$s.generation++}
+        $s.phase='healthy';$s.outage_start=$null;$s.failure_kind='healthy';$s.retry_count=0;$s.next_retry=0
+    } else {
+        $s.failure_kind=$Sample.kind
+        if ($s.phase -eq 'healthy') {$s.phase='recovering';$s.outage_start=$Now;$event='lost'}
+        elseif ($s.phase -eq 'recovering' -and $Now-$s.outage_start -ge $NoticeAfter) {$s.phase='prolonged';$event='prolonged'}
+        elseif ($Now-$s.last_notice_at -ge $(if($script:WATCHDOG_PROGRESS_INTERVAL){$script:WATCHDOG_PROGRESS_INTERVAL}else{30})) {$event='progress'}
+        if ($event -ne 'none') {$s.last_notice_at=$Now;$s.generation++}
+    }
+    $s.observed_at=$Now
+    return @{State=$s;Event=$event}
+}
+function Get-RecoveryMessage {
+    param([string]$Event)
+    switch ($Event) {
+        lost {'Proxy connection lost. Retrying; proxy settings remain enabled.'}
+        prolonged {'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.'}
+        restored {'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.'}
+        progress {'Proxy recovery is still in progress; retrying without closing your session.'}
+    }
+}
+function Test-RecoveryTransport {
+    param([string]$Provider,[int]$HttpPort,[int]$SocksPort)
+    $endpoint=switch($Provider){claude{'https://api.anthropic.com/'} codex{'https://api.openai.com/'} default{throw 'Unknown provider'}}
+    $timeout=if($script:WATCHDOG_PROBE_TIMEOUT){$script:WATCHDOG_PROBE_TIMEOUT}else{3}
+    $common=@('-q','-sS','-o',$(if($IsLinux -or $IsMacOS){'/dev/null'}else{'NUL'}),'--connect-timeout','2','--max-time',"$timeout",'--noproxy','')
+    $out=& curl.exe @common --proxy "http://127.0.0.1:$HttpPort" -w '%{http_connect} %{http_code}' $endpoint 2>$null
+    $rc=$LASTEXITCODE;$parts=("$out".Trim() -split '\s+');$cc=if($parts.Count -gt 0 -and $parts[0]){$parts[0]}else{'000'};$hc=if($parts.Count -gt 1){$parts[1]}else{'000'}
+    $kind='tunnel'
+    if ($rc -eq 0 -and $cc -eq '200' -and $hc -ne '000') {$kind='healthy'}
+    elseif ($cc -ne '000') {$kind='proxy'}
+    else {
+        $null=& curl.exe @common --proxy '' --socks5-hostname "127.0.0.1:$SocksPort" -w '%{http_code}' $endpoint 2>$null
+        if ($LASTEXITCODE -eq 0) {$kind='proxy'}
+    }
+    return @{kind=$kind;curl_exit=$rc;connect_code=$cc;http_code=$hc;reason=$kind}
+}
+
 function Get-TunnelHealth {
     $socksPids = @((Get-NetTCPConnection -LocalPort $script:SOCKS_PORT -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
     if ($socksPids.Count -eq 1) {
