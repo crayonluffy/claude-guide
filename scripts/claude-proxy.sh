@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.5.2"
+CLAUDE_PROXY_VERSION="2.6.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -105,8 +105,13 @@ CLAUDE_TUNNEL_LOG="/tmp/claude-tunnel.log"
 # after sleep or a Wi-Fi change). Every tab heals on its own; nobody needs
 # cc-stop. 0 = old behaviour (plain 'ssh -f', no auto-restart).
 CLAUDE_TUNNEL_WATCHDOG=1
-CLAUDE_WATCHDOG_INTERVAL=20      # seconds between health checks
-CLAUDE_WATCHDOG_FAILS=3          # failed checks in a row before the tunnel is restarted
+CLAUDE_WATCHDOG_INTERVAL=5      # seconds between health checks
+CLAUDE_WATCHDOG_FAILS=2          # failed checks in a row before the tunnel is restarted
+
+CLAUDE_WATCHDOG_NOTICE_AFTER=60
+CLAUDE_WATCHDOG_PROBE_TIMEOUT=3
+CLAUDE_WATCHDOG_PROGRESS_INTERVAL=30
+CLAUDE_WATCHDOG_MAX_BACKOFF=30
 
 # --- personal overrides ------------------------------------------------------
 if [ -f "$CLAUDE_PROXY_CONF" ]; then
@@ -120,7 +125,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_TUNNEL_LOG"
 
 # ============================================================
 # Helpers
@@ -262,75 +267,288 @@ _tunnel_ssh_args() {
         "${_CP_SSH_DEST[@]}")
 }
 
-# PID of the running tunnel watchdog (fails if there is none).
-_watchdog_pid() {
-    local wpid
-    wpid=$(cat "$CLAUDE_TUNNEL_PIDFILE" 2>/dev/null)
-    [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null || return 1
-    case "$(_proc_name "$wpid")" in *sh) echo "$wpid" ;; *) return 1 ;; esac
+# BEGIN PROXY RECOVERY
+# State is data, never sourced/evaluated. Fields: phase/start/observed/notice/
+# retries/next-retry/generation/failure/event. No application PID is signalled.
+_recovery_now() {
+    local up
+    if [ -r /proc/uptime ]; then read -r up _ < /proc/uptime; echo "${up%%.*}"
+    else osascript -l JavaScript -e 'ObjC.import("Foundation"); Math.floor($.NSProcessInfo.processInfo.systemUptime);' 2>/dev/null; fi
 }
-
-# Interruptible sleep: a signal (tunnel-stop) is handled at once, not after it.
-_wd_sleep() { sleep "$1" & wait $!; }
-
-_wd_log() { echo "[watchdog $(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$CLAUDE_TUNNEL_LOG"; }
-
-# Runs detached (see _watchdog_spawn) and owns the main ssh tunnel: restarts ssh
-# whenever it exits, and kills + restarts it when the proxy stops answering.
-# Closing the terminal tab that started it does not stop it; tunnel-stop does.
-_tunnel_watchdog() {
-    local spid fails state started delay=2
-    trap '' HUP
-    trap '[ -n "$spid" ] && kill "$spid" 2>/dev/null; rm -f "$CLAUDE_TUNNEL_PIDFILE"; exit 0' TERM INT
-    sh -c 'echo $PPID' > "$CLAUDE_TUNNEL_PIDFILE"
-    _tunnel_ssh_args
-    while :; do
-        started=$SECONDS
-        ssh "${_CP_SSH_ARGS[@]}" 2>>"$CLAUDE_TUNNEL_LOG" &
-        spid=$!
-        fails=0
-        while kill -0 "$spid" 2>/dev/null; do
-            _wd_sleep "$CLAUDE_WATCHDOG_INTERVAL"
-            kill -0 "$spid" 2>/dev/null || break
-            state=$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)
-            case "$state" in
-                dead*) fails=$((fails+1)) ;;
-                *)     fails=0 ;;
-            esac
-            if [ "$fails" -ge "$CLAUDE_WATCHDOG_FAILS" ]; then
-                _wd_log "proxy on :$CLAUDE_HTTP_PORT did not answer $fails checks in a row - restarting ssh"
-                kill "$spid" 2>/dev/null
-                break
-            fi
-        done
-        wait "$spid" 2>/dev/null
-        spid=""
-        # Quick reconnect after a long-lived tunnel; back off (max 30s) while it keeps failing.
-        if [ $((SECONDS - started)) -gt 60 ]; then delay=2; else delay=$((delay * 2)); [ $delay -gt 30 ] && delay=30; fi
-        _wd_log "ssh to $CLAUDE_SSH_HOST exited - reconnecting in ${delay}s"
-        _wd_sleep "$delay"
-    done
-}
-
-_watchdog_spawn() {
-    : > "$CLAUDE_TUNNEL_LOG"
-    if [ -n "${ZSH_VERSION:-}" ]; then
-        eval '( _tunnel_watchdog ) </dev/null >/dev/null 2>&1 &!'
+_recovery_step() {
+    local phase=healthy start=- observed=0 notice=0 retries=0 next=0 gen=0 failure=healthy old_event kind event=none now="$3" grace="$4"
+    [ -z "$1" ] || IFS='|' read -r phase start observed notice retries next gen failure old_event <<< "$1"
+    IFS='|' read -r kind _ <<< "$2"
+    [ "$now" -ge "$observed" ] || now=$observed
+    if [ "$kind" = healthy ]; then
+        if [ "$phase" != healthy ]; then event=restored; gen=$((gen+1)); fi
+        phase=healthy; start=-; failure=healthy; retries=0; next=0
     else
-        ( _tunnel_watchdog ) </dev/null >/dev/null 2>&1 &
-        disown 2>/dev/null
+        failure=$kind
+        if [ "$phase" = healthy ]; then phase=recovering; start=$now; event=lost
+        elif [ "$phase" = recovering ] && [ $((now-start)) -ge "$grace" ]; then phase=prolonged; event=prolonged
+        elif [ $((now-notice)) -ge "${CLAUDE_WATCHDOG_PROGRESS_INTERVAL:-30}" ]; then event=progress; fi
+        if [ "$event" != none ]; then notice=$now; gen=$((gen+1)); fi
     fi
+    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$phase" "$start" "$now" "$notice" "$retries" "$next" "$gen" "$failure" "$event"
 }
+_recovery_message() {
+    case "$1" in
+        lost) echo 'Proxy connection lost. Retrying; proxy settings remain enabled.' ;;
+        prolonged) echo 'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.' ;;
+        restored) echo 'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.' ;;
+        progress) echo 'Proxy recovery is still in progress; retrying without closing your session.' ;;
+    esac
+}
+_recovery_probe() {
+    local endpoint out rc cc hc kind=tunnel timeout="${CLAUDE_WATCHDOG_PROBE_TIMEOUT:-3}"
+    case "$1" in claude) endpoint=https://api.anthropic.com/ ;; codex) endpoint=https://api.openai.com/ ;; *) return 2;; esac
+    if out=$(curl -q -sS -o /dev/null --connect-timeout 2 --max-time "$timeout" --noproxy '' --proxy "http://127.0.0.1:$2" -w '%{http_connect} %{http_code}' "$endpoint" 2>/dev/null); then rc=0; else rc=$?; fi
+    read -r cc hc <<< "$out"; cc=${cc:-000}; hc=${hc:-000}
+    if [ "$rc" -eq 0 ] && [ "$cc" = 200 ] && [ "$hc" != 000 ]; then kind=healthy
+    elif [ "$cc" != 000 ] && [ "$cc" != 200 ]; then kind=proxy
+    elif [ "$cc" = 200 ]; then kind=proxy
+    else
+        # A second, explicitly proxied transport proves whether SSH still works.
+        if out=$(curl -q -sS -o /dev/null --connect-timeout 2 --max-time "$timeout" --noproxy '' --proxy '' --socks5-hostname "127.0.0.1:$3" -w '%{http_code}' "$endpoint" 2>/dev/null); then kind=proxy; fi
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$kind" "$rc" "$cc" "$hc" "$kind"
+}
+_recovery_process_identity() {
+    case "$1" in ''|*[!0-9]*) return 1;; esac
+    kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/stat" ]; then
+        # Strip comm (which may contain spaces), then use start ticks since boot.
+        sed 's/.*) //' "/proc/$1/stat" | awk '{print $20}'
+        return
+    fi
+    # ps start time is portable to macOS and includes the date (PID reuse guard).
+    LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//'
+}
+_recovery_owner_pid() {
+    local pid stamp actual
+    [ -r "$1/lock/owner" ] || return 1
+    { read -r pid; read -r stamp; } < "$1/lock/owner"
+    actual=$(_recovery_process_identity "$pid") || return 1
+    [ -n "$stamp" ] && [ "$stamp" = "$actual" ] || return 1
+    echo "$pid"
+}
+_recovery_claim() {
+    local dir="$1" pid="$2" stamp candidate snapshot current token gate
+    stamp=$(_recovery_process_identity "$pid") || return 1
+    mkdir -p "$dir/lock" || return 1
+    candidate=$(umask 077; mktemp "$dir/claim.XXXXXX") || return 1
+    printf '%s\n%s\n' "$pid" "$stamp" > "$candidate"
+    if ln "$candidate" "$dir/lock/owner" 2>/dev/null; then rm -f "$candidate"; return 0; fi
+    snapshot=$(cat "$dir/lock/owner" 2>/dev/null) || { rm -f "$candidate"; return 1; }
+    if _recovery_owner_pid "$dir" >/dev/null; then rm -f "$candidate"; return 1; fi
+    # One reaper for this exact stale generation. Keep its tombstone so a late
+    # observer cannot remove a replacement owner's lease. No empty lease window
+    # exists during publication: link(2) atomically publishes PID and identity.
+    token=$(printf '%s' "$snapshot" | cksum | awk '{print $1}')
+    gate="$dir/reaped.$token"
+    if ! mkdir "$gate" 2>/dev/null; then rm -f "$candidate"; return 1; fi
+    current=$(cat "$dir/lock/owner" 2>/dev/null) || current=''
+    if [ "$current" != "$snapshot" ]; then rm -f "$candidate"; return 1; fi
+    rm -f "$dir/lock/owner"
+    if ln "$candidate" "$dir/lock/owner" 2>/dev/null; then rm -f "$candidate"; return 0; fi
+    rm -f "$candidate"; return 1
+}
+_recovery_release() {
+    local pid
+    pid=$(_recovery_owner_pid "$1") || return 0
+    [ "$pid" = "$2" ] || return 1
+    rm -f "$1/lock/owner"; rmdir "$1/lock" 2>/dev/null || :
+}
+_recovery_signal_owned() {
+    local actual
+    actual=$(_recovery_process_identity "$1") || return 1
+    [ -n "$2" ] && [ "$actual" = "$2" ] || return 1
+    kill -TERM "$1" 2>/dev/null
+}
+_recovery_retry_record() { printf '%s\n' "$1" | awk -F'|' -v OFS='|' -v n="$2" -v t="$3" '{$5=n;$6=t;print}'; }
+_recovery_identity() {
+    local root="${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery" key
+    key=$(printf '%s\n' "$CLAUDE_SSH_USER" "$CLAUDE_SSH_HOST" "$CLAUDE_SSH_PORT" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_REMOTE_PROXY_PORT" | cksum | awk '{print $1}')
+    (umask 077; mkdir -p "$root/$key") || return 1
+    chmod 700 "$root" "$root/$key" || return 1
+    printf '%s/%s\n' "$root" "$key"
+}
+_recovery_status() { case "$2" in claude|codex) cat "$1/$2.state" 2>/dev/null;; *) return 1;; esac; }
+_recovery_write() {
+    local target="$1" value="$2" tmp="$1.tmp.$3"
+    (umask 077; printf '%s\n' "$value" > "$tmp") && mv -f "$tmp" "$target"
+}
+_recovery_owner_stop() {
+    local pid stamp dir="$1" i=0
+    # Revoke first: even if the monitor is between retries it cannot respawn.
+    : > "$dir/stopped"
+    if pid=$(_recovery_owner_pid "$dir"); then
+        stamp=$(sed -n '2p' "$dir/lock/owner")
+        _recovery_signal_owned "$pid" "$stamp" || :
+        while _recovery_owner_pid "$dir" >/dev/null && [ "$i" -lt 100 ]; do sleep .1; i=$((i+1)); done
+        _recovery_owner_pid "$dir" >/dev/null && return 1
+    fi
+    return 0
+}
+_recovery_owner_start() {
+    local dir pid i=0
+    dir=$(_recovery_identity) || return 1
+    if ! _recovery_owner_pid "$dir" >/dev/null; then
+        if _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+            echo '[Recovery] Existing tunnel has no current recovery owner. Run proxy-restart once to migrate it.' >&2
+            return 1
+        fi
+        rm -f "$dir/stopped"
+        ( _recovery_worker "$dir" ) </dev/null >>"$CLAUDE_TUNNEL_LOG" 2>&1 &
+        disown 2>/dev/null || :
+        while ! _recovery_owner_pid "$dir" >/dev/null && [ "$i" -lt 30 ]; do sleep .1; i=$((i+1)); done
+        _recovery_owner_pid "$dir" >/dev/null || return 1
+    fi
+    echo "$dir"
+}
+_recovery_port_conflict() {
+    local pid port
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        for pid in $(_listeners "$port"); do
+            [ "$pid" = "$1" ] || return 0
+        done
+    done
+    return 1
+}
+_recovery_worker() {
+    local dir="$1" me spid='' stamp='' now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
+    me=$(sh -c 'echo $PPID')
+    _recovery_claim "$dir" "$me" || return 0
+    trap '' HUP
+    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    _tunnel_ssh_args
+    while [ ! -e "$dir/stopped" ]; do
+        now=$(_recovery_now)
+        conflict=0
+        _recovery_port_conflict "$spid" && conflict=1
+        if ! _recovery_process_identity "$spid" >/dev/null; then
+            if [ "$now" -ge "$next" ] && [ "$conflict" -eq 0 ]; then
+                ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" & spid=$!
+                stamp=$(_recovery_process_identity "$spid") || stamp=''
+                retries=$((retries+1)); next=$((now+delay))
+                delay=$((delay*2)); [ "$delay" -le "${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}" ] || delay=${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}
+            fi
+        fi
+        all_tunnel=1
+        for provider in claude codex; do
+            if [ "$conflict" -eq 1 ]; then sample='conflict|0|000|000|local-port-conflict'
+            else sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"); fi
+            case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
+            case "$sample" in healthy\|*) delay=2; retries=0;; esac
+            old=$(_recovery_status "$dir" "$provider") || old=''
+            state=$(_recovery_step "$old" "$sample" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
+            event=$(printf '%s' "$state" | cut -d'|' -f9)
+            if [ "$event" = none ] && [ -n "$old" ]; then
+                prior=$(printf '%s' "$old" | cut -d'|' -f9)
+                state="${state%|*}|$prior"
+            elif [ "$event" != none ]; then
+                [ "$conflict" -eq 0 ] || echo '[Recovery] Local port conflict: keeping the fixed ports and leaving the other process untouched.'
+                printf '[%s] %s\n' "$provider" "$(_recovery_message "$event")"
+            fi
+            state=$(_recovery_retry_record "$state" "$retries" "$next")
+            _recovery_write "$dir/$provider.state" "$state" "$me"
+        done
+        if [ "$all_tunnel" -eq 1 ]; then fails=$((fails+1)); else fails=0; fi
+        if [ "$fails" -ge "${CLAUDE_WATCHDOG_FAILS:-2}" ]; then
+            _recovery_signal_owned "$spid" "$stamp" || :
+            wait "$spid" 2>/dev/null || :; spid=''; stamp=''; fails=0
+        fi
+        _wd_sleep "${CLAUDE_WATCHDOG_INTERVAL:-5}"
+    done
+    _recovery_signal_owned "$spid" "$stamp" || :
+    wait "$spid" 2>/dev/null || :
+    _recovery_release "$dir" "$me"
+}
+_recovery_subscribe() {
+    local dir="$1" provider="$2" parent stamp
+    parent=$$; stamp=$(_recovery_process_identity "$parent")
+    (
+        trap 'exit 0' TERM
+        trap '' HUP
+        local state gen event phase seen=-1
+        while [ "$(_recovery_process_identity "$parent")" = "$stamp" ]; do
+            state=$(_recovery_status "$dir" "$provider") || state=''
+            if [ -n "$state" ]; then
+                IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
+                if [ "$gen" != "$seen" ]; then
+                    if [ "$seen" != -1 ] || [ "$phase" != healthy ]; then
+                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event")" >&2
+                    fi
+                    seen=$gen
+                fi
+            fi
+            sleep 1 & wait $! || :
+        done
+    ) </dev/null >/dev/null &
+    echo "$!"
+}
+_recovery_unsubscribe() {
+    # Caller supplies the start identity captured immediately after subscribing.
+    _recovery_signal_owned "$1" "$2" || :
+}
+_recovery_demo_sleep() { sleep "$1"; }
+proxy-test() {
+    local scenario="${1:-}" fast=0 t end=20 state='' kind event retries=0 tick=5
+    case "$scenario" in recover) end=20;; prolonged) end=80;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+    shift
+    if [ $# -gt 0 ]; then
+        case "$1" in --fast|-Fast) fast=1; tick=.5;; *) echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2;; esac
+        shift
+    fi
+    [ $# -eq 0 ] || { echo 'usage: proxy-test <recover|prolonged> [--fast]'; return 2; }
+    echo '[SIMULATION] Isolated in-memory demo; no real network, process, or settings changes.'
+    [ "$fast" -eq 0 ] || echo '[SIMULATION] Fast mode: 60 simulated seconds = 6 wall-clock seconds.'
+    for ((t=0; t<=end; t+=5)); do
+        kind=healthy
+        if [ "$t" -ge 5 ] && [ "$t" -lt "$end" ]; then kind=tunnel; retries=$((retries+1)); fi
+        state=$(_recovery_step "$state" "$kind|0|000|000|simulation" "$t" 60)
+        event=$(printf '%s' "$state" | cut -d'|' -f9)
+        [ "$event" = none ] || printf '[SIMULATION] t=%s %s\n' "$t" "$(_recovery_message "$event")"
+        [ "$kind" = healthy ] || printf '[SIMULATION] t=%s simulated retry %s; session stays open.\n' "$t" "$retries"
+        [ "$t" -eq "$end" ] || _recovery_demo_sleep "$tick" || return
+    done
+    echo '[SIMULATION] Complete; no user session was launched or closed.'
+}
+# END PROXY RECOVERY
 
-_watchdog_stop() {
-    local wpid i=0
-    wpid=$(_watchdog_pid) || { rm -f "$CLAUDE_TUNNEL_PIDFILE"; return 0; }
-    kill "$wpid" 2>/dev/null
-    while kill -0 "$wpid" 2>/dev/null && [ $i -lt 15 ]; do sleep 0.2; i=$((i+1)); done
-    kill -9 "$wpid" 2>/dev/null
-    rm -f "$CLAUDE_TUNNEL_PIDFILE"
-    echo "[Kill] PID $wpid (tunnel watchdog)"
+# Compatibility entry points all delegate to the single recovery owner.
+_legacy_watchdog_pid() {
+    local pid
+    [ -n "${CLAUDE_TUNNEL_PIDFILE:-}" ] && [ -f "$CLAUDE_TUNNEL_PIDFILE" ] && [ ! -L "$CLAUDE_TUNNEL_PIDFILE" ] && [ -O "$CLAUDE_TUNNEL_PIDFILE" ] || return 1
+    read -r pid < "$CLAUDE_TUNNEL_PIDFILE"
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    _recovery_process_identity "$pid" >/dev/null || return 1
+    case "$(_proc_name "$pid")" in *sh) echo "$pid";; *) return 1;; esac
 }
+_legacy_watchdog_stop() {
+    local pid stamp child parent found=0 i=0
+    pid=$(_legacy_watchdog_pid) || return 0
+    # The old PID file has no start identity. Prove parentage to a tunnel SSH
+    # before authorising its removal, so a reused shell PID is never enough.
+    for child in $(_ssh_listeners "$CLAUDE_HTTP_PORT"); do
+        parent=$(ps -p "$child" -o ppid= 2>/dev/null | tr -d ' ')
+        [ "$parent" != "$pid" ] || found=1
+    done
+    [ "$found" -eq 1 ] || { echo '[Err] Legacy watchdog identity cannot be verified. Stop it from its old shell before retrying.' >&2; return 1; }
+    stamp=$(_recovery_process_identity "$pid") || return 1
+    _recovery_signal_owned "$pid" "$stamp" || return 1
+    while _recovery_process_identity "$pid" >/dev/null && [ "$i" -lt 100 ]; do sleep .1; i=$((i+1)); done
+    _recovery_process_identity "$pid" >/dev/null && return 1
+    rm -f "$CLAUDE_TUNNEL_PIDFILE"
+    return 0
+}
+_watchdog_pid() { local dir; dir=$(_recovery_identity) && _recovery_owner_pid "$dir"; }
+_wd_sleep() { sleep "$1" & wait $!; }
+_wd_log() { echo "[watchdog] $*" >> "$CLAUDE_TUNNEL_LOG"; }
+_tunnel_watchdog() { local dir; dir=$(_recovery_identity) && _recovery_worker "$dir"; }
+_watchdog_spawn() { _recovery_owner_start claude >/dev/null; }
+_watchdog_stop() { local dir; dir=$(_recovery_identity) && _recovery_owner_stop "$dir"; }
 
 # PIDs of Claude / Codex sessions running anywhere (other tabs, IDEs ...).
 # The [e]/[x] keep this awk from matching its own command line.
@@ -958,6 +1176,10 @@ tunnel-start() {
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
+    if _watchdog_pid >/dev/null; then
+        echo "[Info] Shared recovery owner is running; keeping HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT."
+        return 0
+    fi
     local tstate hpid hname hport newp healing=""
     read -r tstate hpid hname hport <<< "$(_tunnel_health)"
     if [ "$tstate" = "ok" ]; then
@@ -1057,6 +1279,16 @@ tunnel-stop() {
     local ssh_pids=() survivors=()
 
     # The watchdog goes first, or it would just start ssh again (it takes its ssh with it).
+    if _watchdog_pid >/dev/null; then
+        _watchdog_stop || return 1
+        echo "[OK] Recovery stopped; proxy settings remain enabled until proxy-off."
+        return 0
+    fi
+    if _legacy_watchdog_pid >/dev/null; then
+        _legacy_watchdog_stop || return 1
+        echo '[OK] Previous watchdog stopped; new recovery can start on the same ports.'
+        return 0
+    fi
     wd_msg=$(_watchdog_stop)
     [ -n "$wd_msg" ] && echo "$wd_msg"
 
@@ -1161,7 +1393,7 @@ _verify_proxy_ip() {
 # ============================================================
 
 proxy-up() {
-    local no_verify=0 node=""
+    local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-verify) no_verify=1 ;;
@@ -1183,6 +1415,11 @@ proxy-up() {
     tunnel-start || return 1
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] || return 1
 
+    # Mandatory authenticated-TLS transport check, even with --no-verify.
+    case "$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT")" in
+        healthy\|*) ;;
+        *) echo "[Err] $provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1;;
+    esac
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
@@ -1225,15 +1462,30 @@ _launch_via_proxy() {
     fi
 
     # Steps 1-3: bring up tunnel + env vars + verify
+    local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity saved_int
+    [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
     proxy-up "${up_args[@]}" || return 1
+    if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
+        identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
+        subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
+        subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
+    else
+        echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
+    fi
 
+    saved_int=$(trap -p INT)
+    trap '_recovery_unsubscribe "$subscriber" "$subscriber_stamp"' INT
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
     echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
     if [ $safe -eq 1 ]; then
-        "$bin" "${app_args[@]}"
+        if "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
     else
-        "$bin" "$skip_flag" "${app_args[@]}"
+        if "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
     fi
+    [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
+    trap - INT
+    [ -z "$saved_int" ] || eval "$saved_int"  # restore the caller's own trap
+    return "$rc"
 }
 
 cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
@@ -1290,6 +1542,11 @@ proxy-restart() {
 # ============================================================
 
 proxy-status() {
+    local identity provider
+    identity=$(_recovery_identity)
+    echo "[Recovery] State: $identity (phase | outage start | observed | notice | retries | next | generation | failure | event)"
+    for provider in claude codex; do printf '%s: ' "$provider"; _recovery_status "$identity" "$provider" || echo unknown; done
+
     echo ""
     echo "=== Proxy Status (claude-proxy v$CLAUDE_PROXY_VERSION) ==="
     echo ""
@@ -2193,6 +2450,7 @@ cc-help() {
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
     echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
+    echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"

@@ -20,6 +20,81 @@ You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's
 
 ---
 
+## Recovery while Claude or Codex is running
+
+PowerShell 2.5.0 and Bash 2.6.0 share one recovery owner per SSH destination
+and local port pair. It checks both providers about every five seconds (plus
+probe time), reconnects an exited SSH process, and restarts only its own SSH
+child after two consecutive tunnel failures. Reconnects keep the established
+HTTP/SOCKS ports. Startup can still select a free fallback port before launch.
+
+`cc` and `cx` require successful HTTPS transport through the selected HTTP
+proxy before launch, including with `--no-verify` / `-NoVerify`. That flag skips
+only the optional external-IP check. HTTP API errors after a successful CONNECT
+and TLS handshake count as working transport, without sending API credentials.
+
+An occupied established port is reported as `conflict`; recovery waits without
+changing the port or terminating the other process.
+
+An outage prints a warning in each affected `cc`/`cx` terminal. After 60 seconds
+it warns once that the session remains open, then keeps retrying with periodic
+progress notices. It never closes the application, sends it input, or changes
+its proxy settings. Exit normally using the CLI controls if you prefer, and
+resume later. Recovery does not guarantee the application retries failed
+requests; retry the request yourself if necessary. `proxy-up` followed by a
+manually launched CLI has recovery but no per-session notification subscriber.
+
+Preview both outcomes safely:
+
+```sh
+proxy-test recover --fast
+proxy-test prolonged --fast
+```
+
+PowerShell also accepts `-Fast`. Every line is marked `[SIMULATION]`; 60
+simulated seconds takes six real seconds. The demo uses only in-memory state,
+fake probes and retry counters; it touches no live SSH, app, settings or owner
+files. Ctrl+C cancels it without affecting real sessions. Omit `--fast` for
+normal timing.
+
+`proxy-status` shows provider phase, outage timing, retry count and the recovery
+state directory. Bash also logs events to `CLAUDE_TUNNEL_LOG` (existing custom
+paths are honored); PowerShell writes `events.log` in its recovery directory,
+and SSH errors to `TUNNEL_LOG`. These records remain available if the CLI
+redraws its terminal over a notification. Recovery state is private under
+`${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery/` on Bash and
+`$HOME/.claude-proxy/recovery/` on PowerShell.
+
+| Setting (PowerShell) | Bash setting | Default |
+|---|---|---|
+| `TUNNEL_WATCHDOG` | `CLAUDE_TUNNEL_WATCHDOG` | `1` (enabled) |
+| `WATCHDOG_INTERVAL` | `CLAUDE_WATCHDOG_INTERVAL` | `5` seconds |
+| `WATCHDOG_FAILS` | `CLAUDE_WATCHDOG_FAILS` | `2` checks |
+| `WATCHDOG_NOTICE_AFTER` | `CLAUDE_WATCHDOG_NOTICE_AFTER` | `60` seconds |
+| `WATCHDOG_PROBE_TIMEOUT` | `CLAUDE_WATCHDOG_PROBE_TIMEOUT` | `3` seconds per probe |
+| `WATCHDOG_PROGRESS_INTERVAL` | `CLAUDE_WATCHDOG_PROGRESS_INTERVAL` | `30` seconds |
+| `WATCHDOG_MAX_BACKOFF` | `CLAUDE_WATCHDOG_MAX_BACKOFF` | `30` seconds |
+
+Set overrides in your usual settings file with `proxy-config`; previously set
+intervals and failure counts remain honored. Backoff starts at two seconds and
+doubles to the cap. Disabled supervision is reported at launch. Background SSH
+uses `BatchMode=yes`: load encrypted keys into your SSH agent first. A tunnel from an older profile needs one explicit `proxy-restart` to gain the
+new owner. Bash verifies that the old watchdog parents the tunnel SSH before
+stopping it; if that identity cannot be verified, stop it from the old shell
+and retry. Restart preserves proxy environment variables and Claude settings.
+
+This is script-level recovery, **not an OS firewall kill switch**. It retains
+the configured proxy during failure, but cannot prevent an application or tool
+that ignores those settings from making direct requests. OS network rules are
+needed for that guarantee. Intentional `proxy-off` / `cc-stop` removes proxy
+settings; avoid them during an outage if you want those settings retained.
+
+Bash uses Linux `/proc/uptime`, or macOS's built-in `osascript` and Foundation
+system uptime. PowerShell uses .NET Stopwatch for elapsed time. Verification
+covers Linux Bash and Linux-hosted PowerShell 7.6.7 with fake SSH/transport
+adapters; native Windows PowerShell 5.1/OpenSSH, macOS console behavior, and
+real interrupted-network recovery still need platform smoke tests.
+
 ## The commands you get
 
 | Command | What it does |
@@ -30,8 +105,8 @@ You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's
 | `cx` | Proxy ON + launch **Codex** (approvals off). Extra arguments pass through too: `cx resume` |
 | `cx-safe` | Same, but keeps Codex's approval prompts |
 | `proxy-up` | Proxy ON (tunnel + env vars + verify), but don't launch anything |
-| `proxy-restart` | *(macOS / Linux / WSL)* Proxy stuck? Replaces the tunnel for **every** terminal window without touching env vars or `settings.json`, so Claude / Codex running in other tabs keep going |
-| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly. On macOS / Linux it refuses while Claude / Codex still run in other windows (they share the tunnel) — use `proxy-restart`, or `cc-stop --force` |
+| `proxy-restart` | Proxy stuck? Replaces the tunnel for **every** terminal window without touching env vars or `settings.json`, so Claude / Codex running in other tabs keep going |
+| `cc-stop` | Proxy OFF — one off-switch for both `cc` and `cx`; kills every **ssh** on the tunnel ports (other apps are left alone) and reports honestly. It refuses while Claude / Codex still run in other windows (they share the tunnel) — use `proxy-restart`, or `cc-stop --force` |
 | `proxy-status` | Show what's running + your current external IP |
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `cc-install` | Check **Node.js**, **Claude Code** and **Codex**; install or update whatever is missing or too old (asks first; downloads go through the proxy). `cc-install --check` (`-Check`) only reports; `cc-install claude` does just that one; `-y` answers yes. The setup wizard runs it as its last step |
