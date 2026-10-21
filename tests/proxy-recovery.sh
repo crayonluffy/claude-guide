@@ -56,7 +56,7 @@ echo 'PASS: Bash shared ownership, stale identity, and recovery status'
 # A proxy-only outage must never restart SSH or clear inherited proxy variables.
 _wd_sleep() { sleep .02; }
 _tunnel_ssh_args() { _CP_SSH_ARGS=(-L '8080:127.0.0.1:8888' -D 1080 example); }
-ssh() { printf '%s\n' "$*" >> "$scratch/ssh.calls"; sleep 100 & wait $!; }
+ssh() { printf '%s\n' "$*" >> "$scratch/ssh.calls"; exec sleep 100; }
 _recovery_probe() { echo 'proxy|0|407|000|proxy'; }
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
 CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
@@ -76,3 +76,36 @@ sleep .05
 assert test "$(wc -l < "$scratch/ssh.calls" | tr -d ' ')" = 1
 assert test ! -e "$scratch/worker/lock"
 echo 'PASS: real Bash worker preserves ports/settings during proxy failure and stops without respawn'
+assert declare -F _recovery_subscribe
+echo 'PASS: Bash subscriber interface'
+# Load real launch integration without profile initialization.
+eval "$(sed -n '/^proxy-up() {/,/^cc-stop() {/p' "$repo/scripts/claude-proxy.sh" | sed '$d')"
+tunnel-start() { :; }
+_tunnel_health() { echo 'ok 123 ssh 8080'; }
+proxy-on() { export HTTPS_PROXY=http://127.0.0.1:8080; }
+_verify_proxy_ip() { echo unexpected-ip-probe >> "$scratch/unexpected"; }
+claude() { printf '%s\n' "$@" > "$scratch/app.args"; return 17; }
+CLAUDE_TUNNEL_WATCHDOG=0
+if _launch_via_proxy Claude claude hint skip --no-verify --safe 'hello world'; then echo 'FAIL: dead proxy allowed launch';exit 1;fi
+assert test ! -e "$scratch/app.args"
+_recovery_probe() { echo 'healthy|0|200|403|healthy'; }
+if _launch_via_proxy Claude claude hint skip --no-verify --safe 'hello world'; then code=0; else code=$?; fi
+assert test "$code" = 17
+assert test "$(cat "$scratch/app.args")" = 'hello world'
+assert test ! -e "$scratch/unexpected"
+echo 'PASS: Bash mandatory preflight, native argument preservation, and application exit code'
+# Real subscriber receives each generation once and never mutates shared status.
+mkdir "$scratch/notifications"
+printf 'healthy|-|0|0|0|0|0|healthy|none\n' > "$scratch/notifications/claude.state"
+sub=$(_recovery_subscribe "$scratch/notifications" claude 2>"$scratch/notices")
+substamp=$(_recovery_process_identity "$sub")
+sleep 1.1
+printf 'recovering|5|5|5|0|0|1|tunnel|lost\n' > "$scratch/notifications/claude.state"
+sleep 1.1
+printf 'prolonged|5|65|65|2|70|2|tunnel|prolonged\n' > "$scratch/notifications/claude.state"
+sleep 2.1
+_recovery_unsubscribe "$sub" "$substamp"
+assert test "$(grep -c 'session has not been terminated' "$scratch/notices")" = 1
+assert test "$(grep -c 'Proxy connection lost' "$scratch/notices")" = 1
+assert test "$(cut -d'|' -f1 "$scratch/notifications/claude.state")" = prolonged
+echo 'PASS: real Bash subscriber de-duplicates prolonged warning and leaves shared state intact'

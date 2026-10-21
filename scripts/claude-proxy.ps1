@@ -342,6 +342,35 @@ function proxy-restart {
     Write-Host '[Recovery] Restart requested on the same ports; proxy settings remain enabled.'
 }
 
+function Start-RecoverySubscriber {
+    param([string]$Identity,[string]$Provider)
+    $messages=@{}
+    foreach ($e in @('lost','prolonged','restored','progress')) { $messages[$e]=Get-RecoveryMessage $e }
+    $ps=[PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($path,$provider,$messages)
+        $seen=-1
+        while ($true) {
+            try {
+                $s=[IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
+                if ($s.generation -ne $seen) {
+                    if ($seen -ne -1 -or $s.phase -ne 'healthy') {
+                        if ($messages.ContainsKey($s.event)) { [Console]::Error.WriteLine("`n[$provider proxy] $($messages[$s.event])") }
+                    }
+                    $seen=$s.generation
+                }
+            } catch { }
+            Start-Sleep -Milliseconds 500
+        }
+    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages)
+    $async=$ps.BeginInvoke()
+    return [pscustomobject]@{PowerShell=$ps;Async=$async}
+}
+function Stop-RecoverySubscriber {
+    param($Handle)
+    if ($Handle) { try { $Handle.PowerShell.Stop() } finally { $Handle.PowerShell.Dispose() } }
+}
+
 function Get-TunnelHealth {
     $socksPids = @((Get-NetTCPConnection -LocalPort $script:SOCKS_PORT -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)
     if ($socksPids.Count -eq 1) {
@@ -1061,7 +1090,7 @@ function proxy-off {
 # ============================================================
 
 function proxy-up {
-    param([switch]$NoVerify, [string]$Node)
+    param([switch]$NoVerify, [string]$Node, [ValidateSet("claude","codex")][string]$Provider="claude")
     # bash spellings too: --no-verify, --node <name>
     # A bash-style '--node' / '--no-verify' lands in $Node (PowerShell binds it as the
     # value of the first string parameter) - put it back in front of the rest.
@@ -1082,6 +1111,10 @@ function proxy-up {
     tunnel-start
     if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
 
+    if ((Test-RecoveryTransport $Provider $script:HTTP_PORT $script:SOCKS_PORT).kind -ne 'healthy') {
+        Write-Host "[Err] $Provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor." -ForegroundColor Red
+        return $false
+    }
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
@@ -1138,18 +1171,28 @@ function cc {
     }
 
     # Steps 1-3: bring up tunnel + env vars + verify
-    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node -Provider claude)) { return }
 
     # Step 4: Launch Claude
     Write-Host "[Launch] Starting Claude $($o.App -join ' ')..." -ForegroundColor Cyan
     Write-Host ""
 
+    $subscriber=$null
+    if ($script:TUNNEL_WATCHDOG) { $subscriber=Start-RecoverySubscriber (Start-RecoveryOwner claude) claude }
+    else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
+    try {
     $app = $o.App
     if ($o.Safe) {
         claude @app
     } else {
         claude --dangerously-skip-permissions @app
     }
+    } finally {
+        $exitCode=$global:LASTEXITCODE
+        Stop-RecoverySubscriber $subscriber
+        $global:LASTEXITCODE=$exitCode
+    }
+
 }
 
 function cc-safe { cc -Safe @args }
@@ -1168,18 +1211,28 @@ function cx {
     }
 
     # Steps 1-3: bring up tunnel + env vars + verify (the same stack cc uses)
-    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node)) { return }
+    if (-not (proxy-up -NoVerify:$o.NoVerify -Node $o.Node -Provider codex)) { return }
 
     # Step 4: Launch Codex (it picks up HTTP(S)_PROXY from this shell's env)
     Write-Host "[Launch] Starting Codex $($o.App -join ' ')..." -ForegroundColor Cyan
     Write-Host ""
 
+    $subscriber=$null
+    if ($script:TUNNEL_WATCHDOG) { $subscriber=Start-RecoverySubscriber (Start-RecoveryOwner codex) codex }
+    else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
+    try {
     $app = $o.App
     if ($o.Safe) {
         codex @app
     } else {
         codex --dangerously-bypass-approvals-and-sandbox @app
     }
+    } finally {
+        $exitCode=$global:LASTEXITCODE
+        Stop-RecoverySubscriber $subscriber
+        $global:LASTEXITCODE=$exitCode
+    }
+
 }
 
 function cx-safe { cx -Safe @args }
@@ -1241,6 +1294,10 @@ function tunnel-stop {
 }
 
 function cc-stop {
+    param([switch]$Force)
+    $agents=@(Get-Process -Name claude,codex -ErrorAction SilentlyContinue)
+    if ($agents.Count -and -not $Force) { Write-Warning 'Claude/Codex sessions are still running. Use proxy-restart to reconnect, or cc-stop -Force for explicit shutdown.'; return }
+
     $stopped = tunnel-stop
     Stop-NodeTunnels      # per-node Chrome tunnels (chrome-proxy <node>) go too
     proxy-off
@@ -1256,6 +1313,10 @@ function cc-stop {
 # ============================================================
 
 function proxy-status {
+    $identity=Get-RecoveryIdentity
+    Write-Host "[Recovery] State: $identity"
+    foreach ($provider in @('claude','codex')) { Write-Host "${provider}: $((Get-RecoveryStatus $identity $provider) | ConvertTo-Json -Compress)" }
+
     Write-Host ""
     Write-Host "=== Proxy Status (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
     Write-Host ""

@@ -367,13 +367,16 @@ _recovery_write() {
     (umask 077; printf '%s\n' "$value" > "$tmp") && mv -f "$tmp" "$target"
 }
 _recovery_owner_stop() {
-    local pid stamp dir="$1"
+    local pid stamp dir="$1" i=0
     # Revoke first: even if the monitor is between retries it cannot respawn.
     : > "$dir/stopped"
     if pid=$(_recovery_owner_pid "$dir"); then
         stamp=$(sed -n '2p' "$dir/lock/owner")
         _recovery_signal_owned "$pid" "$stamp" || :
+        while _recovery_owner_pid "$dir" >/dev/null && [ "$i" -lt 100 ]; do sleep .1; i=$((i+1)); done
+        _recovery_owner_pid "$dir" >/dev/null && return 1
     fi
+    return 0
 }
 _recovery_owner_start() {
     local dir pid i=0
@@ -430,6 +433,33 @@ _recovery_worker() {
     done
     _recovery_signal_owned "$spid" "$stamp" || :
     rm -f "$dir/lock/owner"; rmdir "$dir/lock" 2>/dev/null
+}
+_recovery_subscribe() {
+    local dir="$1" provider="$2" parent stamp
+    parent=$$; stamp=$(_recovery_process_identity "$parent")
+    (
+        trap 'exit 0' TERM
+        trap '' HUP
+        local state gen event phase seen=-1
+        while [ "$(_recovery_process_identity "$parent")" = "$stamp" ]; do
+            state=$(_recovery_status "$dir" "$provider") || state=''
+            if [ -n "$state" ]; then
+                IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
+                if [ "$gen" != "$seen" ]; then
+                    if [ "$seen" != -1 ] || [ "$phase" != healthy ]; then
+                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event")" >&2
+                    fi
+                    seen=$gen
+                fi
+            fi
+            sleep 1 & wait $! || :
+        done
+    ) </dev/null >/dev/null &
+    echo "$!"
+}
+_recovery_unsubscribe() {
+    # Caller supplies the start identity captured immediately after subscribing.
+    _recovery_signal_owned "$1" "$2" || :
 }
 # END PROXY RECOVERY
 
@@ -1279,7 +1309,7 @@ _verify_proxy_ip() {
 # ============================================================
 
 proxy-up() {
-    local no_verify=0 node=""
+    local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-verify) no_verify=1 ;;
@@ -1301,6 +1331,11 @@ proxy-up() {
     tunnel-start || return 1
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] || return 1
 
+    # Mandatory authenticated-TLS transport check, even with --no-verify.
+    case "$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT")" in
+        healthy\|*) ;;
+        *) echo "[Err] $provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1;;
+    esac
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
@@ -1343,15 +1378,26 @@ _launch_via_proxy() {
     fi
 
     # Steps 1-3: bring up tunnel + env vars + verify
+    local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity
+    [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
     proxy-up "${up_args[@]}" || return 1
+    if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
+        identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
+        subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
+        subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
+    else
+        echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
+    fi
 
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
     echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
     if [ $safe -eq 1 ]; then
-        "$bin" "${app_args[@]}"
+        if "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
     else
-        "$bin" "$skip_flag" "${app_args[@]}"
+        if "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
     fi
+    [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
+    return "$rc"
 }
 
 cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
@@ -1408,6 +1454,11 @@ proxy-restart() {
 # ============================================================
 
 proxy-status() {
+    local identity provider
+    identity=$(_recovery_identity)
+    echo "[Recovery] State: $identity (phase | outage start | observed | notice | retries | next | generation | failure | event)"
+    for provider in claude codex; do printf '%s: ' "$provider"; _recovery_status "$identity" "$provider" || echo unknown; done
+
     echo ""
     echo "=== Proxy Status (claude-proxy v$CLAUDE_PROXY_VERSION) ==="
     echo ""

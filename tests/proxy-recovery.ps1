@@ -73,3 +73,21 @@ try {
  Assert ((Get-RecoveryStatus $ownerDir codex).failure_kind -eq 'proxy') 'both providers monitored'
 } finally {Remove-Item $ownerDir -Recurse -Force}
 Write-Host 'PASS: PowerShell worker preserves fixed ports during proxy outage and honors stop'
+if (-not (Get-Command Start-RecoverySubscriber -ErrorAction SilentlyContinue)) {throw 'live recovery subscriber is missing'}
+foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false)) {
+ if ($f.Name -in @('proxy-up','cc','cx','_split-launch-args')) { Invoke-Expression $f.Extent.Text }
+}
+function tunnel-start {}
+function Get-TunnelHealth {return @{Status='ok'}}
+function proxy-on {$env:HTTPS_PROXY='http://127.0.0.1:8080'}
+$script:AppCalls=0; $script:TestKind='proxy'; $script:TUNNEL_WATCHDOG=0
+function Test-RecoveryTransport {return @{kind=$script:TestKind}}
+function claude {$script:AppCalls++;$script:AppArgs=@($args);$global:LASTEXITCODE=17}
+cc --no-verify --safe 'hello world'
+Assert ($script:AppCalls -eq 0) 'NoVerify bypassed mandatory preflight'
+$script:TestKind='healthy'
+cc --no-verify --safe 'hello world'
+Assert ($script:AppCalls -eq 1) 'healthy launch missing'
+Assert ($script:AppArgs.Count -eq 1 -and $script:AppArgs[0] -eq 'hello world') 'arguments changed'
+Assert ($global:LASTEXITCODE -eq 17) 'exit code changed by cleanup'
+Write-Host 'PASS: PowerShell mandatory preflight, arguments, and native exit code'
