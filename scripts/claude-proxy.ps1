@@ -185,19 +185,25 @@ function Test-RecoveryTransport {
     param([string]$Provider,[int]$HttpPort,[int]$SocksPort)
     $endpoint=switch($Provider){claude{'https://api.anthropic.com/'} codex{'https://api.openai.com/'} default{throw 'Unknown provider'}}
     $timeout=if($script:WATCHDOG_PROBE_TIMEOUT){$script:WATCHDOG_PROBE_TIMEOUT}else{3}
-    $common=@('-q','-sS','-o',$(if($IsLinux -or $IsMacOS){'/dev/null'}else{'NUL'}),'--connect-timeout','2','--max-time',"$timeout",'--noproxy','')
+    $common=@('-q','-sS','-o',$(if($IsLinux -or $IsMacOS){'/dev/null'}else{'NUL'}),'--connect-timeout','2','--max-time',"$timeout",'--noproxy=')
     $out=& curl.exe @common --proxy "http://127.0.0.1:$HttpPort" -w '%{http_connect} %{http_code}' $endpoint 2>$null
     $rc=$LASTEXITCODE;$parts=("$out".Trim() -split '\s+');$cc=if($parts.Count -gt 0 -and $parts[0]){$parts[0]}else{'000'};$hc=if($parts.Count -gt 1){$parts[1]}else{'000'}
     $kind='tunnel'
     if ($rc -eq 0 -and $cc -eq '200' -and $hc -ne '000') {$kind='healthy'}
     elseif ($cc -ne '000') {$kind='proxy'}
     else {
-        $null=& curl.exe @common --proxy '' --socks5-hostname "127.0.0.1:$SocksPort" -w '%{http_code}' $endpoint 2>$null
+        $null=& curl.exe @common --proxy= --socks5-hostname "127.0.0.1:$SocksPort" -w '%{http_code}' $endpoint 2>$null
         if ($LASTEXITCODE -eq 0) {$kind='proxy'}
     }
     return @{kind=$kind;curl_exit=$rc;connect_code=$cc;http_code=$hc;reason=$kind}
 }
 
+function Resolve-RecoveryProfile {
+    param([string]$Path,[string]$Fallback=$script:PROFILE_PATH)
+    if (-not $Path) { $Path=$Fallback }
+    if (-not $Path -or -not [IO.File]::Exists($Path)) { throw 'Recovery profile file is missing; reload the installed profile.' }
+    return [IO.Path]::GetFullPath($Path)
+}
 function Get-RecoveryIdentity {
     $root = Join-Path $HOME '.claude-proxy/recovery'
     $text = @($script:SSH_USER,$script:SSH_HOST,$script:SSH_PORT,$script:HTTP_PORT,$script:SOCKS_PORT,$script:REMOTE_PROXY_PORT) -join '|'
@@ -254,16 +260,24 @@ function Test-RecoveryOwner {
     return $true
 }
 function Stop-RecoveryOwner {
-    param([string]$Identity)
+    param([string]$Identity,[int]$WaitSeconds=60)
     # The stop marker is checked before every launch; shutdown never signals applications.
     [IO.File]::WriteAllText((Join-Path $Identity 'stopped'),'stop')
-    for ($i=0; $i -lt 100 -and (Test-RecoveryOwner $Identity); $i++) { Start-Sleep -Milliseconds 100 }
-    if (Test-RecoveryOwner $Identity) { Write-Warning 'Recovery worker is finishing a probe; stop remains requested.' }
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    while ($timer.Elapsed.TotalSeconds -lt $WaitSeconds -and (Test-RecoveryOwner $Identity)) { Start-Sleep -Milliseconds 100 }
+    if (Test-RecoveryOwner $Identity) { throw 'Recovery worker is still stopping; restart was not started. Retry after the probe finishes.' }
 }
 function Start-RecoveryOwner {
     param([string]$Provider='claude')
     $dir = Get-RecoveryIdentity
-    if (Test-RecoveryOwner $dir) { return $dir }
+    if (Test-RecoveryOwner $dir) {
+        if (Test-Path (Join-Path $dir 'stopped')) { throw 'Recovery worker is still stopping; retry after it exits.' }
+        return $dir
+    }
+    if ((Test-Port $script:HTTP_PORT) -or (Test-Port $script:SOCKS_PORT)) {
+        if ((Test-RecoveryOwner $dir) -and -not (Test-Path (Join-Path $dir 'stopped'))) { return $dir }
+        throw 'Existing tunnel has no recovery owner. Run proxy-restart once to migrate it.'
+    }
     # Serialise descriptor publication and worker startup separately from the worker lease.
     $gate = $null
     try { $gate = [IO.File]::Open((Join-Path $dir 'startup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) } catch [IO.IOException] { }
@@ -274,8 +288,9 @@ function Start-RecoveryOwner {
                 foreach ($k in $script:CONF_KEYS) { $cfg[$k] = Get-Variable -Name $k -Scope Script -ValueOnly }
                 Write-RecoveryStatus $dir descriptor $cfg
                 Remove-Item (Join-Path $dir 'stopped') -ErrorAction SilentlyContinue
+                $profileFile=Resolve-RecoveryProfile $script:RECOVERY_PROFILE
                 $exe = (Get-Process -Id $PID).Path
-                $launch = @{ FilePath=$exe; ArgumentList=@('-NoProfile','-File',('"'+$script:RECOVERY_PROFILE+'"'),'-RecoveryWorker','-RecoveryDescriptor',('"'+(Join-Path $dir 'descriptor.json')+'"')); PassThru=$true }
+                $launch = @{ FilePath=$exe; ArgumentList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$profileFile+'"'),'-RecoveryWorker','-RecoveryDescriptor',('"'+(Join-Path $dir 'descriptor.json')+'"')); PassThru=$true }
                 if ($env:OS -eq 'Windows_NT') { $launch.WindowStyle='Hidden' }
                 $proc = Start-Process @launch
                 for ($i=0; $i -lt 50 -and -not (Test-RecoveryOwner $dir) -and -not $proc.HasExited; $i++) { Start-Sleep -Milliseconds 100 }
@@ -283,7 +298,24 @@ function Start-RecoveryOwner {
         } finally { $gate.Dispose() }
     } else { for ($i=0; $i -lt 50 -and -not (Test-RecoveryOwner $dir); $i++) { Start-Sleep -Milliseconds 100 } }
     if (-not (Test-RecoveryOwner $dir)) { throw 'Recovery worker failed to start; inspect recovery state and SSH credentials.' }
+    if (Test-Path (Join-Path $dir 'stopped')) { throw 'Recovery worker is still stopping; retry after it exits.' }
     return $dir
+}
+function Test-RecoveryPortConflict {
+    param([int]$OwnedProcessId=0)
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+        foreach ($port in @($script:HTTP_PORT,$script:SOCKS_PORT)) {
+            foreach ($c in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
+                if ($c.OwningProcess -ne $OwnedProcessId) { return $true }
+            }
+        }
+    } elseif (-not $OwnedProcessId) {
+        # Portable worker smoke tests have no Windows Get-NetTCPConnection.
+        foreach ($c in [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) {
+            if ($c.Port -in @($script:HTTP_PORT,$script:SOCKS_PORT)) { return $true }
+        }
+    }
+    return $false
 }
 function Start-RecoverySsh {
     $dest = if ($script:SSH_USER) { "$($script:SSH_USER)@$($script:SSH_HOST)" } else { $script:SSH_HOST }
@@ -306,20 +338,25 @@ function Invoke-RecoveryWorker {
         Write-RecoveryStatus $dir owner @{ProcessId=$PID;Started="$((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)"}
         while (-not (Test-Path (Join-Path $dir 'stopped'))) {
             $now = Get-RecoveryTime
-            if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next) {
+            $ownedId=if ($ssh -and -not $ssh.HasExited) {$ssh.Id}else{0}
+            $conflict=Test-RecoveryPortConflict $ownedId
+            if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next -and -not $conflict) {
                 if ($ssh) { $ssh.Dispose(); $ssh=$null }
-                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)" } catch { $ssh=$null }
+                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)" }
+                catch { $ssh=$null; Add-Content (Join-Path $dir 'events.log') "SSH launch failed: $($_.Exception.Message). Check SSH agent/credentials and TUNNEL_LOG." }
                 $retries++; $next=$now+$delay; $delay=[Math]::Min($script:WATCHDOG_MAX_BACKOFF,$delay*2)
             }
             $allTunnel=$true
             foreach ($provider in @('claude','codex')) {
-                $sample=Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT
+                $sample=if ($conflict) {@{kind='conflict'}}else{Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT}
                 if ($sample.kind -ne 'tunnel') { $allTunnel=$false }
                 if ($sample.kind -eq 'healthy') { $delay=2; $retries=0 }
                 $r=Get-RecoveryTransition -State $states[$provider] -Sample $sample -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
                 $s=$r.State
                 if ($r.Event -eq 'none') { $s.event=if ($states[$provider]) { $states[$provider].event } else { 'none' } }
-                else { $s.event=$r.Event; Add-Content (Join-Path $dir 'events.log') "[$provider] $(Get-RecoveryMessage $r.Event)" }
+                else {
+                    if ($conflict) {Add-Content (Join-Path $dir 'events.log') 'Local port conflict: keeping fixed ports and leaving the other process untouched.'}
+                    $s.event=$r.Event; Add-Content (Join-Path $dir 'events.log') "[$provider] $(Get-RecoveryMessage $r.Event)" }
                 $s.retry_count=$retries; $s.next_retry=$next
                 $states[$provider]=$s
                 Write-RecoveryStatus $dir $provider $s
@@ -332,12 +369,17 @@ function Invoke-RecoveryWorker {
             for ($i=0; $i -lt $script:WATCHDOG_INTERVAL*10 -and -not (Test-Path (Join-Path $dir 'stopped')); $i++) { Start-Sleep -Milliseconds 100 }
         }
     } finally {
-        if ($ssh) { Stop-RecoveryProcess $ssh.Id $started | Out-Null; $ssh.Dispose() }
+        if ($ssh) {
+            if (Stop-RecoveryProcess $ssh.Id $started) { $null=$ssh.WaitForExit(5000) }
+            $ssh.Dispose()
+        }
         $lease.Dispose()
     }
 }
 function proxy-restart {
-    Stop-RecoveryOwner (Get-RecoveryIdentity)
+    $identity=Get-RecoveryIdentity
+    if (Test-RecoveryOwner $identity) { Stop-RecoveryOwner $identity }
+    elseif (-not (tunnel-stop)) { throw 'Previous tunnel could not be stopped; restart was not started.' }
     Start-RecoveryOwner | Out-Null
     Write-Host '[Recovery] Restart requested on the same ports; proxy settings remain enabled.'
 }

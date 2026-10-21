@@ -56,8 +56,13 @@ echo 'PASS: Bash shared ownership, stale identity, and recovery status'
 # A proxy-only outage must never restart SSH or clear inherited proxy variables.
 _wd_sleep() { sleep .02; }
 _tunnel_ssh_args() { _CP_SSH_ARGS=(-L '8080:127.0.0.1:8888' -D 1080 example); }
-ssh() { printf '%s\n' "$*" >> "$scratch/ssh.calls"; exec sleep 100; }
+ssh() {
+ printf '%s\n' "$*" >> "$scratch/ssh.calls"
+ trap 'sleep .4; : > "$scratch/ssh.terminated"; exit 0' TERM
+ while :; do sleep .1; done
+}
 _recovery_probe() { echo 'proxy|0|407|000|proxy'; }
+_listeners() { :; }
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
 CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
 export HTTPS_PROXY=http://127.0.0.1:8080
@@ -72,6 +77,7 @@ assert test "$(cut -d'|' -f8 "$scratch/worker/claude.state")" = proxy
 assert grep -q 'BatchMode=yes.*8080:127.0.0.1:8888.*1080' "$scratch/ssh.calls"
 _recovery_owner_stop "$scratch/worker"
 wait "$worker" || :
+assert test -f "$scratch/ssh.terminated"
 sleep .05
 assert test "$(wc -l < "$scratch/ssh.calls" | tr -d ' ')" = 1
 assert test ! -e "$scratch/worker/lock"

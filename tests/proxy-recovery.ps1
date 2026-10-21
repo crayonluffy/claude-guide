@@ -24,7 +24,7 @@ function curl.exe {
 }
 $r=Test-RecoveryTransport -Provider claude -HttpPort 18080 -SocksPort 11080
 Assert ($r.kind -eq 'healthy') 'API 403 after successful CONNECT is healthy transport'
-Assert ($script:Calls[0] -contains '--noproxy') 'ambient NO_PROXY must be overridden'
+Assert ($script:Calls[0] -contains '--noproxy=') 'ambient NO_PROXY must be overridden'
 Assert ($script:Calls[0] -contains 'http://127.0.0.1:18080') 'proxy must be explicit'
 $script:HttpResult='407 000';$script:HttpRc=56
 Assert ((Test-RecoveryTransport codex 18080 11080).kind -eq 'proxy') 'CONNECT rejection is proxy failure'
@@ -55,6 +55,7 @@ $ownerDir=Join-Path ([IO.Path]::GetTempPath()) ('recovery-worker-'+[guid]::NewGu
 [IO.Directory]::CreateDirectory($ownerDir)|Out-Null
 $script:CONF_KEYS=@('HTTP_PORT','SOCKS_PORT','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_MAX_BACKOFF')
 Write-RecoveryStatus $ownerDir descriptor @{HTTP_PORT=8080;SOCKS_PORT=1080;WATCHDOG_INTERVAL=0;WATCHDOG_FAILS=2;WATCHDOG_NOTICE_AFTER=60;WATCHDOG_MAX_BACKOFF=30}
+function Test-RecoveryPortConflict {return $false}
 $script:SshStarts=0; $script:ProbeCalls=0
 function Start-RecoverySsh {
  $script:SshStarts++

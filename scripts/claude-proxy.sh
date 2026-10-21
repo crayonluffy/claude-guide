@@ -334,18 +334,31 @@ _recovery_owner_pid() {
     echo "$pid"
 }
 _recovery_claim() {
-    local dir="$1" pid="$2" stamp stale
+    local dir="$1" pid="$2" stamp candidate snapshot current token gate
     stamp=$(_recovery_process_identity "$pid") || return 1
-    if ! mkdir "$dir/lock" 2>/dev/null; then
-        _recovery_owner_pid "$dir" >/dev/null && return 1
-        # A creator publishing its identity has not yet become a stale owner.
-        [ -s "$dir/lock/owner" ] || return 1
-        stale="$dir/stale.$pid"
-        mv "$dir/lock" "$stale" 2>/dev/null || return 1
-        rm -f "$stale/owner"; rmdir "$stale" 2>/dev/null
-        mkdir "$dir/lock" 2>/dev/null || return 1
-    fi
-    printf '%s\n%s\n' "$pid" "$stamp" > "$dir/lock/owner"
+    mkdir -p "$dir/lock" || return 1
+    candidate=$(umask 077; mktemp "$dir/claim.XXXXXX") || return 1
+    printf '%s\n%s\n' "$pid" "$stamp" > "$candidate"
+    if ln "$candidate" "$dir/lock/owner" 2>/dev/null; then rm -f "$candidate"; return 0; fi
+    snapshot=$(cat "$dir/lock/owner" 2>/dev/null) || { rm -f "$candidate"; return 1; }
+    if _recovery_owner_pid "$dir" >/dev/null; then rm -f "$candidate"; return 1; fi
+    # One reaper for this exact stale generation. Keep its tombstone so a late
+    # observer cannot remove a replacement owner's lease. No empty lease window
+    # exists during publication: link(2) atomically publishes PID and identity.
+    token=$(printf '%s' "$snapshot" | cksum | awk '{print $1}')
+    gate="$dir/reaped.$token"
+    if ! mkdir "$gate" 2>/dev/null; then rm -f "$candidate"; return 1; fi
+    current=$(cat "$dir/lock/owner" 2>/dev/null) || current=''
+    if [ "$current" != "$snapshot" ]; then rm -f "$candidate"; return 1; fi
+    rm -f "$dir/lock/owner"
+    if ln "$candidate" "$dir/lock/owner" 2>/dev/null; then rm -f "$candidate"; return 0; fi
+    rm -f "$candidate"; return 1
+}
+_recovery_release() {
+    local pid
+    pid=$(_recovery_owner_pid "$1") || return 0
+    [ "$pid" = "$2" ] || return 1
+    rm -f "$1/lock/owner"; rmdir "$1/lock" 2>/dev/null || :
 }
 _recovery_signal_owned() {
     local actual
@@ -382,6 +395,11 @@ _recovery_owner_start() {
     local dir pid i=0
     dir=$(_recovery_identity) || return 1
     if ! _recovery_owner_pid "$dir" >/dev/null; then
+        if _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+            echo '[Recovery] Existing tunnel has no current recovery owner. Run proxy-restart once to migrate it.' >&2
+            return 1
+        fi
+        rm -f "$dir/stopped"
         ( _recovery_worker "$dir" ) </dev/null >>"$CLAUDE_TUNNEL_LOG" 2>&1 &
         disown 2>/dev/null || :
         while ! _recovery_owner_pid "$dir" >/dev/null && [ "$i" -lt 30 ]; do sleep .1; i=$((i+1)); done
@@ -389,18 +407,28 @@ _recovery_owner_start() {
     fi
     echo "$dir"
 }
+_recovery_port_conflict() {
+    local pid port
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        for pid in $(_listeners "$port"); do
+            [ "$pid" = "$1" ] || return 0
+        done
+    done
+    return 1
+}
 _recovery_worker() {
-    local dir="$1" me spid='' stamp='' now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel
+    local dir="$1" me spid='' stamp='' now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
-    rm -f "$dir/stopped"
     trap '' HUP
-    trap '_recovery_signal_owned "$spid" "$stamp" || :; rm -f "$dir/lock/owner"; rmdir "$dir/lock" 2>/dev/null; exit 0' TERM INT
+    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     while [ ! -e "$dir/stopped" ]; do
         now=$(_recovery_now)
+        conflict=0
+        _recovery_port_conflict "$spid" && conflict=1
         if ! _recovery_process_identity "$spid" >/dev/null; then
-            if [ "$now" -ge "$next" ]; then
+            if [ "$now" -ge "$next" ] && [ "$conflict" -eq 0 ]; then
                 ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" & spid=$!
                 stamp=$(_recovery_process_identity "$spid") || stamp=''
                 retries=$((retries+1)); next=$((now+delay))
@@ -409,7 +437,8 @@ _recovery_worker() {
         fi
         all_tunnel=1
         for provider in claude codex; do
-            sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT")
+            if [ "$conflict" -eq 1 ]; then sample='conflict|0|000|000|local-port-conflict'
+            else sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"); fi
             case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
             case "$sample" in healthy\|*) delay=2; retries=0;; esac
             old=$(_recovery_status "$dir" "$provider") || old=''
@@ -419,6 +448,7 @@ _recovery_worker() {
                 prior=$(printf '%s' "$old" | cut -d'|' -f9)
                 state="${state%|*}|$prior"
             elif [ "$event" != none ]; then
+                [ "$conflict" -eq 0 ] || echo '[Recovery] Local port conflict: keeping the fixed ports and leaving the other process untouched.'
                 printf '[%s] %s\n' "$provider" "$(_recovery_message "$event")"
             fi
             state=$(_recovery_retry_record "$state" "$retries" "$next")
@@ -432,7 +462,8 @@ _recovery_worker() {
         _wd_sleep "${CLAUDE_WATCHDOG_INTERVAL:-5}"
     done
     _recovery_signal_owned "$spid" "$stamp" || :
-    rm -f "$dir/lock/owner"; rmdir "$dir/lock" 2>/dev/null
+    wait "$spid" 2>/dev/null || :
+    _recovery_release "$dir" "$me"
 }
 _recovery_subscribe() {
     local dir="$1" provider="$2" parent stamp
@@ -487,6 +518,31 @@ proxy-test() {
 # END PROXY RECOVERY
 
 # Compatibility entry points all delegate to the single recovery owner.
+_legacy_watchdog_pid() {
+    local pid
+    [ -n "${CLAUDE_TUNNEL_PIDFILE:-}" ] && [ -f "$CLAUDE_TUNNEL_PIDFILE" ] && [ ! -L "$CLAUDE_TUNNEL_PIDFILE" ] && [ -O "$CLAUDE_TUNNEL_PIDFILE" ] || return 1
+    read -r pid < "$CLAUDE_TUNNEL_PIDFILE"
+    case "$pid" in ''|*[!0-9]*) return 1;; esac
+    _recovery_process_identity "$pid" >/dev/null || return 1
+    case "$(_proc_name "$pid")" in *sh) echo "$pid";; *) return 1;; esac
+}
+_legacy_watchdog_stop() {
+    local pid stamp child parent found=0 i=0
+    pid=$(_legacy_watchdog_pid) || return 0
+    # The old PID file has no start identity. Prove parentage to a tunnel SSH
+    # before authorising its removal, so a reused shell PID is never enough.
+    for child in $(_ssh_listeners "$CLAUDE_HTTP_PORT"); do
+        parent=$(ps -p "$child" -o ppid= 2>/dev/null | tr -d ' ')
+        [ "$parent" != "$pid" ] || found=1
+    done
+    [ "$found" -eq 1 ] || { echo '[Err] Legacy watchdog identity cannot be verified. Stop it from its old shell before retrying.' >&2; return 1; }
+    stamp=$(_recovery_process_identity "$pid") || return 1
+    _recovery_signal_owned "$pid" "$stamp" || return 1
+    while _recovery_process_identity "$pid" >/dev/null && [ "$i" -lt 100 ]; do sleep .1; i=$((i+1)); done
+    _recovery_process_identity "$pid" >/dev/null && return 1
+    rm -f "$CLAUDE_TUNNEL_PIDFILE"
+    return 0
+}
 _watchdog_pid() { local dir; dir=$(_recovery_identity) && _recovery_owner_pid "$dir"; }
 _wd_sleep() { sleep "$1" & wait $!; }
 _wd_log() { echo "[watchdog] $*" >> "$CLAUDE_TUNNEL_LOG"; }
@@ -1224,8 +1280,13 @@ tunnel-stop() {
 
     # The watchdog goes first, or it would just start ssh again (it takes its ssh with it).
     if _watchdog_pid >/dev/null; then
-        _watchdog_stop
+        _watchdog_stop || return 1
         echo "[OK] Recovery stopped; proxy settings remain enabled until proxy-off."
+        return 0
+    fi
+    if _legacy_watchdog_pid >/dev/null; then
+        _legacy_watchdog_stop || return 1
+        echo '[OK] Previous watchdog stopped; new recovery can start on the same ports.'
         return 0
     fi
     wd_msg=$(_watchdog_stop)
@@ -1401,7 +1462,7 @@ _launch_via_proxy() {
     fi
 
     # Steps 1-3: bring up tunnel + env vars + verify
-    local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity
+    local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity saved_int
     [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
     proxy-up "${up_args[@]}" || return 1
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
@@ -1412,6 +1473,8 @@ _launch_via_proxy() {
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
 
+    saved_int=$(trap -p INT)
+    trap '_recovery_unsubscribe "$subscriber" "$subscriber_stamp"' INT
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
     echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
     if [ $safe -eq 1 ]; then
@@ -1420,6 +1483,8 @@ _launch_via_proxy() {
         if "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
     fi
     [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
+    trap - INT
+    [ -z "$saved_int" ] || eval "$saved_int"  # restore the caller's own trap
     return "$rc"
 }
 

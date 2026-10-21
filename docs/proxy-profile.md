@@ -33,6 +33,9 @@ proxy before launch, including with `--no-verify` / `-NoVerify`. That flag skips
 only the optional external-IP check. HTTP API errors after a successful CONNECT
 and TLS handshake count as working transport, without sending API credentials.
 
+An occupied established port is reported as `conflict`; recovery waits without
+changing the port or terminating the other process.
+
 An outage prints a warning in each affected `cc`/`cx` terminal. After 60 seconds
 it warns once that the session remains open, then keeps retrying with periodic
 progress notices. It never closes the application, sends it input, or changes
@@ -75,9 +78,10 @@ redraws its terminal over a notification. Recovery state is private under
 Set overrides in your usual settings file with `proxy-config`; previously set
 intervals and failure counts remain honored. Backoff starts at two seconds and
 doubles to the cap. Disabled supervision is reported at launch. Background SSH
-uses `BatchMode=yes`: load encrypted keys into your SSH agent first. A healthy
-tunnel from an older profile may need one explicit `proxy-restart` to gain the
-new owner. Restart preserves proxy environment variables and Claude settings.
+uses `BatchMode=yes`: load encrypted keys into your SSH agent first. A tunnel from an older profile needs one explicit `proxy-restart` to gain the
+new owner. Bash verifies that the old watchdog parents the tunnel SSH before
+stopping it; if that identity cannot be verified, stop it from the old shell
+and retry. Restart preserves proxy environment variables and Claude settings.
 
 This is script-level recovery, **not an OS firewall kill switch**. It retains
 the configured proxy during failure, but cannot prevent an application or tool
