@@ -61,6 +61,9 @@ probe timeout. A first failed check triggers notification. Require two consecuti
 failures before restarting a still-running SSH process to avoid reconnect storms;
 an owned SSH exit can trigger reconnection immediately. Start the outage clock
 at the first failed check and reset it only after a successful transport check.
+Measure outage duration with a monotonic clock. Track Claude and Codex endpoint
+health separately: a provider-specific CONNECT rejection must not mark the other
+provider unavailable or trigger a shared SSH restart when that tunnel still works.
 
 ### Shared recovery owner and fixed ports
 
