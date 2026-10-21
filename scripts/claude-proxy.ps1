@@ -32,6 +32,9 @@
 # read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
+param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
+$script:RECOVERY_PROFILE = $PSCommandPath
+
 $script:PROFILE_VERSION = '2.4.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
@@ -96,9 +99,18 @@ $script:NO_PROXY_LIST = @(
 $script:BANNER         = 1     # one-line notice when a new window loads this profile (0 = silent)
 $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 
+$script:TUNNEL_WATCHDOG=1
+$script:WATCHDOG_INTERVAL=5
+$script:WATCHDOG_FAILS=2
+$script:WATCHDOG_NOTICE_AFTER=60
+$script:WATCHDOG_PROBE_TIMEOUT=3
+$script:WATCHDOG_PROGRESS_INTERVAL=30
+$script:WATCHDOG_MAX_BACKOFF=30
+$script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
+
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','TUNNEL_LOG')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -184,6 +196,150 @@ function Test-RecoveryTransport {
         if ($LASTEXITCODE -eq 0) {$kind='proxy'}
     }
     return @{kind=$kind;curl_exit=$rc;connect_code=$cc;http_code=$hc;reason=$kind}
+}
+
+function Get-RecoveryIdentity {
+    $root = Join-Path $HOME '.claude-proxy/recovery'
+    $text = @($script:SSH_USER,$script:SSH_HOST,$script:SSH_PORT,$script:HTTP_PORT,$script:SOCKS_PORT,$script:REMOTE_PROXY_PORT) -join '|'
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    $dir = Join-Path $root $key
+    if (-not (Test-Path $dir)) {
+        [IO.Directory]::CreateDirectory($dir) | Out-Null
+        if ($env:OS -eq 'Windows_NT') {
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            & icacls.exe $root /inheritance:r /grant:r "*${sid}:(OI)(CI)F" /Q | Out-Null
+            if ($LASTEXITCODE) { throw 'Cannot protect recovery state directory' }
+        } else { & chmod 700 $root $dir }
+    }
+    return $dir
+}
+function Open-RecoveryLock {
+    param([string]$Identity)
+    try { return [IO.File]::Open((Join-Path $Identity 'owner.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) } catch [IO.IOException] { return $null }
+}
+function Write-RecoveryStatus {
+    param([string]$Identity,[string]$Provider,$State)
+    if ($Provider -notin @('claude','codex','owner','descriptor')) { throw 'Invalid recovery record' }
+    $dest = Join-Path $Identity "$Provider.json"
+    $tmp = "$dest.$([guid]::NewGuid()).tmp"
+    try {
+        [IO.File]::WriteAllText($tmp,($State | ConvertTo-Json -Depth 6 -Compress))
+        if ([IO.File]::Exists($dest)) { [IO.File]::Replace($tmp,$dest,"$dest.bak"); [IO.File]::Delete("$dest.bak") }
+        else { [IO.File]::Move($tmp,$dest) }
+    } finally { if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } }
+}
+function Get-RecoveryStatus {
+    param([string]$Identity,[string]$Provider)
+    if ($Provider -notin @('claude','codex','owner','descriptor')) { throw 'Invalid recovery record' }
+    try { return ([IO.File]::ReadAllText((Join-Path $Identity "$Provider.json")) | ConvertFrom-Json -ErrorAction Stop) }
+    catch { return [pscustomobject]@{ phase='unknown'; generation=-1; event='none' } }
+}
+function Test-RecoveryProcess {
+    param([int]$ProcessId,[string]$Started)
+    $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    return ($p -and $Started -and "$($p.StartTime.ToUniversalTime().Ticks)" -eq $Started)
+}
+function Stop-RecoveryProcess {
+    param([int]$ProcessId,[string]$Started)
+    if (Test-RecoveryProcess $ProcessId $Started) { Stop-Process -Id $ProcessId -ErrorAction SilentlyContinue; return $true }
+    return $false
+}
+function Test-RecoveryOwner {
+    param([string]$Identity)
+    $o = Get-RecoveryStatus $Identity owner
+    if (-not $o.ProcessId -or -not (Test-RecoveryProcess $o.ProcessId $o.Started)) { return $false }
+    $lease = Open-RecoveryLock $Identity
+    if ($lease) { $lease.Dispose(); return $false }
+    return $true
+}
+function Stop-RecoveryOwner {
+    param([string]$Identity)
+    # The stop marker is checked before every launch; shutdown never signals applications.
+    [IO.File]::WriteAllText((Join-Path $Identity 'stopped'),'stop')
+    for ($i=0; $i -lt 100 -and (Test-RecoveryOwner $Identity); $i++) { Start-Sleep -Milliseconds 100 }
+    if (Test-RecoveryOwner $Identity) { Write-Warning 'Recovery worker is finishing a probe; stop remains requested.' }
+}
+function Start-RecoveryOwner {
+    param([string]$Provider='claude')
+    $dir = Get-RecoveryIdentity
+    if (Test-RecoveryOwner $dir) { return $dir }
+    # Serialise descriptor publication and worker startup separately from the worker lease.
+    $gate = $null
+    try { $gate = [IO.File]::Open((Join-Path $dir 'startup.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) } catch [IO.IOException] { }
+    if ($gate) {
+        try {
+            if (-not (Test-RecoveryOwner $dir)) {
+                $cfg = @{}
+                foreach ($k in $script:CONF_KEYS) { $cfg[$k] = Get-Variable -Name $k -Scope Script -ValueOnly }
+                Write-RecoveryStatus $dir descriptor $cfg
+                Remove-Item (Join-Path $dir 'stopped') -ErrorAction SilentlyContinue
+                $exe = (Get-Process -Id $PID).Path
+                $launch = @{ FilePath=$exe; ArgumentList=@('-NoProfile','-File',('"'+$script:RECOVERY_PROFILE+'"'),'-RecoveryWorker','-RecoveryDescriptor',('"'+(Join-Path $dir 'descriptor.json')+'"')); PassThru=$true }
+                if ($env:OS -eq 'Windows_NT') { $launch.WindowStyle='Hidden' }
+                $proc = Start-Process @launch
+                for ($i=0; $i -lt 50 -and -not (Test-RecoveryOwner $dir) -and -not $proc.HasExited; $i++) { Start-Sleep -Milliseconds 100 }
+            }
+        } finally { $gate.Dispose() }
+    } else { for ($i=0; $i -lt 50 -and -not (Test-RecoveryOwner $dir); $i++) { Start-Sleep -Milliseconds 100 } }
+    if (-not (Test-RecoveryOwner $dir)) { throw 'Recovery worker failed to start; inspect recovery state and SSH credentials.' }
+    return $dir
+}
+function Start-RecoverySsh {
+    $dest = if ($script:SSH_USER) { "$($script:SSH_USER)@$($script:SSH_HOST)" } else { $script:SSH_HOST }
+    $a = @('-N','-C','-L',"$($script:HTTP_PORT):127.0.0.1:$($script:REMOTE_PROXY_PORT)",'-D',"$($script:SOCKS_PORT)",'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ExitOnForwardFailure=yes','-o','StrictHostKeyChecking=accept-new')
+    if ($script:SSH_KEY) { $a += @('-i',('"'+$script:SSH_KEY+'"'),'-p',"$($script:SSH_PORT)") }
+    $a += $dest
+    $launch = @{FilePath='ssh';ArgumentList=$a;PassThru=$true;RedirectStandardError=$script:TUNNEL_LOG}
+    if ($env:OS -eq 'Windows_NT') { $launch.WindowStyle='Hidden' }
+    return (Start-Process @launch -ErrorAction Stop)
+}
+function Invoke-RecoveryWorker {
+    param([string]$DescriptorPath)
+    $dir = Split-Path -Parent $DescriptorPath
+    $lease = Open-RecoveryLock $dir
+    if (-not $lease) { return }
+    $ssh = $null; $started=''; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0
+    try {
+        $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
+        foreach ($k in $script:CONF_KEYS) { if ($null -ne $cfg.$k) { Set-Variable -Scope Script -Name $k -Value $cfg.$k } }
+        Write-RecoveryStatus $dir owner @{ProcessId=$PID;Started="$((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)"}
+        while (-not (Test-Path (Join-Path $dir 'stopped'))) {
+            $now = Get-RecoveryTime
+            if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next) {
+                if ($ssh) { $ssh.Dispose(); $ssh=$null }
+                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)" } catch { $ssh=$null }
+                $retries++; $next=$now+$delay; $delay=[Math]::Min($script:WATCHDOG_MAX_BACKOFF,$delay*2)
+            }
+            $allTunnel=$true
+            foreach ($provider in @('claude','codex')) {
+                $sample=Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT
+                if ($sample.kind -ne 'tunnel') { $allTunnel=$false }
+                if ($sample.kind -eq 'healthy') { $delay=2; $retries=0 }
+                $r=Get-RecoveryTransition -State $states[$provider] -Sample $sample -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
+                $s=$r.State
+                if ($r.Event -eq 'none') { $s.event=if ($states[$provider]) { $states[$provider].event } else { 'none' } }
+                else { $s.event=$r.Event; Add-Content (Join-Path $dir 'events.log') "[$provider] $(Get-RecoveryMessage $r.Event)" }
+                $s.retry_count=$retries; $s.next_retry=$next
+                $states[$provider]=$s
+                Write-RecoveryStatus $dir $provider $s
+            }
+            if ($allTunnel) { $fails++ } else { $fails=0 }
+            if ($fails -ge $script:WATCHDOG_FAILS -and $ssh -and -not $ssh.HasExited) {
+                Stop-RecoveryProcess $ssh.Id $started | Out-Null
+                $ssh.WaitForExit(); $ssh.Dispose(); $ssh=$null; $fails=0
+            }
+            for ($i=0; $i -lt $script:WATCHDOG_INTERVAL*10 -and -not (Test-Path (Join-Path $dir 'stopped')); $i++) { Start-Sleep -Milliseconds 100 }
+        }
+    } finally {
+        if ($ssh) { Stop-RecoveryProcess $ssh.Id $started | Out-Null; $ssh.Dispose() }
+        $lease.Dispose()
+    }
+}
+function proxy-restart {
+    Stop-RecoveryOwner (Get-RecoveryIdentity)
+    Start-RecoveryOwner | Out-Null
+    Write-Host '[Recovery] Restart requested on the same ports; proxy settings remain enabled.'
 }
 
 function Get-TunnelHealth {
@@ -768,6 +924,10 @@ function proxy-node {
 # ============================================================
 
 function tunnel-start {
+    if (Test-RecoveryOwner (Get-RecoveryIdentity)) {
+        Write-Host '[Recovery] Shared owner running; retaining the established ports.'
+        return
+    }
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
@@ -814,6 +974,12 @@ function tunnel-start {
 
     Write-Host "[SSH] Starting tunnel to $($script:SSH_HOST)..." -ForegroundColor Cyan
 
+    if ($script:TUNNEL_WATCHDOG) {
+        Start-RecoveryOwner | Out-Null
+        for ($i=0; $i -lt 50 -and -not (Test-Port $script:HTTP_PORT); $i++) { Start-Sleep -Milliseconds 100 }
+        return
+    }
+    Write-Warning 'Automatic recovery is disabled.'
     $sshArgs = @(
         "-N",
         "-C",
@@ -1023,6 +1189,8 @@ function cx-safe { cx -Safe @args }
 # ============================================================
 
 function tunnel-stop {
+    $identity=Get-RecoveryIdentity
+    if (Test-RecoveryOwner $identity) { Stop-RecoveryOwner $identity; return $true }
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
@@ -1906,6 +2074,13 @@ function cc-help {
     Write-Host "                    chrome-proxy [node] [-Profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com" -ForegroundColor DarkGray
     Write-Host "  cc-help         - Show this list again" -ForegroundColor DarkGray
     Write-Host ""
+}
+
+# Internal entry is deliberately after definitions and before interactive initialization.
+if ($RecoveryWorker) {
+    if (-not $RecoveryDescriptor) { throw 'Missing recovery descriptor' }
+    Invoke-RecoveryWorker $RecoveryDescriptor
+    return
 }
 
 # One line when a new window loads this profile. Silence it with BANNER = 0 in

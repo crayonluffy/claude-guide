@@ -31,3 +31,45 @@ Assert ((Test-RecoveryTransport codex 18080 11080).kind -eq 'proxy') 'CONNECT re
 $script:HttpResult='000 000';$script:HttpRc=52
 Assert ((Test-RecoveryTransport claude 18080 11080).kind -eq 'proxy') 'healthy SOCKS means SSH need not restart'
 Write-Host 'PASS: PowerShell recovery transitions, backwards time, and explicit proxy probes'
+
+if (-not (Get-Command Open-RecoveryLock -ErrorAction SilentlyContinue)) { throw 'shared recovery ownership is missing' }
+$ownerDir = Join-Path ([IO.Path]::GetTempPath()) ('recovery-' + [guid]::NewGuid())
+[IO.Directory]::CreateDirectory($ownerDir) | Out-Null
+try {
+    $lease = Open-RecoveryLock $ownerDir
+    if (-not $lease) { throw 'first owner failed' }
+    if (Open-RecoveryLock $ownerDir) { throw 'second owner acquired occupied lock' }
+    $lease.Dispose()
+    $lease = Open-RecoveryLock $ownerDir
+    if (-not $lease) { throw 'lock not released' }
+    $lease.Dispose()
+    Write-RecoveryStatus $ownerDir claude @{ Phase='recovering'; Generation=1; Event='lost' }
+    if ((Get-RecoveryStatus $ownerDir claude).Phase -ne 'recovering') { throw 'status not published' }
+    Set-Content (Join-Path $ownerDir 'claude.json') '{broken'
+    if ((Get-RecoveryStatus $ownerDir claude).Phase -ne 'unknown') { throw 'corrupt status treated as healthy' }
+    if (Stop-RecoveryProcess -ProcessId $PID -Started 'bogus') { throw 'PID reuse identity accepted' }
+} finally { Remove-Item $ownerDir -Recurse -Force }
+Write-Host 'PASS: PowerShell exclusive owner, atomic status, corrupt data, and stale identity'
+# Exercise the worker with fake SSH/probes and no real network/process/settings calls.
+$ownerDir=Join-Path ([IO.Path]::GetTempPath()) ('recovery-worker-'+[guid]::NewGuid())
+[IO.Directory]::CreateDirectory($ownerDir)|Out-Null
+$script:CONF_KEYS=@('HTTP_PORT','SOCKS_PORT','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_MAX_BACKOFF')
+Write-RecoveryStatus $ownerDir descriptor @{HTTP_PORT=8080;SOCKS_PORT=1080;WATCHDOG_INTERVAL=0;WATCHDOG_FAILS=2;WATCHDOG_NOTICE_AFTER=60;WATCHDOG_MAX_BACKOFF=30}
+$script:SshStarts=0; $script:ProbeCalls=0
+function Start-RecoverySsh {
+ $script:SshStarts++
+ return [pscustomobject]@{Id=99999999;HasExited=$false;StartTime=[datetime]::UtcNow} | Add-Member ScriptMethod Dispose {} -PassThru
+}
+function Test-RecoveryTransport {
+ param($Provider,$HttpPort,$SocksPort)
+ if ($HttpPort -ne 8080 -or $SocksPort -ne 1080) {throw 'worker changed ports'}
+ $script:ProbeCalls++
+ if ($script:ProbeCalls -ge 8) { [IO.File]::WriteAllText((Join-Path $ownerDir 'stopped'),'stop') }
+ return @{kind='proxy'}
+}
+try {
+ Invoke-RecoveryWorker (Join-Path $ownerDir 'descriptor.json')
+ Assert ($script:SshStarts -eq 1) 'proxy failure must not restart SSH'
+ Assert ((Get-RecoveryStatus $ownerDir codex).failure_kind -eq 'proxy') 'both providers monitored'
+} finally {Remove-Item $ownerDir -Recurse -Force}
+Write-Host 'PASS: PowerShell worker preserves fixed ports during proxy outage and honors stop'
