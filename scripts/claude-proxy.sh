@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.5.1"
+CLAUDE_PROXY_VERSION="2.5.2"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -1796,6 +1796,10 @@ chrome-proxy() {
         if [ -z "$node" ] && line=$(_node_lookup "$a"); then
             node="$a"
         else
+            if [ -z "$node" ] && printf '%s\n' "$a" | LC_ALL=C grep -Eq '^[A-Za-z][A-Za-z0-9]*$'; then
+                echo "[Err] Unknown proxy node '$a' - Chrome not launched. Run 'proxy-nodes --refresh' in this window and check the list. For a website, use an explicit URL such as https://$a/ ."
+                return 1
+            fi
             extra+=("$a")
         fi
     done

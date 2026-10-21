@@ -108,6 +108,44 @@ and `chrome-profiles` like this:
 
 Chrome data folders: `~/.chrome-proxy-profile-<node>` (macOS), `~/.config/google-chrome-vpn-<node>` (Linux), `C:\ChromeVPNProfile-<node>` (Windows), `C:\wsl-proxy-profile-<node>` (WSL). The first time you run `chrome-proxy` after upgrading from 2.0, the old single folder is renamed to the active node's folder, so your existing logins survive.
 
+### Chrome opens `http://sg/` or reports `ERR_SOCKS_CONNECTION_FAILED`
+
+`sg` is a node name, not a website. If Chrome opens `http://sg/`, the loaded
+launcher passed it to Chrome as a URL instead of selecting the SG node. An
+older function still loaded in that PowerShell window, or a missing node in
+that window's catalogue, can cause this. Refreshing nodes updates the catalogue;
+it does not update the launcher function.
+
+On Windows, update and explicitly reload the profile in the affected window:
+
+```powershell
+proxy-update
+. "$HOME\.claude-proxy.ps1"
+proxy-nodes -From jpvpn    # use your existing JP SSH alias
+chrome-proxy sg -Profile sg https://www.google.com/
+```
+
+The `[Launch]` line should name `sg`, use `C:\ChromeVPNProfile-sg`, and usually
+show SOCKS port `1181` (base `1180` plus SG slot `1`). If SG is the active node,
+it can reuse the main tunnel on `1080` instead. Close the affected node's Chrome
+windows before retrying, because an already-running Chrome data folder keeps
+its original proxy settings.
+
+If it still fails, check the actual SSH target and forwarding from the PC:
+
+```powershell
+ssh -G sgvpn | Select-String '^(hostname|user|port|identityfile) '
+ssh -N -D 127.0.0.1:1281 -o ExitOnForwardFailure=yes sgvpn
+# Keep that terminal open. In another terminal:
+curl.exe --socks5-hostname 127.0.0.1:1281 https://www.cloudflare.com/cdn-cgi/trace
+```
+
+The trace should show SG's IP. `Permission denied` points to the SSH username
+or key; a timeout points to network/firewall access; a successful trace with a
+browser failure points to the local launcher, port, or existing Chrome process.
+Launchers reject unknown bare node names instead of opening them as websites;
+use an explicit URL such as `http://localhost/` when a single word is a website.
+
 ---
 
 ## No profile? The manual equivalent
