@@ -474,13 +474,30 @@ _recovery_owner_stop() {
     fi
     return 0
 }
+# A tunnel started by an older profile (ssh on our ports, nothing that can heal it)
+# is replaced by one with an owner, on the same ports. Only that ssh and the old
+# watchdog are stopped; a foreign program on the ports is never touched.
+_recovery_migrate() {
+    local i=0 state
+    state=$(_tunnel_health | awk '{print $1}')
+    case "$state" in
+        ok|stale|down) ;;
+        *) echo "[Err] Port $CLAUDE_HTTP_PORT or $CLAUDE_SOCKS_PORT is used by another program - see proxy-status." >&2; return 1 ;;
+    esac
+    echo '[Upgrade] Replacing the tunnel from an older profile with a self-healing one on the same ports (open sessions reconnect within seconds).' >&2
+    tunnel-stop >/dev/null 2>&1 || { echo '[Err] The old tunnel could not be stopped - run proxy-doctor.' >&2; return 1; }
+    while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Err] Ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not free up after the old tunnel stopped - run proxy-doctor." >&2
+        return 1
+    fi
+}
 _recovery_owner_start() {
     local dir pid i=0
     dir=$(_recovery_identity) || return 1
     if ! _recovery_owner_pid "$dir" >/dev/null; then
         if _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
-            echo '[Recovery] Existing tunnel has no current recovery owner. Run proxy-restart once to migrate it.' >&2
-            return 1
+            _recovery_migrate || return 1
         fi
         rm -f "$dir/stopped"
         ( _recovery_worker "$dir" ) </dev/null >>"$CLAUDE_TUNNEL_LOG" 2>&1 &
@@ -1474,14 +1491,18 @@ tunnel-start() {
     fi
     case "$tstate" in
         ok)
+            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ] && ! _watchdog_pid >/dev/null; then
+                # Started by an older profile: give it an owner on the same ports (replaces it).
+                [ "$hport" = "$CLAUDE_HTTP_PORT" ] || export CLAUDE_HTTP_PORT=$hport
+                _watchdog_spawn >/dev/null || return 1
+                echo "[OK]  Self-healing tunnel up on HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT"
+                return 0
+            fi
             if [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
                 echo "[OK]  SSH tunnel already running (PID $hpid) on fallback port $hport - using it"
             else
                 echo "[OK]  SSH tunnel already running (PID $hpid)"
-            fi
-            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ] && ! _watchdog_pid >/dev/null; then
-                echo "[Info] This tunnel has no watchdog (started by an older profile) - 'proxy-restart' adds auto-reconnect."
             fi
             return 0
             ;;
