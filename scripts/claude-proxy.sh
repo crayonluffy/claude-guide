@@ -429,6 +429,34 @@ _recovery_adopt() {
     export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_PORT CLAUDE_SSH_KEY \
            CLAUDE_HTTP_PORT CLAUDE_SOCKS_PORT CLAUDE_REMOTE_PROXY_PORT
 }
+# Why an ssh exited, from its own stderr: auth|hostkey|forward|network|unknown.
+# Auth and hostkey failures will not heal by retrying, so the owner waits longer
+# for them; network trouble retries at the normal pace.
+_recovery_ssh_class() {
+    local f="$1"
+    [ -s "$f" ] || { echo unknown; return; }
+    if grep -qiE 'host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$f"; then echo hostkey
+    elif grep -qiE 'permission denied|too many authentication failures|load key|no such identity|bad permissions' "$f"; then echo auth
+    elif grep -qiE 'address already in use|cannot listen to port|could not request local forwarding|forwarding failed' "$f"; then echo forward
+    elif grep -qiE 'timed out|could not resolve|connection refused|no route to host|network is unreachable|connection closed|connection reset|broken pipe' "$f"; then echo network
+    else echo unknown
+    fi
+}
+_recovery_ssh_hint() {  # <class> <server>
+    case "$1" in
+        auth)    echo "SSH login to $2 was refused - load your key (ssh-add <key>) or check the user name, then 'proxy-restart'." ;;
+        hostkey) echo "The host key of $2 changed. If your admin expected that: ssh-keygen -R $2, then run 'ssh $2' once." ;;
+        forward) echo "A tunnel port is held by another program - see 'proxy-status'." ;;
+        network) echo "Cannot reach $2 - network down, Wi-Fi changed, or the server is offline. Retrying." ;;
+        *)       echo "ssh to $2 exited without a known reason - see $CLAUDE_TUNNEL_LOG" ;;
+    esac
+}
+# Last exit reason, as 'class|time|last stderr line' (read by proxy-status and terminals).
+_recovery_ssh_note() {  # <dir> <class> <now>
+    local last
+    last=$(tail -n 1 "$1/ssh.err" 2>/dev/null | tr -d '\r|')
+    _recovery_write "$1/ssh.status" "$2|$3|$last" ssh
+}
 _recovery_status() { case "$2" in claude|codex) cat "$1/$2.state" 2>/dev/null;; *) return 1;; esac; }
 _recovery_write() {
     local target="$1" value="$2" tmp="$1.tmp.$3"
@@ -473,12 +501,13 @@ _recovery_port_conflict() {
 }
 _recovery_worker() {
     local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
+    local classified=1 sshclass='' lastclass=''
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
     _recovery_record_write "$dir"
     trap '' HUP
-    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; rm -f "$dir/ssh.status"; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     desktop_backend=$(_recovery_desktop_backend)
     [ "$desktop_backend" != off ] || desktop_result=off
@@ -486,9 +515,22 @@ _recovery_worker() {
         now=$(_recovery_now)
         conflict=0
         _recovery_port_conflict "$spid" && conflict=1
+        if [ "$classified" -eq 0 ] && ! _recovery_process_identity "$spid" >/dev/null; then
+            # The ssh we started has exited: record why before deciding on a retry.
+            sshclass=$(_recovery_ssh_class "$dir/ssh.err")
+            _recovery_ssh_note "$dir" "$sshclass" "$now"
+            if [ "$sshclass" != "$lastclass" ]; then
+                echo "[ssh] $sshclass: $(_recovery_ssh_hint "$sshclass" "$CLAUDE_SSH_HOST")"
+                if [ -s "$dir/ssh.err" ]; then tail -n 5 "$dir/ssh.err" | sed 's/^/[ssh]   /'; fi
+                lastclass=$sshclass
+            fi
+            classified=1
+            case "$sshclass" in auth|hostkey) next=$((now+${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}));; esac
+        fi
         if ! _recovery_process_identity "$spid" >/dev/null; then
             if [ "$now" -ge "$next" ] && [ "$conflict" -eq 0 ]; then
-                ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" & spid=$!
+                ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" 2>"$dir/ssh.err" & spid=$!
+                classified=0
                 stamp=$(_recovery_process_identity "$spid") || stamp=''; sshat=$now
                 retries=$((retries+1)); next=$((now+delay))
                 delay=$((delay*2)); [ "$delay" -le "${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}" ] || delay=${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}
@@ -504,7 +546,7 @@ _recovery_worker() {
             else sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"); fi
             case "$connecting:$sample" in 1:tunnel\|*) all_tunnel=0; continue;; esac
             case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
-            case "$sample" in healthy\|*) delay=2; retries=0;; esac
+            case "$sample" in healthy\|*) delay=2; retries=0; rm -f "$dir/ssh.status"; lastclass='';; esac
             old=$(_recovery_status "$dir" "$provider") || old=''
             state=$(_recovery_step "$old" "$sample" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
             event=$(printf '%s' "$state" | cut -d'|' -f9)
@@ -540,6 +582,7 @@ _recovery_worker() {
     done
     _recovery_signal_owned "$spid" "$stamp" || :
     wait "$spid" 2>/dev/null || :
+    rm -f "$dir/ssh.status"
     _recovery_release "$dir" "$me"
 }
 _recovery_subscribe() {
@@ -548,8 +591,13 @@ _recovery_subscribe() {
     (
         trap 'exit 0' TERM
         trap '' HUP
-        local state gen event phase seen=-1
+        local state gen event phase seen=-1 sshwhy seenssh=''
         while [ "$(_recovery_process_identity "$parent")" = "$stamp" ]; do
+            sshwhy=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null) || sshwhy=''
+            if [ "$sshwhy" != "$seenssh" ]; then
+                case "$sshwhy" in auth|hostkey) printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_ssh_hint "$sshwhy" "$CLAUDE_SSH_HOST")" >&2;; esac
+                seenssh=$sshwhy
+            fi
             state=$(_recovery_status "$dir" "$provider") || state=''
             if [ -n "$state" ]; then
                 IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
@@ -1375,6 +1423,20 @@ proxy-node() {
 # 1. SSH tunnel: -L (HTTP proxy for Claude) + -D (SOCKS5 for Chrome)
 # ============================================================
 
+# What to tell the user when the tunnel does not come up: the classified reason
+# and its fix first, then the actual ssh output (owner's stderr, else the log).
+_recovery_failure_report() {
+    local dir why=''
+    dir=$(_recovery_identity 2>/dev/null) || dir=''
+    if [ -n "$dir" ]; then why=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null); fi
+    echo "[Err] SSH tunnel failed to start within 10s."
+    if [ -n "$why" ]; then echo "       $(_recovery_ssh_hint "$why" "$CLAUDE_SSH_HOST")"; fi
+    echo "       ssh said:"
+    if [ -n "$dir" ] && [ -s "$dir/ssh.err" ]; then tail -n 5 "$dir/ssh.err" | sed 's/^/       /'
+    else tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'; fi
+    echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
+}
+
 tunnel-start() {
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Everything below needs an ssh client, and without this guard the failure
@@ -1478,11 +1540,10 @@ tunnel-start() {
             echo "       Watchdog on: reconnects by itself if the link drops (log: $CLAUDE_TUNNEL_LOG)"
         fi
     else
-        # Don't leave a watchdog retrying a tunnel that can't start (bad key, host down ...).
+        # Report first (the owner's ssh.status is what explains it), then stop the
+        # watchdog so it does not keep retrying a tunnel that can't start.
+        _recovery_failure_report
         _watchdog_stop >/dev/null
-        echo "[Err] SSH tunnel failed to start within 10s. ssh said:"
-        tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'
-        echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
         return 1
     fi
 }
@@ -1809,6 +1870,10 @@ proxy-status() {
             ;;
     esac
 
+    local sdir swhy=''
+    sdir=$(_recovery_identity 2>/dev/null) || sdir=''
+    if [ -n "$sdir" ]; then swhy=$(cut -d'|' -f1 "$sdir/ssh.status" 2>/dev/null); fi
+    if [ -n "$swhy" ]; then echo "[!!]  Last ssh error : $(_recovery_ssh_hint "$swhy" "$CLAUDE_SSH_HOST")"; fi
     if [ -n "${HTTPS_PROXY:-}" ]; then
         echo "[ON]  Env HTTPS_PROXY: $HTTPS_PROXY"
     else
