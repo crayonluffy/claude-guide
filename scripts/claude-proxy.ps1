@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.6.0'
+$script:PROFILE_VERSION = '2.6.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -106,6 +106,9 @@ $script:WATCHDOG_NOTICE_AFTER=60
 $script:WATCHDOG_PROBE_TIMEOUT=3
 $script:WATCHDOG_PROGRESS_INTERVAL=30
 $script:WATCHDOG_MAX_BACKOFF=30
+# A freshly launched ssh gets this long (ssh ConnectTimeout 15s + margin) to bring
+# its forwards up before failed probes count as an outage or get it killed.
+$script:WATCHDOG_STARTUP_GRACE=20
 $script:DESKTOP_NOTIFICATIONS='auto' # auto or off
 $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
@@ -186,14 +189,18 @@ function Test-RecoveryTransport {
     param([string]$Provider,[int]$HttpPort,[int]$SocksPort)
     $endpoint=switch($Provider){claude{'https://api.anthropic.com/'} codex{'https://api.openai.com/'} default{throw 'Unknown provider'}}
     $timeout=if($script:WATCHDOG_PROBE_TIMEOUT){$script:WATCHDOG_PROBE_TIMEOUT}else{3}
-    $common=@('-q','-sS','-o',$(if($IsLinux -or $IsMacOS){'/dev/null'}else{'NUL'}),'--connect-timeout','2','--max-time',"$timeout",'--noproxy=')
+    # curl has no '--opt=value' form ('--noproxy=' is exit 2, "unknown option"), and
+    # Windows PowerShell 5.1 drops an empty '' argument. A never-matching host list
+    # still replaces an ambient NO_PROXY, so the probe can never go out direct.
+    $common=@('-q','-sS','-o',$(if($IsLinux -or $IsMacOS){'/dev/null'}else{'NUL'}),'--connect-timeout','2','--max-time',"$timeout",'--noproxy','claude-proxy.invalid')
     $out=& curl.exe @common --proxy "http://127.0.0.1:$HttpPort" -w '%{http_connect} %{http_code}' $endpoint 2>$null
     $rc=$LASTEXITCODE;$parts=("$out".Trim() -split '\s+');$cc=if($parts.Count -gt 0 -and $parts[0]){$parts[0]}else{'000'};$hc=if($parts.Count -gt 1){$parts[1]}else{'000'}
     $kind='tunnel'
     if ($rc -eq 0 -and $cc -eq '200' -and $hc -ne '000') {$kind='healthy'}
     elseif ($cc -ne '000') {$kind='proxy'}
     else {
-        $null=& curl.exe @common --proxy= --socks5-hostname "127.0.0.1:$SocksPort" -w '%{http_code}' $endpoint 2>$null
+        # An explicit --socks5-hostname already overrides any HTTP(S)_PROXY in the env.
+        $null=& curl.exe @common --socks5-hostname "127.0.0.1:$SocksPort" -w '%{http_code}' $endpoint 2>$null
         if ($LASTEXITCODE -eq 0) {$kind='proxy'}
     }
     return @{kind=$kind;curl_exit=$rc;connect_code=$cc;http_code=$hc;reason=$kind}
@@ -232,8 +239,14 @@ function Write-RecoveryStatus {
     $tmp = "$dest.$([guid]::NewGuid()).tmp"
     try {
         [IO.File]::WriteAllText($tmp,($State | ConvertTo-Json -Depth 6 -Compress))
-        if ([IO.File]::Exists($dest)) { [IO.File]::Replace($tmp,$dest,"$dest.bak"); [IO.File]::Delete("$dest.bak") }
-        else { [IO.File]::Move($tmp,$dest) }
+        # Antivirus, the indexer or a subscriber's read can hold $dest for a moment.
+        for ($try=1; ; $try++) {
+            try {
+                if ([IO.File]::Exists($dest)) { [IO.File]::Replace($tmp,$dest,"$dest.bak"); [IO.File]::Delete("$dest.bak") }
+                else { [IO.File]::Move($tmp,$dest) }
+                break
+            } catch [IO.IOException] { if ($try -ge 5) { throw }; Start-Sleep -Milliseconds 50 }
+        }
     } finally { if ([IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } }
 }
 function Get-RecoveryStatus {
@@ -332,26 +345,35 @@ function Invoke-RecoveryWorker {
     $dir = Split-Path -Parent $DescriptorPath
     $lease = Open-RecoveryLock $dir
     if (-not $lease) { return }
-    $ssh = $null; $started=''; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
+    $ssh = $null; $started=''; $sshAt=0; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
     try {
         $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
         foreach ($k in $script:CONF_KEYS) { if ($null -ne $cfg.$k) { Set-Variable -Scope Script -Name $k -Value $cfg.$k } }
+        $grace=if ($null -ne $script:WATCHDOG_STARTUP_GRACE) {$script:WATCHDOG_STARTUP_GRACE} else {20}
         $desktop=New-RecoveryDesktopContext
         Write-RecoveryStatus $dir desktop (Get-RecoveryDesktopStatus $desktop)
         Write-RecoveryStatus $dir owner @{ProcessId=$PID;Started="$((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)"}
         while (-not (Test-Path (Join-Path $dir 'stopped'))) {
+          # Anything thrown in one pass (a file locked by antivirus/the indexer, a
+          # missing curl.exe ...) is logged and retried. Letting it escape would run
+          # the finally block below: ssh killed, lease gone, and nothing restarts it.
+          try {
             $now = Get-RecoveryTime
             $ownedId=if ($ssh -and -not $ssh.HasExited) {$ssh.Id}else{0}
             $conflict=Test-RecoveryPortConflict $ownedId
             if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next -and -not $conflict) {
                 if ($ssh) { $ssh.Dispose(); $ssh=$null }
-                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)" }
+                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)"; $sshAt=$now }
                 catch { $ssh=$null; Add-Content (Join-Path $dir 'events.log') "SSH launch failed: $($_.Exception.Message). Check SSH agent/credentials and TUNNEL_LOG." }
                 $retries++; $next=$now+$delay; $delay=[Math]::Min($script:WATCHDOG_MAX_BACKOFF,$delay*2)
             }
+            # A live ssh younger than the grace may still be connecting: its dead
+            # probes are neither an outage notice nor a reason to kill it.
+            $connecting=$ssh -and -not $ssh.HasExited -and ($now-$sshAt) -lt $grace
             $allTunnel=$true
             foreach ($provider in @('claude','codex')) {
                 $sample=if ($conflict) {@{kind='conflict'}}else{Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT}
+                if ($connecting -and $sample.kind -eq 'tunnel') { $allTunnel=$false; continue }
                 if ($sample.kind -ne 'tunnel') { $allTunnel=$false }
                 if ($sample.kind -eq 'healthy') { $delay=2; $retries=0 }
                 $r=Get-RecoveryTransition -State $states[$provider] -Sample $sample -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
@@ -376,8 +398,11 @@ function Invoke-RecoveryWorker {
             if ($allTunnel) { $fails++ } else { $fails=0 }
             if ($fails -ge $script:WATCHDOG_FAILS -and $ssh -and -not $ssh.HasExited) {
                 Stop-RecoveryProcess $ssh.Id $started | Out-Null
-                $ssh.WaitForExit(); $ssh.Dispose(); $ssh=$null; $fails=0
+                $null=$ssh.WaitForExit(10000); $ssh.Dispose(); $ssh=$null; $fails=0
             }
+          } catch {
+            try { Add-Content (Join-Path $dir 'events.log') "[Recovery] Monitor error, retrying: $($_.Exception.Message)" } catch { }
+          }
             for ($i=0; $i -lt $script:WATCHDOG_INTERVAL*10 -and -not (Test-Path (Join-Path $dir 'stopped')); $i++) { Start-Sleep -Milliseconds 100 }
         }
     } finally {

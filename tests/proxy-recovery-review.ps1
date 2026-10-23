@@ -8,9 +8,9 @@ function curl.exe {$script:Captured+=,@($args);$global:LASTEXITCODE=7;'000 000'}
 $null=Test-RecoveryTransport claude 8080 1080
 foreach($call in $script:Captured){
  if($call -contains ''){throw 'Legacy Windows native command mode drops empty arguments'}
- if($call -notcontains '--noproxy='){throw 'NO_PROXY override missing'}
+ if($call -notcontains '--noproxy' -or $call -contains '--noproxy='){throw 'NO_PROXY override missing'}
 }
-if($script:Captured[1] -notcontains '--proxy='){throw 'SOCKS crosscheck did not disable ambient HTTP proxy'}
+if($script:Captured[1] -notcontains '--socks5-hostname' -or $script:Captured[1] -contains '--proxy='){throw 'SOCKS crosscheck must use an explicit --socks5-hostname'}
 $dir=Join-Path ([IO.Path]::GetTempPath()) ('recovery-review-'+[guid]::NewGuid())
 [IO.Directory]::CreateDirectory($dir)|Out-Null
 try {
