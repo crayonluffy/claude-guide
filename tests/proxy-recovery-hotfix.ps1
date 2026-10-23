@@ -1,5 +1,5 @@
 $ErrorActionPreference='Stop'
-# Regression tests for the PowerShell 2.6.1 hotfix. Unlike the other recovery
+# Regression tests for the 2.7.1 PowerShell hotfix. Unlike the other recovery
 # tests, the probe cases run the REAL curl binary (only against 127.0.0.1), so an
 # argument curl rejects (exit 2) fails here instead of hiding behind a mock.
 $tokens=$null;$errors=$null

@@ -2,9 +2,12 @@
 
 ## Getting the newest profile (any time)
 
-### PowerShell 2.6.1 / Bash 2.7.1 — hotfix: Windows `cc` / `cx` start again
+### 2.7.1 (Windows, macOS, Linux, WSL) — hotfix: Windows `cc` / `cx` start again
 
-2.6.0 never launched Claude or Codex on Windows: the new connection check
+From 2.7.1 on, the Windows and the macOS/Linux/WSL profiles share ONE version
+number: the same number means the same features on every platform.
+
+The Windows profile 2.6.0 never launched Claude or Codex: the new connection check
 passed curl an option it rejects, so every check failed with "transport
 unavailable". The same bug made the background recovery restart a healthy
 tunnel every few seconds and pop "connection lost" alerts. Also fixed:
@@ -19,7 +22,7 @@ tunnel every few seconds and pop "connection lost" alerts. Also fixed:
   the newest lines of the log (it used to show the oldest ones).
 
 Run `proxy-update`, open a new terminal window, then `proxy-restart` once.
-Version tags: `powershell-v2.6.1` and `bash-v2.7.1`.
+Version tags: `powershell-v2.7.1` and `bash-v2.7.1`.
 
 ### Prepared: PowerShell 2.6.0 / Bash 2.7.0 — desktop alerts
 
