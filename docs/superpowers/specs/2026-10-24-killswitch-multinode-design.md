@@ -42,10 +42,12 @@ by its own recovery owner.
   Chrome SOCKS scheme plus an HTTP forward). The default node always uses
   the main ports even though it also has a catalogue index. Ports are fixed
   per node and never change during recovery.
-- **Identity.** The owner directory is keyed by **user + node name**, not by
-  host and ports. Host, user, ports and remote proxy port are written into
-  the owner record at start; every terminal reads them from there instead of
-  recomputing from its own (possibly stale) settings.
+- **Identity = slot.** The owner directory is keyed by **user + slot**, not by
+  host and ports. The `main` slot is the default node on the main ports;
+  slot `node-<name>` is a parallel node on its own ports. Host, user, ports
+  and remote proxy port are written into the owner record at start; every
+  terminal reads them from there instead of recomputing from its own
+  (possibly stale) settings.
 - **Chrome.** `chrome-proxy <node>` uses that node's tunnel (its SOCKS
   forward). The separate SOCKS-only Chrome ssh goes away.
 - **Commands.**
@@ -54,7 +56,7 @@ by its own recovery owner.
 |---|---|
 | `cc` / `cx` | Default node, as today |
 | `cc --node sg` / `cx --node sg` | This terminal only, through sg. Previously this switched the default and restarted the shared tunnel, cutting other terminals off |
-| `proxy-node sg` | Changes the default node for new terminals; running tunnels are untouched |
+| `proxy-node sg` | Makes sg the default: the `main` slot is re-served by sg (as today). Refuses while sessions use `main` - they would silently move to sg - unless `--force`. Parallel node slots are untouched |
 | `tunnel-start [node]`, `tunnel-stop [node]`, `proxy-restart [node]` | One node; no argument = default node |
 | `cc-stop` | Every node (guarded while sessions run, `--force` as today) |
 | `proxy-status` | Every node tunnel: state, ports, sessions, outage, last error, log path |
@@ -104,7 +106,7 @@ by Claude/Codex inherit the proxy environment.
 
 ## Part 3 - watchdog fixes (2.8.0)
 
-1. **Node-keyed owner** (part 1) - fixes "explicit stop does not stay
+1. **Slot-keyed owner** (part 1; 2.8.0 has only the `main` slot) - fixes "explicit stop does not stay
    stopped", competing owners after a fallback port or node switch, and the
    legacy kill path hitting an owner's ssh. The legacy path refuses while any
    owner for that node exists.
