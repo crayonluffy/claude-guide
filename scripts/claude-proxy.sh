@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.7.0"
+CLAUDE_PROXY_VERSION="2.7.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -112,6 +112,9 @@ CLAUDE_WATCHDOG_NOTICE_AFTER=60
 CLAUDE_WATCHDOG_PROBE_TIMEOUT=3
 CLAUDE_WATCHDOG_PROGRESS_INTERVAL=30
 CLAUDE_WATCHDOG_MAX_BACKOFF=30
+# A freshly started ssh gets this long (its ConnectTimeout 15s + margin) to bring
+# the forwards up before failed checks count as an outage or get it killed.
+CLAUDE_WATCHDOG_STARTUP_GRACE=20
 CLAUDE_DESKTOP_NOTIFICATIONS=auto  # auto or off; never changes CLI input
 
 # --- personal overrides ------------------------------------------------------
@@ -126,7 +129,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -418,7 +421,7 @@ _recovery_port_conflict() {
     return 1
 }
 _recovery_worker() {
-    local dir="$1" me spid='' stamp='' now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
+    local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
@@ -434,15 +437,20 @@ _recovery_worker() {
         if ! _recovery_process_identity "$spid" >/dev/null; then
             if [ "$now" -ge "$next" ] && [ "$conflict" -eq 0 ]; then
                 ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" & spid=$!
-                stamp=$(_recovery_process_identity "$spid") || stamp=''
+                stamp=$(_recovery_process_identity "$spid") || stamp=''; sshat=$now
                 retries=$((retries+1)); next=$((now+delay))
                 delay=$((delay*2)); [ "$delay" -le "${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}" ] || delay=${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}
             fi
         fi
+        # A live ssh younger than the grace may still be connecting: its dead
+        # checks are neither an outage notice nor a reason to kill it.
+        connecting=0
+        if [ $((now-sshat)) -lt "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ] && _recovery_process_identity "$spid" >/dev/null; then connecting=1; fi
         all_tunnel=1
         for provider in claude codex; do
             if [ "$conflict" -eq 1 ]; then sample='conflict|0|000|000|local-port-conflict'
             else sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"); fi
+            case "$connecting:$sample" in 1:tunnel\|*) all_tunnel=0; continue;; esac
             case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
             case "$sample" in healthy\|*) delay=2; retries=0;; esac
             old=$(_recovery_status "$dir" "$provider") || old=''
@@ -458,10 +466,12 @@ _recovery_worker() {
             state=$(_recovery_retry_record "$state" "$retries" "$next")
             _recovery_write "$dir/$provider.state" "$state" "$me"
         done
-        cs=$(_recovery_status "$dir" claude); xs=$(_recovery_status "$dir" codex)
-        desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
-        case "${desktop_state##*|}" in
-            lost|prolonged|restored)
+        cs=$(_recovery_status "$dir" claude) || cs=''; xs=$(_recovery_status "$dir" codex) || xs=''
+        # Nothing observed yet (ssh still connecting) is not "unavailable".
+        [ -z "$cs$xs" ] || desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
+        case "$cs$xs:${desktop_state##*|}" in
+            :*) :;;
+            *:lost|*:prolonged|*:restored)
                 desktop_event=${desktop_state##*|}; scope=$(_recovery_desktop_scope "$cs" "$xs")
                 if [ "$desktop_backend" != off ]; then
                     if _recovery_desktop_send "$desktop_backend" "$desktop_event" "$scope"; then desktop_result=submitted
@@ -1390,7 +1400,7 @@ tunnel-start() {
         # Don't leave a watchdog retrying a tunnel that can't start (bad key, host down ...).
         _watchdog_stop >/dev/null
         echo "[Err] SSH tunnel failed to start within 10s. ssh said:"
-        sed 's/^/       /' "$CLAUDE_TUNNEL_LOG" 2>/dev/null | head -5
+        tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'
         echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
         return 1
     fi

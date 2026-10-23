@@ -86,9 +86,13 @@ try {
 } finally {Remove-Item $dir -Recurse -Force}
 Write-Host 'PASS: worker survives an exception in its loop'
 
-# 2) A fresh ssh that is still connecting is not "lost": no outage event, no kill
-#    until the startup grace has passed.
-$dir=New-WorkerDir;$script:SshStarts=0;$script:Kills=0;$script:Probe=0;$script:T=-5
+# 2) A fresh ssh that is still connecting is not "lost": no outage event, no
+#    desktop alert, no kill until the startup grace has passed.
+function New-RecoveryDesktopContext {[pscustomobject]@{Backend='tray';LastSubmission='not-tested'}}
+function Get-RecoveryDesktopStatus {param($Context)@{backend=$Context.Backend}}
+function Stop-RecoveryDesktopContext {param($Context)}
+function Send-RecoveryDesktopNotification {param($Context,$Event,$Scope)$script:Alerts+=$Event;return $true}
+$dir=New-WorkerDir;$script:SshStarts=0;$script:Kills=0;$script:Probe=0;$script:T=-5;$script:Alerts=@()
 function Test-RecoveryTransport {param($Provider,$HttpPort,$SocksPort)
  $script:Probe++
  if($script:T -ge 40){[IO.File]::WriteAllText((Join-Path $dir 'stopped'),'stop')}
@@ -101,10 +105,11 @@ try {
  $log=Join-Path $dir 'events.log'
  Assert (-not (Test-Path $log) -or -not ((Get-Content $log -Raw) -match 'connection lost')) 'startup reported as an outage'
  Assert ((Get-RecoveryStatus $dir claude).phase -eq 'healthy') 'not healthy once connected'
+ Assert ($script:Alerts.Count -eq 0) "desktop alert during startup: $($script:Alerts -join ',')"
 } finally {Remove-Item $dir -Recurse -Force}
 
 # ...but an ssh that never comes up IS restarted once the grace is over.
-$dir=New-WorkerDir;$script:SshStarts=0;$script:Kills=0;$script:T=-5
+$dir=New-WorkerDir;$script:SshStarts=0;$script:Kills=0;$script:T=-5;$script:Alerts=@()
 function Test-RecoveryTransport {param($Provider,$HttpPort,$SocksPort)
  if($script:T -ge 60){[IO.File]::WriteAllText((Join-Path $dir 'stopped'),'stop')}
  return @{kind='tunnel'}}
@@ -112,5 +117,6 @@ try {
  Invoke-RecoveryWorker (Join-Path $dir 'descriptor.json')
  Assert ($script:Kills -ge 1) 'hung ssh never restarted after the grace period'
  Assert ((Get-RecoveryStatus $dir claude).phase -ne 'healthy') 'hung tunnel reported healthy'
+ Assert ($script:Alerts[0] -eq 'lost') "hung tunnel raised no desktop alert: $($script:Alerts -join ',')"
 } finally {Remove-Item $dir -Recurse -Force}
 Write-Host 'PASS: startup grace - no false outage or kill while ssh connects; hung ssh still restarted'

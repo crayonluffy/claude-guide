@@ -2,7 +2,7 @@
 
 ## Getting the newest profile (any time)
 
-### PowerShell 2.6.1 — Windows hotfix: `cc` / `cx` start again
+### PowerShell 2.6.1 / Bash 2.7.1 — hotfix: Windows `cc` / `cx` start again
 
 2.6.0 never launched Claude or Codex on Windows: the new connection check
 passed curl an option it rejects, so every check failed with "transport
@@ -12,10 +12,14 @@ tunnel every few seconds and pop "connection lost" alerts. Also fixed:
 - a single error inside the background monitor (for example a file briefly
   locked by antivirus) no longer stops recovery for good;
 - a tunnel that is still connecting on a slow network is no longer reported
-  as lost, or killed and restarted before it can come up.
+  as lost, or killed and restarted before it can come up (Windows, macOS,
+  Linux, WSL). This also ends the "connection lost" + "restored" desktop
+  alerts that popped up every time the tunnel started.
+- macOS / Linux / WSL: when the tunnel fails to start, the error shown is
+  the newest lines of the log (it used to show the oldest ones).
 
-Run `proxy-update`, open a new PowerShell window, then `proxy-restart` once.
-Version tag: `powershell-v2.6.1`.
+Run `proxy-update`, open a new terminal window, then `proxy-restart` once.
+Version tags: `powershell-v2.6.1` and `bash-v2.7.1`.
 
 ### Prepared: PowerShell 2.6.0 / Bash 2.7.0 — desktop alerts
 

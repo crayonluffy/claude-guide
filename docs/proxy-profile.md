@@ -74,6 +74,7 @@ redraws its terminal over a notification. Recovery state is private under
 | `WATCHDOG_PROBE_TIMEOUT` | `CLAUDE_WATCHDOG_PROBE_TIMEOUT` | `3` seconds per probe |
 | `WATCHDOG_PROGRESS_INTERVAL` | `CLAUDE_WATCHDOG_PROGRESS_INTERVAL` | `30` seconds |
 | `WATCHDOG_MAX_BACKOFF` | `CLAUDE_WATCHDOG_MAX_BACKOFF` | `30` seconds |
+| `WATCHDOG_STARTUP_GRACE` | `CLAUDE_WATCHDOG_STARTUP_GRACE` | `20` seconds a new SSH connection gets before failed checks count |
 
 Set overrides in your usual settings file with `proxy-config`; previously set
 intervals and failure counts remain honored. Backoff starts at two seconds and

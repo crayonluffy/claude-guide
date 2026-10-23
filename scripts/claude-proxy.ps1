@@ -114,7 +114,7 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -386,7 +386,8 @@ function Invoke-RecoveryWorker {
                 $states[$provider]=$s
                 Write-RecoveryStatus $dir $provider $s
             }
-            $attention=Get-RecoveryDesktopTransition -State $desktopState -States $states -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
+            # Nothing observed yet (ssh still connecting) is not "unavailable".
+            $attention=if ($states.Count) {Get-RecoveryDesktopTransition -State $desktopState -States $states -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER} else {@{State=$desktopState;Event='none'}}
             $desktopState=$attention.State
             if ($attention.Event -in @('lost','prolonged','restored') -and $desktop.Backend -ne 'off') {
                 if (-not (Send-RecoveryDesktopNotification $desktop $attention.Event (Get-RecoveryDesktopScope $states))) {
