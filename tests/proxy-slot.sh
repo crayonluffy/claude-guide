@@ -56,3 +56,25 @@ _recovery_adopt "$dir"
 assert test ! -e "$scratch/pwned"
 assert test "$CLAUDE_SSH_HOST" = "$payload"
 echo 'PASS: tunnel record values are read as literal text'
+
+# 5) tunnel-stop reaches the live owner even from a terminal on other ports,
+#    and stops owners left by the previous profile version too - without ever
+#    killing the ssh behind an owner directly.
+eval "$(sed -n '/^# Compatibility entry points/,/^# PIDs of Claude/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}" | sed '$d')"
+eval "$(sed -n '/^tunnel-stop() {/,/^}/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}")"
+root=$(_recovery_root); mkdir -p "$root/legacy123"
+mkdir -p "$root/main"
+printf 'host=jpvpn\nuser=\nport=22\nkey=\nhttp=18080\nsocks=11080\nremote=8888\n' > "$root/main/tunnel.rec"
+_recovery_owner_pid() { case "$1" in */main|*/legacy123) echo 4242;; *) return 1;; esac; }
+_legacy_watchdog_pid() { return 1; }
+_recovery_owner_stop() { echo "$1" >> "$scratch/stopped"; }
+_listeners() { echo 5555; }
+_proc_name() { echo ssh; }
+kill() { echo "$*" >> "$scratch/kills"; }
+CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
+tunnel-stop > "$scratch/stop.out"
+assert grep -qx "$root/main" "$scratch/stopped"
+assert grep -qx "$root/legacy123" "$scratch/stopped"
+assert test ! -e "$scratch/kills"
+assert test "$CLAUDE_HTTP_PORT" = 18080
+echo 'PASS: tunnel-stop stops the live owner (and older-version owners) without touching their ssh'

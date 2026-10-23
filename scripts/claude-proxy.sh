@@ -732,6 +732,21 @@ _legacy_watchdog_stop() {
     return 0
 }
 _watchdog_pid() { local dir; dir=$(_recovery_identity) && _recovery_owner_pid "$dir"; }
+# Live owners in every state directory (this slot and any left by older versions).
+_recovery_owned_dirs() {
+    local d
+    find "$(_recovery_root)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
+        _recovery_owner_pid "$d" >/dev/null && printf '%s\n' "$d"
+    done
+}
+_recovery_stop_owners() {
+    local d rc=0
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        _recovery_owner_stop "$d" || rc=1
+    done <<< "$(_recovery_owned_dirs)"
+    return $rc
+}
 _wd_sleep() { sleep "$1" & wait $!; }
 _wd_log() { echo "[watchdog] $*" >> "$CLAUDE_TUNNEL_LOG"; }
 _tunnel_watchdog() { local dir; dir=$(_recovery_identity) && _recovery_worker "$dir"; }
@@ -1480,9 +1495,11 @@ tunnel-stop() {
     local pid name port still p wd_msg
     local ssh_pids=() survivors=()
 
-    # The watchdog goes first, or it would just start ssh again (it takes its ssh with it).
-    if _watchdog_pid >/dev/null; then
-        _watchdog_stop || return 1
+    # The owner goes first, or it would just start ssh again (it takes its ssh with it).
+    # Every live owner under this profile's state root counts: after an upgrade the
+    # previous version's owner can sit in a differently named directory.
+    if [ -n "$(_recovery_owned_dirs)" ]; then
+        _recovery_stop_owners || return 1
         echo "[OK] Recovery stopped; proxy settings remain enabled until proxy-off."
         return 0
     fi
