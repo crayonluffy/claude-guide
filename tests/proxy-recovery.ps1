@@ -24,7 +24,7 @@ function curl.exe {
 }
 $r=Test-RecoveryTransport -Provider claude -HttpPort 18080 -SocksPort 11080
 Assert ($r.kind -eq 'healthy') 'API 403 after successful CONNECT is healthy transport'
-Assert ($script:Calls[0] -contains '--noproxy=') 'ambient NO_PROXY must be overridden'
+Assert ($script:Calls[0] -contains '--noproxy' -and $script:Calls[0] -notcontains '--noproxy=') 'ambient NO_PROXY must be overridden'
 Assert ($script:Calls[0] -contains 'http://127.0.0.1:18080') 'proxy must be explicit'
 $script:HttpResult='407 000';$script:HttpRc=56
 Assert ((Test-RecoveryTransport codex 18080 11080).kind -eq 'proxy') 'CONNECT rejection is proxy failure'
