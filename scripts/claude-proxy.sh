@@ -392,12 +392,42 @@ _recovery_signal_owned() {
     kill -TERM "$1" 2>/dev/null
 }
 _recovery_retry_record() { printf '%s\n' "$1" | awk -F'|' -v OFS='|' -v n="$2" -v t="$3" '{$5=n;$6=t;print}'; }
+_recovery_root() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery"; }
+# One owner per user and slot. The slot is 'main' (the default node on the main
+# ports). It must NOT depend on host or ports: a terminal with stale settings
+# would otherwise get its own owner and fight the live one for the same ports.
 _recovery_identity() {
-    local root="${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery" key
-    key=$(printf '%s\n' "$CLAUDE_SSH_USER" "$CLAUDE_SSH_HOST" "$CLAUDE_SSH_PORT" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_REMOTE_PROXY_PORT" | cksum | awk '{print $1}')
-    (umask 077; mkdir -p "$root/$key") || return 1
-    chmod 700 "$root" "$root/$key" || return 1
-    printf '%s/%s\n' "$root" "$key"
+    local root slot="${1:-main}"
+    root=$(_recovery_root)
+    (umask 077; mkdir -p "$root/$slot") || return 1
+    chmod 700 "$root" "$root/$slot" || return 1
+    printf '%s/%s\n' "$root" "$slot"
+}
+# The live owner publishes the tunnel it runs as key=value lines. Read back as
+# literal text (never eval'd), so a value cannot execute anything.
+_recovery_record_write() {
+    _recovery_write "$1/tunnel.rec" "$(printf 'host=%s\nuser=%s\nport=%s\nkey=%s\nhttp=%s\nsocks=%s\nremote=%s' \
+        "$CLAUDE_SSH_HOST" "$CLAUDE_SSH_USER" "$CLAUDE_SSH_PORT" "$CLAUDE_SSH_KEY" \
+        "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_REMOTE_PROXY_PORT")" rec
+}
+_recovery_record_get() { sed -n "s/^$2=//p" "$1/tunnel.rec" 2>/dev/null | head -1; }
+# A terminal whose settings are stale (old conf, fallback port, another node)
+# must use the tunnel that is actually running, not recompute its own.
+# Adopts only while the owner is live; otherwise changes nothing.
+_recovery_adopt() {
+    local dir="${1:-}" v
+    [ -n "$dir" ] || dir=$(_recovery_identity) || return 1
+    _recovery_owner_pid "$dir" >/dev/null || return 1
+    [ -r "$dir/tunnel.rec" ] || return 1
+    v=$(_recovery_record_get "$dir" host);   [ -z "$v" ] || CLAUDE_SSH_HOST=$v
+    CLAUDE_SSH_USER=$(_recovery_record_get "$dir" user)
+    v=$(_recovery_record_get "$dir" port);   [ -z "$v" ] || CLAUDE_SSH_PORT=$v
+    CLAUDE_SSH_KEY=$(_recovery_record_get "$dir" key)
+    v=$(_recovery_record_get "$dir" http);   [ -z "$v" ] || CLAUDE_HTTP_PORT=$v
+    v=$(_recovery_record_get "$dir" socks);  [ -z "$v" ] || CLAUDE_SOCKS_PORT=$v
+    v=$(_recovery_record_get "$dir" remote); [ -z "$v" ] || CLAUDE_REMOTE_PROXY_PORT=$v
+    export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_PORT CLAUDE_SSH_KEY \
+           CLAUDE_HTTP_PORT CLAUDE_SOCKS_PORT CLAUDE_REMOTE_PROXY_PORT
 }
 _recovery_status() { case "$2" in claude|codex) cat "$1/$2.state" 2>/dev/null;; *) return 1;; esac; }
 _recovery_write() {
@@ -446,6 +476,7 @@ _recovery_worker() {
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
+    _recovery_record_write "$dir"
     trap '' HUP
     trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
@@ -647,6 +678,7 @@ _recovery_desktop_send() {
     esac
 }
 proxy-notify() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local action="${1:-status}" backend identity result
     [ $# -le 1 ] || { echo 'usage: proxy-notify [status|test]'; return 2; }
     case "$action" in status|test) :;; *) echo 'usage: proxy-notify [status|test]'; return 2;; esac
@@ -1329,6 +1361,7 @@ proxy-node() {
 # ============================================================
 
 tunnel-start() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Everything below needs an ssh client, and without this guard the failure
     # is opaque: the backgrounded start swallows "command not found" and you get
     # a bare "tunnel failed to start" instead.
@@ -1440,6 +1473,7 @@ tunnel-start() {
 }
 
 tunnel-stop() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
@@ -1561,6 +1595,7 @@ _verify_proxy_ip() {
 # ============================================================
 
 proxy-up() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1623,6 +1658,7 @@ _launch_via_proxy() {
         shift
     done
 
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Locate the app first, so we don't bring the tunnel up only to find it missing.
     if ! command -v "$bin" >/dev/null 2>&1; then
         echo "[Err] '$bin' not found - install it first: $hint"
@@ -1693,6 +1729,7 @@ cc-stop() {
 # Replace a hung tunnel for EVERY window without touching env vars or
 # settings.json, so Claude/Codex running in other tabs just carry on.
 proxy-restart() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
     tunnel-stop >/dev/null || { tunnel-stop; return 1; }
     tunnel-start || return 1
@@ -1711,6 +1748,7 @@ proxy-restart() {
 # ============================================================
 
 proxy-status() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     proxy-notify status
     local identity provider
     identity=$(_recovery_identity)
