@@ -83,6 +83,14 @@ CLAUDE_PROXY_DOMAIN=""
 CLAUDE_SYNC_SETTINGS=1
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
+# Kill switch (2.9): Claude and Codex fail closed. While 'on', Claude's
+# settings.json keeps the proxy permanently - proxy-off / cc-stop clear only the
+# shell - so plain 'claude' and the IDE extensions go through the tunnel or get
+# "connection refused", never out from your own IP. cc / cx also refuse to start
+# when something would leak (a NO_PROXY that exempts the API, another program on
+# the proxy port). 'off' = the pre-2.9 behaviour. See 'proxy-killswitch'.
+CLAUDE_KILLSWITCH=on
+
 # WSL only: ALSO keep the WINDOWS-side Claude (%USERPROFILE%\.claude\settings.json)
 # pointed at this tunnel while it is up. Windows reaches WSL's 127.0.0.1 ports
 # through WSL2 localhost forwarding (on by default). 1 to enable.
@@ -134,7 +142,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -979,8 +987,15 @@ _noproxy_exempts() {  # <NO_PROXY list>
 }
 
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+# Does this settings.json already carry exactly our proxy? (Then never rewrite it.)
+_settings_file_pinned() {  # <settings.json>
+    jq -e --arg url "http://127.0.0.1:$CLAUDE_HTTP_PORT" --arg np "$CLAUDE_NO_PROXY" \
+        '.env.HTTPS_PROXY == $url and .env.HTTP_PROXY == $url and .env.NO_PROXY == $np' "$1" >/dev/null 2>&1
+}
+
 _settings_file_proxy_on() {  # <settings.json>
     local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
+    _settings_file_pinned "$f" && return 0
     mkdir -p "$(dirname "$f")"
     [ -f "$f" ] || echo '{}' > "$f"
     cp "$f" "${f}.bak" 2>/dev/null
@@ -993,6 +1008,7 @@ _settings_file_proxy_on() {  # <settings.json>
     else
         rm -f "$tmp"
         echo "[Warn] Could not update $f (invalid JSON?) - left it untouched"
+        return 1
     fi
 }
 
@@ -1025,6 +1041,32 @@ _claude_settings_proxy_off() {
     command -v jq >/dev/null 2>&1 || return 0
     local f
     for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
+}
+
+_killswitch_on() { [ "${CLAUDE_KILLSWITCH:-on}" = on ]; }
+
+# What Claude's own settings say: 'pinned <port>' (exactly our proxy),
+# 'mismatch <port>' (a proxy, but not ours), or 'unpinned sync-off|no-jq|missing'.
+_killswitch_pin_state() {
+    local url port
+    [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] || { echo 'unpinned sync-off'; return; }
+    command -v jq >/dev/null 2>&1 || { echo 'unpinned no-jq'; return; }
+    url=$(jq -r '.env.HTTPS_PROXY // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+    [ -n "$url" ] || { echo 'unpinned missing'; return; }
+    port=${url%/}; port=${port##*:}
+    if _settings_file_pinned "$CLAUDE_SETTINGS"; then echo "pinned $port"; else echo "mismatch $port"; fi
+}
+
+# Pin every Claude settings file that is missing or wrong; silent when all are right.
+_killswitch_ensure_pin() {
+    _killswitch_on && [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] && command -v jq >/dev/null 2>&1 || return 0
+    local f changed=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        _settings_file_pinned "$f" && continue
+        _settings_file_proxy_on "$f" >/dev/null 2>&1 && changed=1
+    done <<< "$(_settings_targets 2>/dev/null)"
+    [ "$changed" -eq 0 ] || echo "[Kill switch] Claude's settings now point at the tunnel (127.0.0.1:$CLAUDE_HTTP_PORT): while it is down Claude cannot connect, so it never goes out directly. Details: proxy-killswitch"
 }
 
 # ============================================================
@@ -1778,7 +1820,11 @@ proxy-on() {
 proxy-off() {
     unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
     echo "[OK] Env vars cleared"
-    _claude_settings_proxy_off
+    if ! _killswitch_on; then
+        _claude_settings_proxy_off
+    elif [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ]; then
+        echo "[Kill switch] Claude's settings keep the proxy, so plain 'claude' cannot go out directly ('proxy-killswitch off' allows that)."
+    fi
 }
 
 # --- Confirm the external IP really is the proxy's (VM's), not the client's ---
@@ -2922,13 +2968,17 @@ cc-help() {
     echo "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)"
     echo "  tunnel-stop     - Stop the SSH tunnel"
     echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
-    echo "  proxy-off       - Clear proxy env vars + unsync Claude settings.json"
+    echo "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)"
     echo ""
     echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
     echo "                    chrome-proxy [node] [--profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com"
     echo "  cc-help         - Show this list again"
     echo ""
 }
+
+# Kill switch: make sure Claude's settings point at the tunnel (also protects IDE
+# launches that never run cc). Writes only when missing or wrong; silent otherwise.
+{ _killswitch_ensure_pin 2>/dev/null; } >&2
 
 # One line when a new shell loads this file. Silence it with
 # CLAUDE_PROXY_BANNER=0 in ~/.claude-proxy.conf.

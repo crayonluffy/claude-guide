@@ -75,3 +75,9 @@ print 'PASS: zsh - worker classifies a refused login and backs off'
 [[ $(_noproxy_exempts '*.com,localhost' | wc -l | tr -d ' ') == 5 ]] || fail "noproxy *.com: $(_noproxy_exempts '*.com,localhost')"
 [[ -z $(_noproxy_exempts 'localhost,*.local') ]] || fail 'noproxy safe list flagged'
 print 'PASS: zsh - NO_PROXY exemption matcher'
+
+# Kill switch: loading the profile pinned Claude's (isolated) settings.json.
+[[ $(jq -r .env.HTTPS_PROXY "$HOME/.claude/settings.json") == http://127.0.0.1:8080 ]] || fail "pin: $(cat "$HOME/.claude/settings.json" 2>/dev/null)"
+CLAUDE_HTTP_PORT=8080   # earlier steps moved it
+[[ -z $(_killswitch_ensure_pin) ]] || fail 'ensure_pin not silent when pinned'
+print 'PASS: zsh - kill switch pins Claude settings on load'
