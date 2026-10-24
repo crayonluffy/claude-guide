@@ -2,6 +2,33 @@
 
 ## Getting the newest profile (any time)
 
+### 2.8.0 (Windows, macOS, Linux, WSL) — one self-healing tunnel, clearer errors
+
+- **One recovery owner per user.** Every terminal joins the same tunnel, even
+  one with older settings or a fallback port; `tunnel-stop` from any terminal
+  stops it, and it stays stopped.
+- **Upgrading is automatic.** A tunnel started by an older profile is replaced
+  by the next `cc`, `cx` or `tunnel-start` on the same ports (open sessions
+  reconnect within seconds) - no `proxy-restart` needed.
+- **SSH errors explained.** A refused login, a changed host key, a busy port
+  or an unreachable server is named with its fix in `tunnel-start`,
+  `proxy-status` and every open session. A refused login is retried only every
+  30 s instead of hammering the server.
+- **Quieter when idle.** With no `cc`/`cx` open, the tunnel is checked once a
+  minute (`WATCHDOG_IDLE_INTERVAL`) and wakes at once when you start one.
+- **Port takeover alert.** If another program grabs the proxy port while the
+  tunnel is down, every session and the desktop say so once, naming it - exit
+  the session. Nothing is killed.
+- `cc-stop` also counts open `cc`/`cx` sessions (Windows: npm-installed Claude
+  runs as `node.exe` and was missed).
+- Windows: readable `proxy-status`; the background owner runs under
+  PowerShell itself, not the ISE; `tunnel-start` explains a missing ssh.
+- macOS/Linux/WSL: works without `lsof` when `ss` is installed; a frozen ssh
+  can no longer stall recovery.
+
+Run `proxy-update` and open a new terminal window. Version tags:
+`powershell-v2.8.0` and `bash-v2.8.0`.
+
 ### 2.7.1 (Windows, macOS, Linux, WSL) — hotfix: Windows `cc` / `cx` start again
 
 From 2.7.1 on, the Windows and the macOS/Linux/WSL profiles share ONE version

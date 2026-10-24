@@ -22,11 +22,29 @@ You do **not** need Node.js, Claude Code or Codex installed yet — the wizard's
 
 ## Recovery while Claude or Codex is running
 
-PowerShell 2.5.0+ and Bash 2.6.0+ share one recovery owner per SSH destination
-and local port pair. It checks both providers about every five seconds (plus
-probe time), reconnects an exited SSH process, and restarts only its own SSH
-child after two consecutive tunnel failures. Reconnects keep the established
+Every terminal shares **one recovery owner per user** (2.8.0+; before that, one
+per SSH destination and port pair). The owner records the tunnel it runs
+(server, user, key, ports), and every terminal uses that record - so a window
+with older settings, or one that picked a fallback port, joins the running
+tunnel instead of starting a second one that fights it for the ports.
+
+While a `cc`/`cx` session is open the owner checks both providers about every
+five seconds (plus probe time), reconnects an exited SSH process, and restarts
+only its own SSH child after two consecutive tunnel failures. With no session
+open it checks once a minute (`WATCHDOG_IDLE_INTERVAL`; Chrome may still use the
+tunnel) and wakes at once when `cc`/`cx` starts. Reconnects keep the established
 HTTP/SOCKS ports. Startup can still select a free fallback port before launch.
+
+When SSH exits, the owner reads why from SSH's own error output and says how to
+fix it - in the starting terminal, in every open session (once), in
+`proxy-status` and in the log:
+
+| Reason | What you see | What to do |
+|---|---|---|
+| `auth` | `SSH login to <server> was refused` | Load your key (`ssh-add <key>`) or check the user name, then `proxy-restart`. Retried only every `WATCHDOG_MAX_BACKOFF` seconds. |
+| `hostkey` | `The host key of <server> changed` | If your admin expected it: `ssh-keygen -R <server>`, then `ssh <server>` once. |
+| `forward` | `A tunnel port is held by another program` | See `proxy-status`. |
+| `network` | `Cannot reach <server>` | Nothing - it keeps retrying (Wi-Fi change, sleep, server down). |
 
 `cc` and `cx` require successful HTTPS transport through the selected HTTP
 proxy before launch, including with `--no-verify` / `-NoVerify`. That flag skips
@@ -34,7 +52,12 @@ only the optional external-IP check. HTTP API errors after a successful CONNECT
 and TLS handshake count as working transport, without sending API credentials.
 
 An occupied established port is reported as `conflict`; recovery waits without
-changing the port or terminating the other process.
+changing the port or terminating the other process. If another program takes a
+proxy port **while the tunnel is down**, Claude/Codex traffic could reach that
+program, so the owner raises a distinct alert once - in every open session, the
+log and the desktop: `Another program (<name>, PID <pid>) took proxy port <port>
+while the tunnel was down ... exit this session now; nothing was stopped.` It
+never kills that program. Recovery resumes by itself once the port is free.
 
 An outage prints a warning in each affected `cc`/`cx` terminal. After 60 seconds
 it warns once that the session remains open, then keeps retrying with periodic
@@ -69,6 +92,7 @@ redraws its terminal over a notification. Recovery state is private under
 |---|---|---|
 | `TUNNEL_WATCHDOG` | `CLAUDE_TUNNEL_WATCHDOG` | `1` (enabled) |
 | `WATCHDOG_INTERVAL` | `CLAUDE_WATCHDOG_INTERVAL` | `5` seconds |
+| `WATCHDOG_IDLE_INTERVAL` | `CLAUDE_WATCHDOG_IDLE_INTERVAL` | `60` seconds while no `cc`/`cx` session is open |
 | `WATCHDOG_FAILS` | `CLAUDE_WATCHDOG_FAILS` | `2` checks |
 | `WATCHDOG_NOTICE_AFTER` | `CLAUDE_WATCHDOG_NOTICE_AFTER` | `60` seconds |
 | `WATCHDOG_PROBE_TIMEOUT` | `CLAUDE_WATCHDOG_PROBE_TIMEOUT` | `3` seconds per probe |
@@ -79,10 +103,16 @@ redraws its terminal over a notification. Recovery state is private under
 Set overrides in your usual settings file with `proxy-config`; previously set
 intervals and failure counts remain honored. Backoff starts at two seconds and
 doubles to the cap. Disabled supervision is reported at launch. Background SSH
-uses `BatchMode=yes`: load encrypted keys into your SSH agent first. A tunnel from an older profile needs one explicit `proxy-restart` to gain the
-new owner. Bash verifies that the old watchdog parents the tunnel SSH before
-stopping it; if that identity cannot be verified, stop it from the old shell
-and retry. Restart preserves proxy environment variables and Claude settings.
+uses `BatchMode=yes`: load encrypted keys into your SSH agent first. A tunnel
+from an older profile is replaced automatically by the next `cc`, `cx` or
+`tunnel-start`, on the same ports (open sessions reconnect within seconds); a
+non-SSH program on the ports is never touched. Bash verifies that the old
+watchdog parents the tunnel SSH before stopping it; if that identity cannot be
+verified, stop it from the old shell and retry. `tunnel-stop` stops the owner
+from any terminal, and it stays stopped. Restart preserves proxy environment
+variables and Claude settings. Recovery state lives in the `main` folder of the
+recovery directory, with the tunnel record, SSH's last errors (`ssh.err`) and
+one entry per open session.
 
 This is script-level recovery, **not an OS firewall kill switch**. It retains
 the configured proxy during failure, but cannot prevent an application or tool
@@ -92,9 +122,11 @@ settings; avoid them during an outage if you want those settings retained.
 
 Bash uses Linux `/proc/uptime`, or macOS's built-in `osascript` and Foundation
 system uptime. PowerShell uses .NET Stopwatch for elapsed time. Verification
-covers Linux Bash and Linux-hosted PowerShell 7.6.7 with fake SSH/transport
-adapters; native Windows PowerShell 5.1/OpenSSH, macOS console behavior, and
-real interrupted-network recovery still need platform smoke tests.
+covers Linux Bash, zsh and Linux-hosted PowerShell 7 with fake SSH/transport
+adapters, plus an end-to-end run against a real SSH server (`tests/e2e/run.sh`:
+killed SSH, hung link, refused login, port takeover, stop from a stale
+terminal); native Windows PowerShell 5.1/OpenSSH and macOS console behavior
+still need platform smoke tests.
 
 ## Desktop alerts while the CLI owns the terminal
 
