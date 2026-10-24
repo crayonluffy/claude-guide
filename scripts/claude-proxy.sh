@@ -1884,6 +1884,27 @@ _killswitch_check() {  # <http port> <socks port>
     fi
 }
 
+# proxy-doctor's kill-switch lines, with its own ok / warn / fail markers.
+_killswitch_report() {  # <ok> <warn> <bad>
+    local ok="$1" warn="$2" bad="$3" state hosts
+    if ! _killswitch_on; then
+        echo "$warn Kill switch OFF - with the tunnel down, plain 'claude' / 'codex' go out from your own IP. Fix: proxy-killswitch on"
+        return 0
+    fi
+    state=$(_killswitch_pin_state)
+    case "$state" in
+        "pinned $CLAUDE_HTTP_PORT") echo "$ok  Kill switch on - Claude's settings pinned to 127.0.0.1:$CLAUDE_HTTP_PORT" ;;
+        mismatch*) echo "$bad Kill switch on, but Claude's settings point at port ${state#mismatch } (tunnel: $CLAUDE_HTTP_PORT). Fix: proxy-killswitch on" ;;
+        'unpinned sync-off') echo "$warn Kill switch on, but settings.json is not managed (SYNC_SETTINGS=0): only cc-launched Claude is protected" ;;
+        'unpinned no-jq') echo "$warn Kill switch on, but jq is missing: Claude's settings cannot be pinned. Fix: install jq" ;;
+        *) echo "$bad Kill switch on, but Claude's settings are not pinned ($state). Fix: proxy-killswitch on" ;;
+    esac
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
+    [ -z "$hosts" ] || echo "$bad NO_PROXY would send $hosts DIRECT - cc/cx refuse to start. Fix: remove those entries (proxy-config edit)"
+    [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ] || \
+        echo "$warn plain 'codex' is not protected (Codex reads only the shell). Fix: proxy-config set PLAIN_COMMANDS auto - or always use cx"
+}
+
 # Kill switch: show it, or switch it (saved to the conf file).
 proxy-killswitch() {
     local action="${1:-status}" running=0 f state hosts
@@ -2210,6 +2231,14 @@ proxy-status() {
     else
         echo "[OFF] Env HTTPS_PROXY: not set"
     fi
+    if ! _killswitch_on; then
+        echo "[OFF] Kill switch   : off - plain claude/codex go direct while the tunnel is down ('proxy-killswitch on')"
+    else
+        case "$(_killswitch_pin_state)" in
+            "pinned $CLAUDE_HTTP_PORT") echo "[ON]  Kill switch   : Claude pinned to 127.0.0.1:$CLAUDE_HTTP_PORT - no direct connections ('proxy-killswitch' for details)" ;;
+            *) echo "[!!]  Kill switch   : on, but Claude's settings are not pinned - run 'proxy-killswitch'" ;;
+        esac
+    fi
     local nname
     nname=$(_node_active_name)
     if [ -n "$nname" ]; then
@@ -2387,7 +2416,10 @@ proxy-doctor() {
         fi
     fi
 
-    # --- end-to-end: can we actually reach the API through the proxy? ---
+    # --- kill switch ---
+    _killswitch_report "$ok" "$warn" "$bad"
+
+    # --- recovery owner ---
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" != "1" ]; then
         echo "$warn Tunnel watchdog disabled (CLAUDE_TUNNEL_WATCHDOG=0) - a dropped link freezes every window until 'proxy-restart'"
     elif _watchdog_pid >/dev/null; then

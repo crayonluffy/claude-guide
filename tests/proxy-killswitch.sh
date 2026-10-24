@@ -219,3 +219,18 @@ if tunnel-start > "$scratch/ts2.out" 2>&1; then echo 'FAIL: tunnel-start fell ba
 assert grep -q 'proxy-config set SOCKS_PORT' "$scratch/ts2.out"
 assert test ! -e "$scratch/fallback"
 echo 'PASS: tunnel-start refuses a foreign port holder instead of moving the port'
+
+# 6) proxy-doctor / proxy-status report the kill switch.
+rm -f "$scratch/ks-settings.json"
+out=$(ks '' '_killswitch_report OK WARN FAIL')
+case "$out" in *'OK'*'Kill switch on'*'pinned'*) ;; *) echo "FAIL: doctor on: $out" >&2; exit 1;; esac
+case "$out" in *"WARN"*"plain 'codex'"*'PLAIN_COMMANDS auto'*) ;; *) echo "FAIL: doctor codex warning: $out" >&2; exit 1;; esac
+out=$(ks 'CLAUDE_PLAIN_COMMANDS=auto' '_killswitch_report OK WARN FAIL')
+case "$out" in *"plain 'codex'"*'PLAIN_COMMANDS auto'*) echo "FAIL: codex warning with auto: $out" >&2; exit 1;; esac
+out=$(ks 'CLAUDE_NO_PROXY="localhost,*.openai.com"' '_killswitch_report OK WARN FAIL')
+case "$out" in *'FAIL'*'api.openai.com'*) ;; *) echo "FAIL: doctor NO_PROXY: $out" >&2; exit 1;; esac
+out=$(ks 'CLAUDE_KILLSWITCH=off' '_killswitch_report OK WARN FAIL')
+case "$out" in *'WARN'*'Kill switch OFF'*) ;; *) echo "FAIL: doctor off: $out" >&2; exit 1;; esac
+out=$(ks '' '_tunnel_health() { echo down; }; proxy-notify() { :; }; curl() { :; }; proxy-status')
+case "$out" in *'Kill switch'*'127.0.0.1:8080'*) ;; *) echo "FAIL: status line: $out" >&2; exit 1;; esac
+echo 'PASS: proxy-doctor and proxy-status report the kill switch'
