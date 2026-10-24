@@ -64,6 +64,7 @@ ssh() {
 }
 _recovery_probe() { echo 'proxy|0|407|000|proxy'; }
 _listeners() { :; }
+_port_bound() { return 1; }
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
 CLAUDE_DESKTOP_NOTIFICATIONS=off
 CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2

@@ -12,6 +12,7 @@ CLAUDE_WATCHDOG_INTERVAL=0 CLAUDE_WATCHDOG_FAILS=2 CLAUDE_WATCHDOG_NOTICE_AFTER=
 _recovery_desktop_backend() { echo linux; }
 _recovery_desktop_send() { printf '%s\n' "$2" >> "$scratch/desktop"; }
 _listeners() { :; }
+_port_bound() { return 1; }
 _tunnel_ssh_args() { _CP_SSH_ARGS=(); }
 ssh() { echo x >> "$scratch/starts"; exec sleep 100; }
 _wd_sleep() { :; }

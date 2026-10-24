@@ -641,9 +641,12 @@ _recovery_worker() {
 # the subscriber's start identity, so a dead or reused PID never counts.
 _recovery_sessions() {  # <dir>
     local f pid stamp n=0
-    for f in "$1"/sessions/*; do
+    # ls, not a glob: an empty directory is a fatal "no matches found" in zsh.
+    # Entries are PIDs, so word splitting is safe.
+    for pid in $(ls "$1/sessions" 2>/dev/null); do
+        f="$1/sessions/$pid"
         [ -f "$f" ] || continue
-        pid=${f##*/}; stamp=''
+        stamp=''
         read -r stamp < "$f" 2>/dev/null || :
         if [ -n "$stamp" ] && [ "$(_recovery_process_identity "$pid" 2>/dev/null)" = "$stamp" ]; then n=$((n+1)); else rm -f "$f"; fi
     done
