@@ -51,6 +51,27 @@ function Confirm-Yes($prompt, [bool]$defaultYes = $true) {
     return ($v -match '^(y|yes)$')
 }
 
+# Kill switch (profile 2.9+): stays on unless the user turned it off. Plain
+# 'claude' / 'codex' through the proxy: asked on a full run (the saved answer is
+# the default); a quick update only mentions it when it was never chosen.
+function Set-WizardKillswitch([hashtable]$Conf, [bool]$Quick) {
+    if (-not $Conf.ContainsKey('KILLSWITCH')) { $Conf['KILLSWITCH'] = 'on' }
+    if ($Quick) {
+        if (-not $Conf.ContainsKey('PLAIN_COMMANDS')) {
+            Write-Host "[Info] New: plain 'claude' / 'codex' can start through the proxy too - proxy-config set PLAIN_COMMANDS auto" -ForegroundColor DarkGray
+        }
+        return
+    }
+    Write-Host ""
+    Write-Host "Kill switch: Claude and Codex never go out directly - without the tunnel they cannot connect." -ForegroundColor Cyan
+    if (Confirm-Yes "Make plain 'claude' and 'codex' start through the proxy too (recommended)?" ("$($Conf['PLAIN_COMMANDS'])" -ne 'off')) {
+        $Conf['PLAIN_COMMANDS'] = 'auto'
+    } else {
+        $Conf['PLAIN_COMMANDS'] = 'off'
+        Write-Host "[Info] Use cc / cx to start them through the proxy. Plain 'claude' still cannot go direct; plain 'codex' can." -ForegroundColor DarkGray
+    }
+}
+
 # Read-Default that becomes Read-Required when there is no default to offer.
 function Read-Smart($prompt, $default) {
     if ($default) { return Read-Default $prompt $default } else { return Read-Required $prompt }
@@ -255,6 +276,7 @@ $existingConf['SSH_PORT']          = [int]$SshPort
 $existingConf['REMOTE_PROXY_PORT'] = [int]$ProxyPort
 $existingConf['PROXY_DOMAIN']      = "$Domain"
 if ($Domain) { $existingConf['NODES_FROM'] = '' }      # one node-list source at a time
+Set-WizardKillswitch $existingConf $quick
 $confLines = @(
     '@{',
     '    # ~\.claude-proxy.conf.psd1 - YOUR settings for the cc/cx profile.',
@@ -403,3 +425,4 @@ if ($needShortcut -and $shortcutOk) {
     Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
 }
 Write-Host "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)." -ForegroundColor DarkGray
+Write-Host "       'proxy-killswitch' shows how Claude and Codex are kept from going out directly." -ForegroundColor DarkGray
