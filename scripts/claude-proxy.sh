@@ -318,8 +318,12 @@ _recovery_step() {
     fi
     printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$phase" "$start" "$now" "$notice" "$retries" "$next" "$gen" "$failure" "$event"
 }
-_recovery_message() {
+_recovery_message() {  # <event> [pid|name|port, for takeover]
+    local pid name port
     case "$1" in
+        takeover)
+            IFS='|' read -r pid name port <<< "${2:-}"
+            echo "Another program (${name:-unknown}, PID $pid) took proxy port $port while the tunnel was down. Claude/Codex traffic may go to it - exit this session now; nothing was stopped." ;;
         lost) echo 'Proxy connection lost. Retrying; proxy settings remain enabled.' ;;
         prolonged) echo 'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.' ;;
         restored) echo 'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.' ;;
@@ -508,31 +512,45 @@ _recovery_owner_start() {
     fi
     echo "$dir"
 }
-_recovery_port_conflict() {
-    local pid port
+# First listener on a tunnel port that is not our ssh, as 'pid|name|port'.
+# A socket with no visible PID (another user's) counts only while our ssh is
+# down - otherwise it is our own forward, seen without lsof.
+_recovery_port_conflict() {  # <owned ssh pid>
+    local pid port alive=0
+    _recovery_process_identity "$1" >/dev/null 2>&1 && alive=1
     for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
         for pid in $(_listeners "$port"); do
-            [ "$pid" = "$1" ] || return 0
+            [ "$pid" = "$1" ] || { printf '%s|%s|%s\n' "$pid" "$(_proc_name "$pid" | tr -d '|')" "$port"; return 0; }
         done
+        if [ "$alive" -eq 0 ] && [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            printf "%s|another user's program|%s\n" - "$port"; return 0
+        fi
     done
     return 1
 }
 _recovery_worker() {
     local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel all_healthy conflict
+    local takeover cinfo conflict_seen=''
     local classified=1 sshclass='' lastclass=''
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
     _recovery_record_write "$dir"
     trap '' HUP
-    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; rm -f "$dir/ssh.status"; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; rm -f "$dir/ssh.status" "$dir/takeover"; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     desktop_backend=$(_recovery_desktop_backend)
     [ "$desktop_backend" != off ] || desktop_result=off
     while [ ! -e "$dir/stopped" ]; do
         now=$(_recovery_now)
-        conflict=0
-        _recovery_port_conflict "$spid" && conflict=1
+        conflict=0 takeover=0
+        if cinfo=$(_recovery_port_conflict "$spid"); then
+            conflict=1
+            # A new program on our port is announced once, loudly; it is never killed.
+            if [ "$cinfo" != "$conflict_seen" ]; then takeover=1; conflict_seen=$cinfo; _recovery_write "$dir/takeover" "$cinfo" "$me"; fi
+        else
+            conflict_seen=''; rm -f "$dir/takeover"
+        fi
         if [ "$classified" -eq 0 ] && ! _recovery_process_identity "$spid" >/dev/null; then
             # The ssh we started has exited: record why before deciding on a retry.
             sshclass=$(_recovery_ssh_class "$dir/ssh.err")
@@ -569,7 +587,12 @@ _recovery_worker() {
             old=$(_recovery_status "$dir" "$provider") || old=''
             state=$(_recovery_step "$old" "$sample" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
             event=$(printf '%s' "$state" | cut -d'|' -f9)
-            if [ "$event" = none ] && [ -n "$old" ]; then
+            if [ "$takeover" -eq 1 ]; then
+                # Overrides lost/progress: this is the notice terminals must show.
+                [ "$event" != none ] || state=$(printf '%s\n' "$state" | awk -F'|' -v OFS='|' '{$7=$7+1;print}')
+                state="${state%|*}|takeover"
+                [ "$provider" != claude ] || printf '[Recovery] %s\n' "$(_recovery_message takeover "$cinfo")"
+            elif [ "$event" = none ] && [ -n "$old" ]; then
                 prior=$(printf '%s' "$old" | cut -d'|' -f9)
                 state="${state%|*}|$prior"
             elif [ "$event" != none ]; then
@@ -582,8 +605,13 @@ _recovery_worker() {
         cs=$(_recovery_status "$dir" claude) || cs=''; xs=$(_recovery_status "$dir" codex) || xs=''
         # Nothing observed yet (ssh still connecting) is not "unavailable".
         [ -z "$cs$xs" ] || desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
-        case "$cs$xs:${desktop_state##*|}" in
-            :*) :;;
+        case "$takeover:$cs$xs:${desktop_state##*|}" in
+            1:*)
+                desktop_event=takeover
+                if [ "$desktop_backend" != off ]; then
+                    if _recovery_desktop_send "$desktop_backend" takeover "$cinfo"; then desktop_result=submitted; else desktop_result=failed; fi
+                fi;;
+            0::*) :;;
             *:lost|*:prolonged|*:restored)
                 desktop_event=${desktop_state##*|}; scope=$(_recovery_desktop_scope "$cs" "$xs")
                 if [ "$desktop_backend" != off ]; then
@@ -606,7 +634,7 @@ _recovery_worker() {
     done
     _recovery_signal_owned "$spid" "$stamp" || :
     wait "$spid" 2>/dev/null || :
-    rm -f "$dir/ssh.status"
+    rm -f "$dir/ssh.status" "$dir/takeover"
     _recovery_release "$dir" "$me"
 }
 # Live cc/cx sessions on a slot. Each subscriber is one session; its entry holds
@@ -652,7 +680,7 @@ _recovery_subscribe() {
                 IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
                 if [ "$gen" != "$seen" ]; then
                     if [ "$seen" != -1 ] || [ "$phase" != healthy ]; then
-                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event")" >&2
+                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event" "$(cat "$dir/takeover" 2>/dev/null)")" >&2
                     fi
                     seen=$gen
                 fi
@@ -728,7 +756,11 @@ _recovery_desktop_backend() {
     esac
 }
 _recovery_desktop_message() {
+    local pid name port
     case "$1" in
+        takeover)
+            IFS='|' read -r pid name port <<< "$2"
+            printf 'Proxy port taken|%s (PID %s) took port %s. Exit Claude/Codex sessions now.\n' "${name:-unknown}" "$pid" "$port";;
         lost) printf 'Proxy connection lost|%s: reconnecting. Sessions stay open.\n' "$2";;
         prolonged) printf 'Proxy still unavailable|%s: retrying for a prolonged outage. Keep waiting or exit normally; sessions stay open.\n' "$2";;
         restored) printf 'Proxy connection restored|%s: connected again. Retry any failed request your CLI did not retry.\n' "$2";;
