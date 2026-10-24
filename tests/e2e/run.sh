@@ -10,6 +10,10 @@
 # hung link (SIGSTOP) -> restarted; login refused -> classified 'auth';
 # foreign program on the port during the outage -> 'takeover' alert;
 # a terminal with stale settings runs tunnel-stop -> owner stops, stays stopped.
+# Kill switch (2.9): Claude's settings are pinned to the tunnel; a NO_PROXY
+# that exempts the API refuses to launch; with the tunnel down the REAL Claude
+# CLI tries only the pinned port and opens no direct connection; a program on
+# the port makes tunnel-start refuse instead of moving the port.
 set -eu
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 SSHD=${SSHD:-/usr/sbin/sshd}
@@ -90,7 +94,7 @@ CLAUDE_SSH_HOST=e2e-jp
 CLAUDE_HTTP_PORT=$HTTP
 CLAUDE_SOCKS_PORT=$SOCKS
 CLAUDE_REMOTE_PROXY_PORT=$REMOTE
-CLAUDE_SYNC_SETTINGS=0
+CLAUDE_SYNC_SETTINGS=1
 CLAUDE_DESKTOP_NOTIFICATIONS=off
 CLAUDE_PROXY_BANNER=0
 CLAUDE_WATCHDOG_INTERVAL=1
@@ -100,6 +104,7 @@ CLAUDE_WATCHDOG_STARTUP_GRACE=4
 CLAUDE_WATCHDOG_MAX_BACKOFF=4
 EOF
 export HOME="$E/home" XDG_STATE_HOME="$E/state" CLAUDE_PROXY_CONF="$E/conf" CLAUDE_TUNNEL_LOG="$E/tunnel.log"
+export CLAUDE_SETTINGS="$E/home/.claude/settings.json"
 export PATH="$E/bin:$PATH"
 unset SSH_AUTH_SOCK HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY NO_PROXY no_proxy
 prof() { bash -c '. "$0" >/dev/null 2>&1; "$@"' "$repo/scripts/claude-proxy.sh" "$@"; }
@@ -109,6 +114,19 @@ owner_ssh() { ps -o pid=,comm= --ppid "$(head -1 "$dir/lock/owner")" | awk '$2 =
 field() { cut -d'|' -f"$2" "$dir/$1.state" 2>/dev/null; }
 state_is() { [ "$(field "$1" "$2")" = "$3" ]; }   # re-read on every poll
 new_ssh() { local now; now=$(owner_ssh); [ -n "$now" ] && [ "$now" != "$1" ]; }
+pinned_port() { jq -r '.env.HTTPS_PROXY // empty' "$CLAUDE_SETTINGS" 2>/dev/null; }
+tree_pids() {  # <pid>: it and all its descendants
+    local p; echo "$1"
+    for p in $(ps -o pid= --ppid "$1" 2>/dev/null); do tree_pids "$p"; done
+}
+# TCP peers of a process tree that are not loopback (one line each). Only this
+# tree: Claude Code itself may be talking to Anthropic from the same machine.
+direct_conns() {
+    local p
+    for p in $(tree_pids "$1"); do
+        ss -tnpH 2>/dev/null | grep "pid=$p," | awk '{print $5}' | grep -vE '^(127\.|\[::1\]|\[::ffff:127\.)' || :
+    done
+}
 
 # 1) Start: one owner, healthy, traffic flows.
 prof tunnel-start > "$E/start.out" 2>&1 || { cat "$E/start.out" >&2; fail 'tunnel-start failed'; }
@@ -116,6 +134,8 @@ until_ok 15 through_tunnel || fail 'no traffic through a fresh tunnel'
 until_ok 10 state_is claude 1 healthy || fail "claude state: $(cat "$dir/claude.state" 2>/dev/null)"
 grep -qx "http=$HTTP" "$dir/tunnel.rec" || fail 'tunnel record missing'
 pass 'tunnel-start brings up a healthy owned tunnel'
+[ "$(pinned_port)" = "http://127.0.0.1:$HTTP" ] || fail "Claude settings not pinned: $(cat "$CLAUDE_SETTINGS" 2>/dev/null)"
+pass 'kill switch: Claude settings are pinned to the tunnel'
 
 # 2) ssh killed: recovered on the same ports.
 old=$(owner_ssh); [ -n "$old" ] || fail 'owner has no ssh child'
@@ -151,6 +171,13 @@ until_ok 30 through_tunnel || fail 'no recovery after the port freed and login w
 until_ok 10 test ! -e "$dir/takeover" || fail 'takeover record not cleared'
 pass 'a program taking the port is named once, left alone, and recovery resumes'
 
+# Kill switch: a NO_PROXY that exempts the API stops the launch, even with a healthy tunnel.
+{ cat "$E/conf"; echo 'CLAUDE_NO_PROXY="localhost,*.com"'; } > "$E/leak.conf"
+if CLAUDE_PROXY_CONF="$E/leak.conf" prof proxy-up --no-verify > "$E/leak.out" 2>&1; then fail 'proxy-up launched with a leaky NO_PROXY'; fi
+grep -q 'api.anthropic.com' "$E/leak.out" || fail "leak refusal does not name the host: $(cat "$E/leak.out")"
+prof true   # the next shell re-pins NO_PROXY from the real settings
+pass 'kill switch: a NO_PROXY that exempts the API refuses to launch'
+
 # 6) A terminal with stale settings stops the owner, and it stays stopped.
 owner=$(head -1 "$dir/lock/owner")
 CLAUDE_PROXY_CONF="$E/stale.conf" bash -c 'printf "CLAUDE_HTTP_PORT=8080\nCLAUDE_SOCKS_PORT=1080\nCLAUDE_SSH_HOST=e2e-jp\n" > "$CLAUDE_PROXY_CONF"; . "$0" >/dev/null 2>&1; tunnel-stop' "$repo/scripts/claude-proxy.sh" > "$E/stop.out" 2>&1 \
@@ -159,3 +186,40 @@ until_ok 10 bash -c '! kill -0 "$1" 2>/dev/null' _ "$owner" || fail 'owner still
 sleep 4
 if bash -c "exec 3<>/dev/tcp/127.0.0.1/$HTTP" 2>/dev/null; then fail 'tunnel came back after an explicit stop'; fi
 pass 'tunnel-stop from a terminal with stale settings stops the owner for good'
+
+# Kill switch with the tunnel down: Claude stays pinned, even after proxy-off.
+prof true; prof proxy-off >/dev/null
+[ "$(pinned_port)" = "http://127.0.0.1:$HTTP" ] || fail "pin lost after tunnel-stop + proxy-off: $(cat "$CLAUDE_SETTINGS")"
+pass 'kill switch: the pin survives tunnel-stop and proxy-off'
+
+# The real Claude CLI (a fake API key; nothing can reach the API anyway).
+if command -v claude >/dev/null 2>&1; then
+    run_claude() {  # <seconds>: run 'claude -p' in the isolated HOME; fail on any direct connection
+        local c direct=''
+        ( cd "$E" && exec env -u HTTPS_PROXY -u HTTP_PROXY ANTHROPIC_API_KEY=sk-ant-e2e-not-a-key timeout "$1" claude -p hi </dev/null >"$E/claude.out" 2>&1 ) & c=$!
+        while kill -0 "$c" 2>/dev/null; do direct="$direct$(direct_conns "$c")"; sleep .5; done
+        wait "$c" 2>/dev/null || :
+        [ -z "$direct" ] || fail "Claude opened DIRECT connections: $(printf '%s\n' "$direct" | sort -u | tr '\n' ' ')"
+    }
+    # Something on the pinned port that records and refuses: Claude goes there, nowhere else.
+    python3 -I "$repo/tests/e2e/connect_proxy.py" "$HTTP" --record "$E/claude.rec" & rec=$!; pids+=($rec)
+    until_ok 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$HTTP" || fail 'recording listener did not start'
+    run_claude 15
+    grep -q '^CONNECT api.anthropic.com:443' "$E/claude.rec" || fail "Claude did not use the pinned proxy: $(cat "$E/claude.rec" 2>/dev/null) / $(tail -3 "$E/claude.out")"
+    kill "$rec"; wait "$rec" 2>/dev/null || :
+    pass 'kill switch: the real Claude CLI uses only the pinned proxy port'
+    # Nothing on the port at all: connection refused, and still no direct connection.
+    run_claude 10
+    pass 'kill switch: with the tunnel down the real Claude CLI fails closed (no direct connection)'
+else
+    echo 'SKIP: e2e - claude CLI not installed; real-CLI kill switch checks skipped'
+fi
+
+# A program on the proxy port: tunnel-start refuses instead of moving the port.
+python3 -I -m http.server "$HTTP" --bind 127.0.0.1 >/dev/null 2>&1 & squatter=$!; pids+=($squatter)
+until_ok 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$HTTP" || fail 'squatter did not start'
+if prof tunnel-start > "$E/squat.out" 2>&1; then fail 'tunnel-start moved around a program on the port'; fi
+grep -q "PID $squatter" "$E/squat.out" || fail "refusal does not name the program: $(cat "$E/squat.out")"
+grep -q 'proxy-config set HTTP_PORT' "$E/squat.out" || fail 'refusal has no fix'
+kill "$squatter"; wait "$squatter" 2>/dev/null || :
+pass 'kill switch: tunnel-start refuses a program on the port instead of moving the tunnel'

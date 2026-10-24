@@ -1,11 +1,15 @@
 """Tiny HTTP CONNECT proxy standing in for tinyproxy on the VM (e2e tests only).
 
-usage: python3 -I connect_proxy.py <port>
+usage: python3 -I connect_proxy.py <port> [--record <file>]
 Answers CONNECT host:port with 200 and splices bytes both ways; anything else
-gets 405. Listens on 127.0.0.1 only.
+gets 405. Listens on 127.0.0.1 only. With --record, every request line is
+appended to <file> and CONNECT is refused (403) - to see where a client sends
+its traffic without letting it through.
 """
 import asyncio
 import sys
+
+RECORD = None
 
 
 async def pipe(reader, writer):
@@ -22,7 +26,15 @@ async def pipe(reader, writer):
 async def handle(reader, writer):
     try:
         head = await reader.readuntil(b"\r\n\r\n")
-        method, target, _ = head.split(b"\r\n", 1)[0].decode("latin-1").split(" ", 2)
+        line = head.split(b"\r\n", 1)[0].decode("latin-1")
+        method, target, _ = line.split(" ", 2)
+        if RECORD:
+            with open(RECORD, "a") as f:
+                f.write(line + "\n")
+            writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            return
         if method != "CONNECT":
             writer.write(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
             await writer.drain()
@@ -46,4 +58,6 @@ async def main(port):
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[2] == "--record":
+        RECORD = sys.argv[3]
     asyncio.run(main(int(sys.argv[1])))
