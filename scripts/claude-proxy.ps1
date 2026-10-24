@@ -81,6 +81,17 @@ $script:PROXY_DOMAIN      = ''
 $script:SYNC_SETTINGS   = 1
 $script:CLAUDE_SETTINGS = Join-Path $HOME ".claude\settings.json"
 
+# Kill switch (2.9): Claude and Codex fail closed. While 'on', Claude's
+# settings.json keeps the proxy permanently - proxy-off / cc-stop clear only the
+# window - so plain 'claude' and the IDE extensions go through the tunnel or get
+# "connection refused", never out from your own IP. cc / cx also refuse to start
+# when something would leak. 'off' = the pre-2.9 behaviour. See 'proxy-killswitch'.
+$script:KILLSWITCH = 'on'
+# auto = plain 'claude' and 'codex' also start through the tunnel (like cc-safe /
+# cx-safe, but quiet). off = they run untouched: Claude is still protected by
+# its pinned settings; plain 'codex' is not.
+$script:PLAIN_COMMANDS = 'off'
+
 $script:NO_PROXY_LIST = @(
     "localhost",
     "127.0.0.1",
@@ -115,7 +126,7 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -260,7 +271,7 @@ function Open-RecoveryLock {
 }
 function Write-RecoveryStatus {
     param([string]$Identity,[string]$Provider,$State)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover','sshpid')) { throw 'Invalid recovery record' }
     $dest = Join-Path $Identity "$Provider.json"
     $tmp = "$dest.$([guid]::NewGuid()).tmp"
     try {
@@ -277,7 +288,7 @@ function Write-RecoveryStatus {
 }
 function Get-RecoveryStatus {
     param([string]$Identity,[string]$Provider)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover','sshpid')) { throw 'Invalid recovery record' }
     try { return ([IO.File]::ReadAllText((Join-Path $Identity "$Provider.json")) | ConvertFrom-Json -ErrorAction Stop) }
     catch { return [pscustomobject]@{ phase='unknown'; generation=-1; event='none' } }
 }
@@ -480,7 +491,11 @@ function Invoke-RecoveryWorker {
             if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next -and -not $conflict) {
                 if ($ssh) { $ssh.Dispose(); $ssh=$null }
                 $classified=$false
-                try { $ssh=Start-RecoverySsh $errFile; $started="$($ssh.StartTime.ToUniversalTime().Ticks)"; $sshAt=$now }
+                try {
+                    $ssh=Start-RecoverySsh $errFile; $started="$($ssh.StartTime.ToUniversalTime().Ticks)"; $sshAt=$now
+                    # Published so launch checks can tell our ssh from anything else on the port.
+                    Write-RecoveryStatus $dir sshpid @{Pid=$ssh.Id;Started=$started}
+                }
                 catch { $ssh=$null; Add-Content (Join-Path $dir 'events.log') "SSH launch failed: $($_.Exception.Message). Check SSH agent/credentials and TUNNEL_LOG." }
                 $retries++; $next=$now+$delay; $delay=[Math]::Min($script:WATCHDOG_MAX_BACKOFF,$delay*2)
             }
@@ -541,7 +556,7 @@ function Invoke-RecoveryWorker {
             $ssh.Dispose()
         }
         Stop-RecoveryDesktopContext $desktop
-        Remove-Item (Join-Path $dir 'ssh.json'),(Join-Path $dir 'takeover.json') -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $dir 'ssh.json'),(Join-Path $dir 'takeover.json'),(Join-Path $dir 'sshpid.json') -ErrorAction SilentlyContinue
         $lease.Dispose()
     }
 }
@@ -801,6 +816,7 @@ function Get-TunnelHealth {
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
 function _settings-sync-on {
     if ($script:SYNC_SETTINGS -ne 1) { return }
+    if (Test-ClaudeSettingsPinned) { return }   # already ours: never rewrite the user's file
     $settings = $script:CLAUDE_SETTINGS
     $url = "http://127.0.0.1:$($script:HTTP_PORT)"
     New-Item -ItemType Directory -Force -Path (Split-Path $settings) | Out-Null
@@ -838,6 +854,202 @@ function _settings-sync-off {
     }
     $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
     Write-Host "[OK] Proxy removed from $settings" -ForegroundColor Green
+}
+
+function Test-KillswitchOn { return ("$($script:KILLSWITCH)" -ne 'off') }
+
+# Hosts Claude and Codex talk to. A NO_PROXY entry matching any of them would
+# send that traffic DIRECT, from the user's real IP (telemetry included).
+# Same rules as curl and Node's proxy-from-env: '*' is everything; an entry
+# matches the host itself and its subdomains; a leading '*' or '.' and a ':port'
+# are ignored; IP ranges never match a host name.
+function Get-NoProxyExemption {
+    param([string]$List)
+    $entries = @("$List".ToLower() -split ',' | ForEach-Object { $_.Trim() -replace ':\d*$','' } | Where-Object { $_ })
+    foreach ($h in @('api.anthropic.com','claude.ai','statsig.anthropic.com','api.openai.com','chatgpt.com','auth.openai.com')) {
+        foreach ($e in $entries) {
+            if ($e -eq '*') { $h; break }
+            $d = $e.TrimStart('*').TrimStart('.')
+            if ($d -and ($h -eq $d -or $h.EndsWith(".$d"))) { $h; break }
+        }
+    }
+}
+
+# Does Claude's settings.json carry exactly our proxy?
+function Test-ClaudeSettingsPinned {
+    try { $o = [IO.File]::ReadAllText($script:CLAUDE_SETTINGS) | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+    $url = "http://127.0.0.1:$($script:HTTP_PORT)"
+    return [bool]($o.env -and $o.env.HTTPS_PROXY -eq $url -and $o.env.HTTP_PROXY -eq $url -and $o.env.NO_PROXY -eq $script:NO_PROXY_LIST)
+}
+
+# 'pinned <port>' (exactly ours), 'mismatch <port>' (a proxy, not ours), or 'unpinned sync-off|missing'.
+function Get-KillswitchPinState {
+    if ($script:SYNC_SETTINGS -ne 1) { return 'unpinned sync-off' }
+    try { $o = [IO.File]::ReadAllText($script:CLAUDE_SETTINGS) | ConvertFrom-Json -ErrorAction Stop } catch { return 'unpinned missing' }
+    $u = "$($o.env.HTTPS_PROXY)"
+    if (-not $u) { return 'unpinned missing' }
+    $port = ($u.TrimEnd('/') -split ':')[-1]
+    if (Test-ClaudeSettingsPinned) { return "pinned $port" }
+    return "mismatch $port"
+}
+
+# Pin Claude's settings when missing or wrong. Returns a one-line notice when it
+# changed something, nothing otherwise (so a new window stays quiet).
+function Confirm-KillswitchPin {
+    if (-not (Test-KillswitchOn) -or $script:SYNC_SETTINGS -ne 1 -or (Test-ClaudeSettingsPinned)) { return }
+    try { _settings-sync-on 6>$null | Out-Null } catch { return }
+    if (Test-ClaudeSettingsPinned) {
+        return "[Kill switch] Claude's settings now point at the tunnel (127.0.0.1:$($script:HTTP_PORT)): while it is down Claude cannot connect, so it never goes out directly. Details: proxy-killswitch"
+    }
+}
+
+# Everything that would let Claude/Codex traffic leak, checked right before
+# launch. Prints one reason and one fix and returns $false; $true when all is well.
+function Test-KillswitchLaunch {
+    param([int]$HttpPort, [int]$SocksPort)
+    if (-not (Test-KillswitchOn)) { return $true }
+    $hosts = @(Get-NoProxyExemption $script:NO_PROXY_LIST)
+    if ($hosts.Count) {
+        Write-Host "[Kill switch] NO_PROXY would send $($hosts -join ' ') DIRECT (from your own IP) - not launched." -ForegroundColor Red
+        Write-Host "              Fix: remove the matching entries from NO_PROXY_EXTRA (proxy-config edit)." -ForegroundColor Yellow
+        return $false
+    }
+    # Our ssh is the one the owner published - checked by start time, so a reused PID is not it.
+    $own = 0
+    $rec = Get-RecoveryStatus (Join-Path (Get-RecoveryRoot) 'main') sshpid
+    if ($rec.Pid -and (Test-RecoveryProcess ([int]$rec.Pid) "$($rec.Started)")) { $own = [int]$rec.Pid }
+    if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
+        foreach ($port in @($HttpPort, $SocksPort)) {
+            $fix = if ($port -eq $HttpPort) { "proxy-config set HTTP_PORT $($HttpPort + 10)" } else { "proxy-config set SOCKS_PORT $($SocksPort + 10)" }
+            foreach ($c in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
+                if ($c.OwningProcess -eq $own) { continue }
+                $name = (Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName
+                Write-Host "[Kill switch] $name (PID $($c.OwningProcess)) is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched." -ForegroundColor Red
+                Write-Host "              Fix: close that program, or move the tunnel: $fix" -ForegroundColor Yellow
+                return $false
+            }
+        }
+    }
+    # Claude reads its settings.json over the window's env, so it must name this same port.
+    if ($HttpPort -eq $script:HTTP_PORT -and $script:SYNC_SETTINGS -eq 1) {
+        $null = Confirm-KillswitchPin
+        $state = Get-KillswitchPinState
+        if ($state -ne "pinned $HttpPort") {
+            Write-Host "[Kill switch] Claude's settings ($($script:CLAUDE_SETTINGS)) could not be pointed at the tunnel on port $HttpPort ($state) - not launched." -ForegroundColor Red
+            Write-Host "              Fix: repair that file (valid JSON), or 'proxy-killswitch off'." -ForegroundColor Yellow
+            return $false
+        }
+    }
+    return $true
+}
+
+# proxy-doctor's kill-switch lines.
+function Write-KillswitchReport {
+    if (-not (Test-KillswitchOn)) {
+        Write-Host "[WARN] Kill switch OFF - with the tunnel down, plain 'claude' / 'codex' go out from your own IP. Fix: proxy-killswitch on" -ForegroundColor Yellow
+        return
+    }
+    $state = Get-KillswitchPinState
+    if ($state -eq "pinned $($script:HTTP_PORT)") { Write-Host "[ OK ]  Kill switch on - Claude's settings pinned to 127.0.0.1:$($script:HTTP_PORT)" -ForegroundColor Green }
+    elseif ($state -like 'mismatch*') { Write-Host "[FAIL] Kill switch on, but Claude's settings point at port $($state.Substring(9)) (tunnel: $($script:HTTP_PORT)). Fix: proxy-killswitch on" -ForegroundColor Red }
+    elseif ($state -eq 'unpinned sync-off') { Write-Host "[WARN] Kill switch on, but settings.json is not managed (SYNC_SETTINGS=0): only cc-launched Claude is protected" -ForegroundColor Yellow }
+    else { Write-Host "[FAIL] Kill switch on, but Claude's settings are not pinned ($state). Fix: proxy-killswitch on" -ForegroundColor Red }
+    $hosts = @(Get-NoProxyExemption $script:NO_PROXY_LIST)
+    if ($hosts.Count) { Write-Host "[FAIL] NO_PROXY would send $($hosts -join ' ') DIRECT - cc/cx refuse to start. Fix: remove those entries (proxy-config edit)" -ForegroundColor Red }
+    if ($script:PLAIN_COMMANDS -ne 'auto') { Write-Host "[WARN] plain 'codex' is not protected (Codex reads only the window's env). Fix: proxy-config set PLAIN_COMMANDS auto - or always use cx" -ForegroundColor Yellow }
+}
+
+# Kill switch: show it, or switch it (saved to the conf file).
+function proxy-killswitch {
+    param([string]$Action = 'status')
+    if ($Action -notin @('status','on','off')) { throw 'usage: proxy-killswitch [status|on|off]' }
+    if ($Action -ne 'status') {
+        $running = Test-RecoveryOwner (Join-Path (Get-RecoveryRoot) 'main')
+        $script:KILLSWITCH = $Action
+        _conf-write-all
+        if ($Action -eq 'on') {
+            $null = Confirm-KillswitchPin
+            Write-Host "[OK] Kill switch ON - Claude and Codex cannot go out directly. Saved to $($script:PROXY_CONF)" -ForegroundColor Green
+        } elseif ($running) {
+            Write-Host "[OK] Kill switch OFF. A tunnel is running, so Claude keeps the proxy until 'proxy-off' / 'cc-stop'." -ForegroundColor Yellow
+        } else {
+            _settings-sync-off 6>$null
+            Write-Host "[OK] Kill switch OFF - with no tunnel, plain 'claude' now goes out directly (from your own IP)." -ForegroundColor Yellow
+        }
+        return
+    }
+    if (Test-KillswitchOn) { Write-Host '=== Kill switch: ON ===' -ForegroundColor Cyan }
+    else { Write-Host "=== Kill switch: OFF (pre-2.9 behaviour) - 'proxy-killswitch on' ===" -ForegroundColor Yellow }
+    if ($script:SYNC_SETTINGS -ne 1) {
+        Write-Host "[!!]  Claude : settings.json is not managed (SYNC_SETTINGS=0) - only cc-launched Claude is protected. Fix: proxy-config set SYNC_SETTINGS 1" -ForegroundColor Yellow
+    } elseif (Test-ClaudeSettingsPinned) {
+        Write-Host "[ON]  Claude : pinned to 127.0.0.1:$($script:HTTP_PORT) ($($script:CLAUDE_SETTINGS)) - plain 'claude' and IDEs use the tunnel or fail" -ForegroundColor Green
+    } elseif (Test-KillswitchOn) {
+        Write-Host "[!!]  Claude : $($script:CLAUDE_SETTINGS) does not point at the tunnel - run 'proxy-killswitch on' to fix it" -ForegroundColor Yellow
+    } else {
+        Write-Host "[OFF] Claude : not pinned - plain 'claude' goes direct while no tunnel is up"
+    }
+    if ($script:PLAIN_COMMANDS -eq 'auto') { Write-Host "[ON]  Codex  : protected when started with cx and as plain 'codex'" -ForegroundColor Green }
+    else { Write-Host "[..]  Codex  : protected when started with cx; plain 'codex' reads only your window and may go direct (proxy-config set PLAIN_COMMANDS auto)" }
+    $hosts = @(Get-NoProxyExemption $script:NO_PROXY_LIST)
+    if (-not $hosts.Count) { Write-Host '[OK]  NO_PROXY : no API host is exempted' -ForegroundColor Green }
+    else { Write-Host "[!!]  NO_PROXY : would send $($hosts -join ' ') DIRECT - remove those entries (proxy-config edit)" -ForegroundColor Red }
+    Write-Host '      Not covered: the Claude Desktop app, browsers and other apps (chrome-proxy has its own fail-closed rules).' -ForegroundColor DarkGray
+}
+
+# The real program, never a function of the same name (PLAIN_COMMANDS=auto
+# defines 'claude' / 'codex' functions). npm installs claude.ps1 (ExternalScript)
+# and claude.cmd (Application).
+function Get-AppCommand {
+    param([string]$Name)
+    return (Get-Command $Name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1)
+}
+
+# Plain 'claude' / 'codex' with PLAIN_COMMANDS=auto: through the tunnel, in safe
+# mode (the app's own prompts), quietly - profile messages only on failure, on
+# stderr - so 'claude -p ... | ConvertFrom-Json' keeps working.
+function Invoke-PlainLaunch {
+    $name = "$($args[0])"
+    $rest = @($args | Select-Object -Skip 1)
+    $exe = Get-AppCommand $name
+    if (-not $exe) {
+        $pkg = if ($name -eq 'codex') { '@openai/codex' } else { '@anthropic-ai/claude-code' }
+        [Console]::Error.WriteLine("[Err] '$name' not found - install it first: npm install -g $pkg")
+        $global:LASTEXITCODE = 1; return
+    }
+    # Version/help need no network.
+    if ($rest.Count -and "$($rest[0])" -in @('--version','-v','--help','-h')) { & $exe @rest; return }
+    $out = @(proxy-up -NoVerify -Provider $name 6>&1)
+    $ok = @($out | Where-Object { $_ -is [bool] })
+    if (-not ($ok.Count -and $ok[-1])) {
+        foreach ($l in ($out | Where-Object { $_ -isnot [bool] })) { [Console]::Error.WriteLine("$l") }
+        $global:LASTEXITCODE = 1; return
+    }
+    $subscriber = $null
+    if ($script:TUNNEL_WATCHDOG) {
+        try { $identity = Start-RecoveryOwner $name 6>$null; $subscriber = Start-RecoverySubscriber $identity $name } catch { [Console]::Error.WriteLine("[Warn] $($_.Exception.Message)") }
+    }
+    try { & $exe @rest }
+    finally {
+        $exitCode = $global:LASTEXITCODE
+        Stop-RecoverySubscriber $subscriber
+        $global:LASTEXITCODE = $exitCode
+    }
+}
+
+# Define or remove the plain-command functions to match PLAIN_COMMANDS. Only our
+# own functions are removed - a user's own 'claude' function is left alone.
+function Set-PlainCommands {
+    foreach ($n in @('claude','codex')) {
+        if ($script:PLAIN_COMMANDS -eq 'auto') {
+            Set-Item -Path "function:global:$n" -Value ([scriptblock]::Create("Invoke-PlainLaunch $n @args"))
+        } else {
+            # Lookup/removal need the unqualified path: with 'global:' Get-Item finds
+            # nothing and Remove-Item silently removes nothing.
+            $f = Get-Item -Path "function:$n" -ErrorAction SilentlyContinue
+            if ($f -and "$($f.ScriptBlock)" -match 'Invoke-PlainLaunch') { Remove-Item -Path "function:$n" }
+        }
+    }
 }
 
 # ============================================================
@@ -1381,6 +1593,12 @@ function tunnel-start {
             tunnel-stop | Out-Null
         }
         'foreign' {
+            if (Test-KillswitchOn) {
+                # A moved port would no longer match Claude's pinned settings: refuse instead.
+                Write-Host "[Err] $($health.OwnerName) (PID $($health.OwnerPid)) is on proxy port $($script:HTTP_PORT). With the kill switch on the tunnel does not move silently." -ForegroundColor Red
+                Write-Host "      Fix: close that program, or move the tunnel for good: proxy-config set HTTP_PORT $($script:HTTP_PORT + 10)" -ForegroundColor Yellow
+                return
+            }
             Write-Host "[Info] Port $($script:HTTP_PORT) is used by '$($health.OwnerName)' (PID $($health.OwnerPid)) - that's another app, leaving it alone." -ForegroundColor Yellow
             $free = Find-FreePort ($script:HTTP_PORT + 1)
             if (-not $free) {
@@ -1397,6 +1615,11 @@ function tunnel-start {
     if (Test-Port -Port $script:SOCKS_PORT) {
         $sPid   = @((Get-NetTCPConnection -LocalPort $script:SOCKS_PORT -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -Unique)[0]
         $sName  = (Get-Process -Id $sPid -ErrorAction SilentlyContinue).ProcessName
+        if (Test-KillswitchOn) {
+            Write-Host "[Err] $sName (PID $sPid) is on SOCKS port $($script:SOCKS_PORT). With the kill switch on the tunnel does not move silently." -ForegroundColor Red
+            Write-Host "      Fix: close that program, or move the tunnel for good: proxy-config set SOCKS_PORT $($script:SOCKS_PORT + 10)" -ForegroundColor Yellow
+            return
+        }
         $sFree  = Find-FreePort ($script:SOCKS_PORT + 1)
         if (-not $sFree) {
             Write-Host "[Err] SOCKS port $($script:SOCKS_PORT) is used by '$sName' and no free port found nearby." -ForegroundColor Red
@@ -1498,7 +1721,10 @@ function proxy-off {
     $env:no_proxy = $null
     $env:NO_PROXY = $null
     Write-Host "[OK] Env vars cleared" -ForegroundColor Green
-    _settings-sync-off
+    if (-not (Test-KillswitchOn)) { _settings-sync-off }
+    elseif ($script:SYNC_SETTINGS -eq 1) {
+        Write-Host "[Kill switch] Claude's settings keep the proxy, so plain 'claude' cannot go out directly ('proxy-killswitch off' allows that)." -ForegroundColor DarkGray
+    }
 }
 
 # ============================================================
@@ -1547,6 +1773,7 @@ function proxy-up {
         }
         Start-Sleep -Seconds 1; $waited++
     }
+    if (-not (Test-KillswitchLaunch $script:HTTP_PORT $script:SOCKS_PORT)) { return $false }
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
@@ -1597,7 +1824,8 @@ function _split-launch-args {
 
 function cc {
     $o = _split-launch-args $args
-    if (-not (Get-Command claude -ErrorAction SilentlyContinue)) {
+    $exe = Get-AppCommand claude   # the real program, not a plain-command function
+    if (-not $exe) {
         Write-Host "[Err] 'claude' not found - install it first: npm install -g @anthropic-ai/claude-code" -ForegroundColor Red
         return
     }
@@ -1619,9 +1847,9 @@ function cc {
     try {
     $app = $o.App
     if ($o.Safe) {
-        claude @app
+        & $exe @app
     } else {
-        claude --dangerously-skip-permissions @app
+        & $exe --dangerously-skip-permissions @app
     }
     } finally {
         $exitCode=$global:LASTEXITCODE
@@ -1641,7 +1869,8 @@ function cx {
     $o = _split-launch-args $args
 
     # Locate codex first, so we don't bring the tunnel up only to find it missing.
-    if (-not (Get-Command codex -ErrorAction SilentlyContinue)) {
+    $exe = Get-AppCommand codex   # the real program, not a plain-command function
+    if (-not $exe) {
         Write-Host "[Err] 'codex' not found - install it first: npm install -g @openai/codex" -ForegroundColor Red
         return
     }
@@ -1663,9 +1892,9 @@ function cx {
     try {
     $app = $o.App
     if ($o.Safe) {
-        codex @app
+        & $exe @app
     } else {
-        codex --dangerously-bypass-approvals-and-sandbox @app
+        & $exe --dangerously-bypass-approvals-and-sandbox @app
     }
     } finally {
         $exitCode=$global:LASTEXITCODE
@@ -1812,6 +2041,9 @@ function proxy-status {
     } else {
         Write-Host "[OFF] Env HTTPS_PROXY: not set" -ForegroundColor Red
     }
+    if (-not (Test-KillswitchOn)) { Write-Host "[OFF] Kill switch   : off - plain claude/codex go direct while the tunnel is down ('proxy-killswitch on')" -ForegroundColor Yellow }
+    elseif ((Get-KillswitchPinState) -eq "pinned $($script:HTTP_PORT)") { Write-Host "[ON]  Kill switch   : Claude pinned to 127.0.0.1:$($script:HTTP_PORT) - no direct connections ('proxy-killswitch' for details)" -ForegroundColor Green }
+    else { Write-Host "[!!]  Kill switch   : on, but Claude's settings are not pinned - run 'proxy-killswitch'" -ForegroundColor Yellow }
     $an = Get-ActiveNodeName
     if ($an) { Write-Host "[..]  Node          : $an ($($script:SSH_HOST))  - 'proxy-node <name>' switches, 'proxy-nodes' lists  (settings: $($script:PROXY_CONF))" }
     else     { Write-Host "[..]  Server        : $($script:SSH_HOST)  (settings: $($script:PROXY_CONF))" }
@@ -1940,6 +2172,9 @@ function proxy-doctor {
         }
     }
 
+    # --- kill switch ---
+    Write-KillswitchReport
+
     # --- end-to-end: reach the API through the proxy ---
     if ($httpPids) {
         $code = curl.exe -s --max-time 8 -o NUL -w "%{http_code}" -x "http://127.0.0.1:$($script:HTTP_PORT)" https://api.anthropic.com/ 2>$null
@@ -2017,6 +2252,8 @@ function proxy-config {
             $v = if ($Value -match '^\d+$') { [int]$Value } else { $Value }
             Set-Variable -Name $k -Value $v -Scope Script
             _conf-write-all
+            if ($k -in @('HTTP_PORT','KILLSWITCH','SYNC_SETTINGS')) { $m = Confirm-KillswitchPin; if ($m) { Write-Host $m -ForegroundColor Yellow } }
+            if ($k -eq 'PLAIN_COMMANDS') { Set-PlainCommands }
             Write-Host "[OK] $k = $v saved to $($script:PROXY_CONF) and applied in this window." -ForegroundColor Green
         }
         default { Write-Host "usage: proxy-config [show|edit|set KEY VALUE|path]" -ForegroundColor Yellow }
@@ -2596,7 +2833,8 @@ function cc-help {
     Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray
     Write-Host "  tunnel-stop     - Stop the SSH tunnel" -ForegroundColor DarkGray
     Write-Host "  proxy-on        - Set proxy env vars + sync Claude settings.json" -ForegroundColor DarkGray
-    Write-Host "  proxy-off       - Clear proxy env vars + unsync Claude settings.json" -ForegroundColor DarkGray
+    Write-Host "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)" -ForegroundColor DarkGray
+    Write-Host "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)" -ForegroundColor DarkGray
     Write-Host "                    chrome-proxy [node] [-Profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com" -ForegroundColor DarkGray
@@ -2610,6 +2848,11 @@ if ($RecoveryWorker) {
     Invoke-RecoveryWorker $RecoveryDescriptor
     return
 }
+
+# Kill switch: make sure Claude's settings point at the tunnel (also protects IDE
+# launches that never run cc); silent when nothing changes. Then plain commands.
+try { $ksMsg = Confirm-KillswitchPin; if ($ksMsg) { Write-Host $ksMsg -ForegroundColor Yellow } } catch { }
+Set-PlainCommands
 
 # One line when a new window loads this profile. Silence it with BANNER = 0 in
 # ~\.claude-proxy.conf.psd1.

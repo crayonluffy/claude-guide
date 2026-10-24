@@ -86,6 +86,9 @@ function proxy-on {$env:HTTPS_PROXY='http://127.0.0.1:8080'}
 $script:AppCalls=0; $script:TestKind='proxy'; $script:TUNNEL_WATCHDOG=0
 function Test-RecoveryTransport {return @{kind=$script:TestKind}}
 function claude {$script:AppCalls++;$script:AppArgs=@($args);$global:LASTEXITCODE=17}
+# cc runs the program Get-AppCommand finds (never a plain-command function); here: the mock.
+function Get-AppCommand {param($Name) Get-Command $Name -CommandType Function}
+function Test-KillswitchLaunch {param($HttpPort,$SocksPort) $true}   # covered by tests/proxy-killswitch.ps1
 cc --no-verify --safe 'hello world'
 Assert ($script:AppCalls -eq 0) 'NoVerify bypassed mandatory preflight'
 $script:TestKind='healthy'

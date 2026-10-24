@@ -70,6 +70,7 @@ try {
 
  # 5) proxy-up wakes an idle owner and waits for health; a dead tunnel still refuses.
  function tunnel-start {}
+ function Test-KillswitchLaunch {param($HttpPort,$SocksPort) $true}   # covered by tests/proxy-killswitch.ps1
  function proxy-on {}
  function proxy-node {param($n) $true}
  function Get-TunnelHealth {@{Status='ok'}}
