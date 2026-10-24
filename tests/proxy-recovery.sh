@@ -20,6 +20,7 @@ assert test "$(field "$s" 9)" = restored
 s=$(_recovery_step "$s" 'healthy|0|200|500|ok' 1 60)
 assert test "$(field "$s" 3)" = 75
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+export XDG_STATE_HOME="$scratch/state"   # never the real recovery state
 curl() {
  printf '%s\n' "$*" >> "$scratch/args"
  case "$*" in *--socks5-hostname*) printf '000 200'; return 0;; esac

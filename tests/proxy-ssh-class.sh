@@ -7,6 +7,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}")"
 assert() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+export XDG_STATE_HOME="$scratch/state"   # never the real recovery state
 
 # 1) Classifier table.
 check() {  # <expected class> <stderr text>
