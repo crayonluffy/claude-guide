@@ -57,6 +57,7 @@ $script:CONF_KEYS=@('HTTP_PORT','SOCKS_PORT','WATCHDOG_INTERVAL','WATCHDOG_FAILS
 Write-RecoveryStatus $ownerDir descriptor @{HTTP_PORT=8080;SOCKS_PORT=1080;WATCHDOG_INTERVAL=0;WATCHDOG_FAILS=2;WATCHDOG_NOTICE_AFTER=60;WATCHDOG_MAX_BACKOFF=30}
 function Test-RecoveryPortConflict {return $false}
 $script:DESKTOP_NOTIFICATIONS='off'
+$script:WATCHDOG_IDLE_INTERVAL=0   # an idle owner would otherwise wait 60s per healthy pass
 $script:SshStarts=0; $script:ProbeCalls=0
 function Start-RecoverySsh {
  $script:SshStarts++
