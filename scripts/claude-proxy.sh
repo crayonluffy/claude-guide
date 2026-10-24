@@ -407,6 +407,19 @@ _recovery_signal_owned() {
     [ -n "$2" ] && [ "$actual" = "$2" ] || return 1
     kill -TERM "$1" 2>/dev/null
 }
+# Stop the owner's own ssh without ever blocking on it: a stopped or wedged ssh
+# leaves SIGTERM pending, and 'wait' on it would hang the owner - and recovery for
+# every terminal. TERM, then KILL after 5s. A zombie (exited, not yet reaped) is gone.
+_recovery_stop_ssh() {  # <pid> <start identity>
+    local i=0
+    _recovery_signal_owned "$1" "$2" || return 0
+    while [ "$(_recovery_process_identity "$1" 2>/dev/null)" = "$2" ] && [ "$i" -lt 50 ]; do
+        case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) break;; esac
+        sleep .1; i=$((i+1))
+    done
+    if [ "$i" -ge 50 ]; then kill -KILL "$1" 2>/dev/null || :; fi
+    wait "$1" 2>/dev/null || :
+}
 _recovery_retry_record() { printf '%s\n' "$1" | awk -F'|' -v OFS='|' -v n="$2" -v t="$3" '{$5=n;$6=t;print}'; }
 _recovery_root() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery"; }
 # One owner per user and slot. The slot is 'main' (the default node on the main
@@ -548,7 +561,7 @@ _recovery_worker() {
     _recovery_claim "$dir" "$me" || return 0
     _recovery_record_write "$dir"
     trap '' HUP
-    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; rm -f "$dir/ssh.status" "$dir/takeover"; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    trap '_recovery_stop_ssh "$spid" "$stamp"; rm -f "$dir/ssh.status" "$dir/takeover"; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     desktop_backend=$(_recovery_desktop_backend)
     [ "$desktop_backend" != off ] || desktop_result=off
@@ -633,8 +646,7 @@ _recovery_worker() {
         _recovery_write "$dir/desktop.status" "$desktop_backend|$desktop_result|$desktop_event|$now" "$me"
         if [ "$all_tunnel" -eq 1 ]; then fails=$((fails+1)); else fails=0; fi
         if [ "$fails" -ge "${CLAUDE_WATCHDOG_FAILS:-2}" ]; then
-            _recovery_signal_owned "$spid" "$stamp" || :
-            wait "$spid" 2>/dev/null || :; spid=''; stamp=''; fails=0
+            _recovery_stop_ssh "$spid" "$stamp"; spid=''; stamp=''; fails=0
         fi
         # Nobody to protect and nothing to heal: probe rarely (Chrome may still use it).
         if [ "$all_healthy" -eq 1 ] && [ "$(_recovery_sessions "$dir")" -eq 0 ]; then
@@ -643,8 +655,7 @@ _recovery_worker() {
             _wd_sleep "${CLAUDE_WATCHDOG_INTERVAL:-5}"
         fi
     done
-    _recovery_signal_owned "$spid" "$stamp" || :
-    wait "$spid" 2>/dev/null || :
+    _recovery_stop_ssh "$spid" "$stamp"
     rm -f "$dir/ssh.status" "$dir/takeover"
     _recovery_release "$dir" "$me"
 }
