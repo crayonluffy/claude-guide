@@ -141,8 +141,21 @@ _CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_POR
 # ============================================================
 
 # PIDs listening on a TCP port, one per line (empty if none).
+# Minimal Linux images ship without lsof; ss -p names the same processes (our own).
 _listeners() {
-    lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null
+    if command -v lsof >/dev/null 2>&1; then lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null; return 0; fi
+    ss -ltnp 2>/dev/null | awk -v port="$1" 'NR > 1 && $4 ~ ("[:.]" port "$")' \
+        | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+}
+
+# TCP ports a PID listens on, one per line.
+_pid_listen_ports() {
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -aPn -p "$1" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u
+        return 0
+    fi
+    # "pid=12," never matches pid=123.
+    ss -ltnp 2>/dev/null | awk -v pid="pid=$1," 'NR > 1 && index($0, pid) { n = split($4, a, ":"); print a[n] }' | sort -u
 }
 
 # Is ANYONE listening on this TCP port - including another user?
@@ -218,9 +231,7 @@ _tunnel_health() {
         pid=$socks_pids
         name=$(_proc_name "$pid")
         if _is_ssh_name "$name"; then
-            other=$(lsof -aPn -p "$pid" -iTCP -sTCP:LISTEN -Fn 2>/dev/null \
-                    | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u \
-                    | grep -vx "$CLAUDE_SOCKS_PORT")
+            other=$(_pid_listen_ports "$pid" | grep -vx "$CLAUDE_SOCKS_PORT")
             if [ "$(_count "$other")" -eq 1 ]; then
                 echo "ok $pid $name $other"
             elif printf '%s\n' "$other" | grep -qx "$CLAUDE_HTTP_PORT"; then
@@ -2064,8 +2075,10 @@ proxy-doctor() {
     fi
     if command -v lsof >/dev/null 2>&1; then
         echo "$ok  lsof installed"
+    elif command -v ss >/dev/null 2>&1; then
+        echo "$ok  lsof not installed - using ss to see which program holds a port"
     else
-        echo "$bad lsof NOT installed - status/teardown can't see ports. Fix: sudo apt install lsof"
+        echo "$bad lsof and ss NOT installed - status/teardown can't see ports. Fix: sudo apt install lsof"
     fi
     if command -v jq >/dev/null 2>&1; then
         echo "$ok  jq installed ($(jq --version)) - settings.json sync available"
