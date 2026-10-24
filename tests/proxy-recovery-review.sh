@@ -3,6 +3,7 @@ set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
 eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}")"
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+export XDG_STATE_HOME="$scratch/state"   # never the real recovery state
 mkdir -p "$scratch/empty/lock"
 _recovery_claim "$scratch/empty" "$$" || { echo 'FAIL: abandoned empty lock blocks startup';exit 1; }
 # Simulate a concurrent replacement after an observer saw the stale owner.
