@@ -212,12 +212,14 @@ function Resolve-RecoveryProfile {
     if (-not $Path -or -not [IO.File]::Exists($Path)) { throw 'Recovery profile file is missing; reload the installed profile.' }
     return [IO.Path]::GetFullPath($Path)
 }
+function Get-RecoveryRoot { return (Join-Path $HOME '.claude-proxy/recovery') }
+# One owner per user and slot. The slot is 'main' (the default node on the main
+# ports). It must NOT depend on host or ports: a window with stale settings
+# would otherwise get its own owner and fight the live one for the same ports.
 function Get-RecoveryIdentity {
-    $root = Join-Path $HOME '.claude-proxy/recovery'
-    $text = @($script:SSH_USER,$script:SSH_HOST,$script:SSH_PORT,$script:HTTP_PORT,$script:SOCKS_PORT,$script:REMOTE_PROXY_PORT) -join '|'
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $key = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
-    $dir = Join-Path $root $key
+    param([string]$Slot='main')
+    $root = Get-RecoveryRoot
+    $dir = Join-Path $root $Slot
     if (-not (Test-Path $dir)) {
         [IO.Directory]::CreateDirectory($dir) | Out-Null
         if ($env:OS -eq 'Windows_NT') {
@@ -227,6 +229,28 @@ function Get-RecoveryIdentity {
         } else { & chmod 700 $root $dir }
     }
     return $dir
+}
+# A window whose settings are stale (old conf, fallback port, another node) must
+# use the tunnel that is actually running. The live owner's descriptor is that
+# record: written once by whoever started it, read as data. Adopts only while
+# the owner is live; otherwise changes nothing.
+function Use-RecoveryRecord {
+    param([string]$Identity)
+    # Read-only: never creates the state directory just to look.
+    if (-not $Identity) { $Identity=Join-Path (Get-RecoveryRoot) 'main' }
+    if (-not (Test-Path -LiteralPath $Identity) -or -not (Test-RecoveryOwner $Identity)) { return $false }
+    try { $rec=[IO.File]::ReadAllText((Join-Path $Identity 'descriptor.json')) | ConvertFrom-Json -ErrorAction Stop } catch { return $false }
+    foreach ($k in @('SSH_HOST','SSH_USER','SSH_PORT','SSH_KEY','HTTP_PORT','SOCKS_PORT','REMOTE_PROXY_PORT')) {
+        if ($null -ne $rec.$k) { Set-Variable -Scope Script -Name $k -Value $rec.$k }
+    }
+    return $true
+}
+# Live owners in every state directory: this slot, and any left by 2.7, which
+# keyed the directory by a hash of host and ports.
+function Get-RecoveryOwnedDirs {
+    $root=Get-RecoveryRoot
+    if (-not (Test-Path $root)) { return @() }
+    return @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName } | Where-Object { Test-RecoveryOwner $_ })
 }
 function Open-RecoveryLock {
     param([string]$Identity)
@@ -416,6 +440,7 @@ function Invoke-RecoveryWorker {
     }
 }
 function proxy-restart {
+    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
     $identity=Get-RecoveryIdentity
     if (Test-RecoveryOwner $identity) { Stop-RecoveryOwner $identity }
     elseif (-not (tunnel-stop)) { throw 'Previous tunnel could not be stopped; restart was not started.' }
@@ -532,6 +557,7 @@ function Stop-RecoveryDesktopContext {
 function proxy-notify {
     param([string]$Action='status')
     if ($Action -notin @('status','test') -or $args.Count) {throw 'usage: proxy-notify [status|test]'}
+    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
     $ctx=New-RecoveryDesktopContext
     try {
         $available=Get-RecoveryDesktopStatus $ctx
@@ -1195,7 +1221,7 @@ function proxy-node {
 # ============================================================
 
 function tunnel-start {
-    if (Test-RecoveryOwner (Get-RecoveryIdentity)) {
+    if (Use-RecoveryRecord) {
         Write-Host '[Recovery] Shared owner running; retaining the established ports.'
         return
     }
@@ -1342,6 +1368,7 @@ function proxy-up {
     if ($o.NoVerify) { $NoVerify = $true }
     if ($o.Node) { $Node = $o.Node }
     if ($o.App.Count) { Write-Host "[Err] Unknown argument(s): $($o.App -join ' ')   usage: proxy-up [-NoVerify] [-Node <name>]" -ForegroundColor Red; return $false }
+    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
 
     # Step 0: -Node sg  ==  proxy-node sg first (persists, like running it yourself).
     if ($Node) { if (-not (proxy-node $Node)) { return $false } }
@@ -1492,8 +1519,14 @@ function cx-safe { cx -Safe @args }
 # ============================================================
 
 function tunnel-stop {
-    $identity=Get-RecoveryIdentity
-    if (Test-RecoveryOwner $identity) { Stop-RecoveryOwner $identity; return $true }
+    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
+    # The owner goes first, or it would just start ssh again (it takes its ssh with it).
+    $owned=Get-RecoveryOwnedDirs
+    if ($owned.Count) {
+        foreach ($d in $owned) { Stop-RecoveryOwner $d }
+        Write-Host '[OK] Recovery stopped; proxy settings remain enabled until proxy-off.' -ForegroundColor Green
+        return $true
+    }
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
@@ -1563,6 +1596,7 @@ function cc-stop {
 # ============================================================
 
 function proxy-status {
+    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
     proxy-notify status
     $identity=Get-RecoveryIdentity
     Write-Host "[Recovery] State: $identity"
