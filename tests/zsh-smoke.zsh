@@ -70,3 +70,8 @@ _recovery_worker "$wdir" > "$scratch/worker.log"
 [[ $(cut -d'|' -f1 "$scratch/status") == auth ]] || fail "status: $(cat "$scratch/status" 2>/dev/null)"
 grep -q 'SSH login to jp was refused' "$scratch/worker.log" || fail "worker log: $(cat "$scratch/worker.log")"
 print 'PASS: zsh - worker classifies a refused login and backs off'
+
+# Kill switch: NO_PROXY matcher (word splitting of the host list differs in zsh).
+[[ $(_noproxy_exempts '*.com,localhost' | wc -l | tr -d ' ') == 5 ]] || fail "noproxy *.com: $(_noproxy_exempts '*.com,localhost')"
+[[ -z $(_noproxy_exempts 'localhost,*.local') ]] || fail 'noproxy safe list flagged'
+print 'PASS: zsh - NO_PROXY exemption matcher'

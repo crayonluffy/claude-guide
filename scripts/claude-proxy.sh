@@ -956,6 +956,28 @@ _ensure_ssh_agent() {
     fi
 }
 
+# Hosts Claude and Codex talk to. A NO_PROXY entry matching any of them would
+# send that traffic DIRECT, from the user's real IP (telemetry included).
+_CLAUDE_API_HOSTS="api.anthropic.com claude.ai statsig.anthropic.com api.openai.com chatgpt.com auth.openai.com"
+
+# API hosts a NO_PROXY list exempts, one per line (nothing when it is safe).
+# Same rules as curl and Node's proxy-from-env: '*' is everything; an entry
+# matches the host itself and its subdomains; a leading '*' or '.' and a ':port'
+# are ignored; IP ranges never match a host name.
+_noproxy_exempts() {  # <NO_PROXY list>
+    local list h e
+    list=$(printf '%s' "$1" | tr 'A-Z,' 'a-z\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/:[0-9]*$//')
+    for h in $(echo "$_CLAUDE_API_HOSTS"); do   # zsh does not split a bare $var
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
+            if [ "$e" = '*' ]; then echo "$h"; break; fi
+            e=${e#\*}; e=${e#.}
+            [ -n "$e" ] || continue
+            case "$h" in "$e"|*".$e") echo "$h"; break;; esac
+        done <<< "$list"
+    done
+}
+
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
 _settings_file_proxy_on() {  # <settings.json>
     local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
