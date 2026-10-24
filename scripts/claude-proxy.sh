@@ -1827,6 +1827,57 @@ proxy-off() {
     fi
 }
 
+# Kill switch: show it, or switch it (saved to the conf file).
+proxy-killswitch() {
+    local action="${1:-status}" running=0 f state hosts
+    case "$action" in
+        status) ;;
+        on|off)
+            # Decide before the reload, which re-reads every function and setting.
+            _watchdog_pid >/dev/null 2>&1 && running=1
+            _conf_set CLAUDE_KILLSWITCH "$action"
+            _conf_reload
+            if [ "$action" = on ]; then
+                _killswitch_ensure_pin >/dev/null
+                echo "[OK] Kill switch ON - Claude and Codex cannot go out directly. Saved to $CLAUDE_PROXY_CONF"
+            elif [ "$running" -eq 1 ]; then
+                echo "[OK] Kill switch OFF. A tunnel is running, so Claude keeps the proxy until 'proxy-off' / 'cc-stop'."
+            else
+                _claude_settings_proxy_off >/dev/null
+                echo "[OK] Kill switch OFF - with no tunnel, plain 'claude' now goes out directly (from your own IP)."
+            fi
+            return 0 ;;
+        *) echo 'usage: proxy-killswitch [status|on|off]'; return 2 ;;
+    esac
+
+    if _killswitch_on; then echo "=== Kill switch: ON ==="; else echo "=== Kill switch: OFF (pre-2.9 behaviour) - 'proxy-killswitch on' ==="; fi
+    if [ "${CLAUDE_SYNC_SETTINGS:-0}" != 1 ]; then
+        echo "[!!]  Claude : settings.json is not managed (SYNC_SETTINGS=0) - only cc-launched Claude is protected. Fix: proxy-config set SYNC_SETTINGS 1"
+    elif ! command -v jq >/dev/null 2>&1; then
+        echo "[!!]  Claude : jq is missing, so settings.json cannot be pinned - only cc-launched Claude is protected. Fix: install jq"
+    else
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if _settings_file_pinned "$f"; then
+                echo "[ON]  Claude : pinned to 127.0.0.1:$CLAUDE_HTTP_PORT ($f) - plain 'claude' and IDEs use the tunnel or fail"
+            elif _killswitch_on; then
+                echo "[!!]  Claude : $f does not point at the tunnel - run 'proxy-killswitch on' to fix it"
+            else
+                echo "[OFF] Claude : not pinned ($f) - plain 'claude' goes direct while no tunnel is up"
+            fi
+        done <<< "$(_settings_targets 2>/dev/null)"
+    fi
+    if [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ]; then
+        echo "[ON]  Codex  : protected when started with cx and as plain 'codex'"
+    else
+        echo "[..]  Codex  : protected when started with cx; plain 'codex' reads only your shell and may go direct (proxy-config set PLAIN_COMMANDS auto)"
+    fi
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ')
+    if [ -z "$hosts" ]; then echo "[OK]  NO_PROXY : no API host is exempted"
+    else echo "[!!]  NO_PROXY : would send $hosts DIRECT - remove those entries (proxy-config edit)"; fi
+    echo "      Not covered: the Claude Desktop app, browsers and other apps (chrome-proxy has its own fail-closed rules)."
+}
+
 # --- Confirm the external IP really is the proxy's (VM's), not the client's ---
 _verify_proxy_ip() {
     echo "[Check] Verifying the external IP is the proxy's..."
@@ -2969,6 +3020,7 @@ cc-help() {
     echo "  tunnel-stop     - Stop the SSH tunnel"
     echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
     echo "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)"
+    echo "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly"
     echo ""
     echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
     echo "                    chrome-proxy [node] [--profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com"

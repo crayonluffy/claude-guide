@@ -114,3 +114,40 @@ echo 'PASS: WSL pins the Windows-side Claude settings too'
     assert test "$(pin HTTPS_PROXY)" = http://127.0.0.1:8090
 )
 echo 'PASS: loading the profile pins Claude; changing HTTP_PORT re-pins'
+
+# 3) proxy-killswitch status | on | off  (whole profile, isolated HOME/conf/settings)
+ks() {  # <conf lines> <commands...>: run in a fresh isolated shell
+    local conf="$1"; shift
+    (
+        export HOME="$scratch/ks-home" XDG_STATE_HOME="$scratch/ks-state" CLAUDE_PROXY_CONF="$scratch/ks.conf" CLAUDE_PROXY_BANNER=0
+        export CLAUDE_SETTINGS="$scratch/ks-settings.json"
+        mkdir -p "$HOME"; printf '%s\n' "$conf" > "$CLAUDE_PROXY_CONF"
+        set +eu; . "$src" >/dev/null 2>&1
+        _watchdog_pid() { [ -n "${KS_TUNNEL:-}" ] && echo 4242; }
+        eval "$*"
+    )
+}
+rm -f "$scratch/ks-settings.json"
+out=$(ks '' 'proxy-killswitch status')
+case "$out" in *'Kill switch: ON'*'pinned to 127.0.0.1:8080'*) ;; *) echo "FAIL: status on: $out" >&2; exit 1;; esac
+case "$out" in *'NO_PROXY'*'no API host'*) ;; *) echo "FAIL: status lacks NO_PROXY check: $out" >&2; exit 1;; esac
+case "$out" in *"plain 'codex'"*) ;; *) echo "FAIL: status lacks the codex limit: $out" >&2; exit 1;; esac
+case "$out" in *'Claude Desktop'*) ;; *) echo "FAIL: status lacks the limits: $out" >&2; exit 1;; esac
+out=$(ks 'CLAUDE_NO_PROXY="localhost,*.com"' 'proxy-killswitch status')
+case "$out" in *'api.anthropic.com'*) ;; *) echo "FAIL: leaky NO_PROXY not shown: $out" >&2; exit 1;; esac
+echo 'PASS: proxy-killswitch status shows the pin, NO_PROXY and the limits'
+
+# off with no tunnel running: unpinned now. off while a tunnel runs: kept until proxy-off.
+ks '' 'proxy-killswitch off' >/dev/null
+assert grep -q '^CLAUDE_KILLSWITCH="off"' "$scratch/ks.conf"
+assert test -z "$(jq -r '.env.HTTPS_PROXY // empty' "$scratch/ks-settings.json")"
+ks '' 'proxy-killswitch on' >/dev/null
+assert grep -q '^CLAUDE_KILLSWITCH="on"' "$scratch/ks.conf"
+assert test "$(jq -r .env.HTTPS_PROXY "$scratch/ks-settings.json")" = http://127.0.0.1:8080
+KS_TUNNEL=1 ks '' 'proxy-killswitch off' > "$scratch/ks-off.out"
+assert test "$(jq -r .env.HTTPS_PROXY "$scratch/ks-settings.json")" = http://127.0.0.1:8080
+assert grep -q 'proxy-off' "$scratch/ks-off.out"
+out=$(ks 'CLAUDE_KILLSWITCH=off' 'proxy-killswitch status')
+case "$out" in *'Kill switch: OFF'*) ;; *) echo "FAIL: status off: $out" >&2; exit 1;; esac
+if ks '' 'proxy-killswitch sideways' >/dev/null 2>&1; then echo 'FAIL: bad argument accepted' >&2; exit 1; fi
+echo 'PASS: proxy-killswitch on/off saves the setting and pins/unpins safely'
