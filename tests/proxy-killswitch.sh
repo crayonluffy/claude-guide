@@ -151,3 +151,71 @@ out=$(ks 'CLAUDE_KILLSWITCH=off' 'proxy-killswitch status')
 case "$out" in *'Kill switch: OFF'*) ;; *) echo "FAIL: status off: $out" >&2; exit 1;; esac
 if ks '' 'proxy-killswitch sideways' >/dev/null 2>&1; then echo 'FAIL: bad argument accepted' >&2; exit 1; fi
 echo 'PASS: proxy-killswitch on/off saves the setting and pins/unpins safely'
+
+# 4) Pre-launch leak checks and no silent port fallback.
+eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$src")"
+fn _killswitch_check proxy-up tunnel-start
+export XDG_STATE_HOME="$scratch/state4"
+dir=$(_recovery_identity)
+CLAUDE_KILLSWITCH=on CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_NO_PROXY='localhost,127.0.0.1'
+printf '{}\n' > "$CLAUDE_SETTINGS"; _killswitch_ensure_pin >/dev/null
+# "Our" ssh is this shell: the owner published its PID and start identity.
+printf '%s|%s\n' "$$" "$(_recovery_process_identity $$)" > "$dir/ssh.pid"
+_listeners() { case "$1" in 8080|1080) echo "$$";; esac; }
+_proc_name() { case "$1" in 777) echo clash;; *) echo ssh;; esac; }
+_port_bound() { [ -n "$(_listeners "$1")" ]; }
+refuses() {  # <expected text> : _killswitch_check must refuse and say it
+    local out
+    if out=$(_killswitch_check 8080 1080 2>&1); then echo "FAIL: not refused (expected: $1)" >&2; exit 1; fi
+    case "$out" in *"$1"*) ;; *) echo "FAIL: refusal lacks '$1': $out" >&2; exit 1;; esac
+}
+assert test -z "$(_killswitch_check 8080 1080)"
+CLAUDE_NO_PROXY='localhost,.anthropic.com'; refuses 'api.anthropic.com'; CLAUDE_NO_PROXY='localhost,127.0.0.1'
+_listeners() { case "$1" in 8080) echo 777;; 1080) echo "$$";; esac; }
+refuses 'clash (PID 777) is on proxy port 8080'
+refuses 'proxy-config set HTTP_PORT'
+_listeners() { case "$1" in 8080) echo "$$";; esac; }
+_port_bound() { [ "$1" = 1080 ] || [ -n "$(_listeners "$1")" ]; }
+refuses "another user's program is on proxy port 1080"
+_port_bound() { [ -n "$(_listeners "$1")" ]; }
+_listeners() { case "$1" in 8080|1080) echo "$$";; esac; }
+printf '%s|%s\n' "$$" 'stale-start' > "$dir/ssh.pid"     # a reused PID is not our ssh
+refuses 'is on proxy port 8080'
+printf '%s|%s\n' "$$" "$(_recovery_process_identity $$)" > "$dir/ssh.pid"
+printf 'not json' > "$CLAUDE_SETTINGS"
+refuses "Claude's settings"
+printf '{}\n' > "$CLAUDE_SETTINGS"; _killswitch_ensure_pin >/dev/null
+CLAUDE_KILLSWITCH=off; CLAUDE_NO_PROXY='*'
+assert test -z "$(_killswitch_check 8080 1080)"
+CLAUDE_KILLSWITCH=on; CLAUDE_NO_PROXY='localhost,127.0.0.1'
+echo 'PASS: cc/cx refuse on a leaky NO_PROXY, a foreign port holder, or an unpinnable Claude'
+
+# proxy-up refuses before setting anything; on success the pin follows the live port.
+_recovery_adopt() { :; }; tunnel-start() { :; }; _tunnel_health() { echo "ok $$ ssh 8080"; }
+_recovery_probe() { echo 'healthy|0|200|404|healthy'; }
+proxy-on() { echo on >> "$scratch/proxy-on"; }
+_listeners() { case "$1" in 8080) echo 777;; 1080) echo "$$";; esac; }
+if proxy-up --no-verify > "$scratch/up.out" 2>&1; then echo 'FAIL: proxy-up launched with a foreign port holder' >&2; exit 1; fi
+assert test ! -e "$scratch/proxy-on"
+_listeners() { case "$1" in 8080|1080) echo "$$";; esac; }
+proxy-up --no-verify > "$scratch/up.out" 2>&1
+assert test -e "$scratch/proxy-on"
+echo 'PASS: proxy-up refuses before setting anything, and launches when clean'
+
+# tunnel-start: with the kill switch on, a foreign program is never "fallen back" around.
+fn tunnel-start
+_watchdog_pid() { return 1; }
+_find_free_port() { echo "$1" >> "$scratch/fallback"; echo 8081; }
+_tunnel_health() { echo 'foreign 99 nginx'; }
+_listeners() { case "$1" in 8080) echo 99;; esac; }
+if tunnel-start > "$scratch/ts.out" 2>&1; then echo 'FAIL: tunnel-start fell back' >&2; exit 1; fi
+assert grep -q 'nginx (PID 99)' "$scratch/ts.out"
+assert grep -q 'proxy-config set HTTP_PORT' "$scratch/ts.out"
+assert test ! -e "$scratch/fallback"
+_tunnel_health() { echo down; }
+_listeners() { case "$1" in 1080) echo 99;; esac; }
+_port_in_use() { [ "$1" = 1080 ]; }
+if tunnel-start > "$scratch/ts2.out" 2>&1; then echo 'FAIL: tunnel-start fell back on SOCKS' >&2; exit 1; fi
+assert grep -q 'proxy-config set SOCKS_PORT' "$scratch/ts2.out"
+assert test ! -e "$scratch/fallback"
+echo 'PASS: tunnel-start refuses a foreign port holder instead of moving the port'

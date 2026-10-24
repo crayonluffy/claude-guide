@@ -89,6 +89,7 @@ assert declare -F _recovery_subscribe
 echo 'PASS: Bash subscriber interface'
 # Load real launch integration without profile initialization.
 eval "$(sed -n '/^proxy-up() {/,/^cc-stop() {/p' "$repo/scripts/claude-proxy.sh" | sed '$d')"
+_killswitch_check() { :; }   # covered by tests/proxy-killswitch.sh
 tunnel-start() { :; }
 _tunnel_health() { echo 'ok 123 ssh 8080'; }
 proxy-on() { export HTTPS_PROXY=http://127.0.0.1:8080; }

@@ -569,7 +569,7 @@ _recovery_worker() {
     _recovery_claim "$dir" "$me" || return 0
     _recovery_record_write "$dir"
     trap '' HUP
-    trap '_recovery_stop_ssh "$spid" "$stamp"; rm -f "$dir/ssh.status" "$dir/takeover"; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    trap '_recovery_stop_ssh "$spid" "$stamp"; rm -f "$dir/ssh.status" "$dir/takeover" "$dir/ssh.pid"; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     desktop_backend=$(_recovery_desktop_backend)
     [ "$desktop_backend" != off ] || desktop_result=off
@@ -600,6 +600,8 @@ _recovery_worker() {
                 ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" 2>"$dir/ssh.err" & spid=$!
                 classified=0
                 stamp=$(_recovery_process_identity "$spid") || stamp=''; sshat=$now
+                # Published so launch checks can tell our ssh from anything else on the port.
+                _recovery_write "$dir/ssh.pid" "$spid|$stamp" "$me"
                 retries=$((retries+1)); next=$((now+delay))
                 delay=$((delay*2)); [ "$delay" -le "${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}" ] || delay=${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}
             fi
@@ -664,7 +666,7 @@ _recovery_worker() {
         fi
     done
     _recovery_stop_ssh "$spid" "$stamp"
-    rm -f "$dir/ssh.status" "$dir/takeover"
+    rm -f "$dir/ssh.status" "$dir/takeover" "$dir/ssh.pid"
     _recovery_release "$dir" "$me"
 }
 # Live cc/cx sessions on a slot. Each subscriber is one session; its entry holds
@@ -1668,6 +1670,12 @@ tunnel-start() {
             tunnel-stop
             ;;
         foreign)
+            if _killswitch_on; then
+                # A moved port would no longer match Claude's pinned settings: refuse instead.
+                echo "[Err] $hname (PID $hpid) is on proxy port $CLAUDE_HTTP_PORT. With the kill switch on the tunnel does not move silently."
+                echo "      Fix: close that program, or move the tunnel for good: proxy-config set HTTP_PORT $((CLAUDE_HTTP_PORT+10))"
+                return 1
+            fi
             echo "[Info] Port $CLAUDE_HTTP_PORT is used by '$hname' (PID $hpid) - that's another app, leaving it alone."
             if ! newp=$(_find_free_port $((CLAUDE_HTTP_PORT+1))); then
                 echo "[Err] No free port found in $((CLAUDE_HTTP_PORT+1))-$((CLAUDE_HTTP_PORT+20)) - free one up or change CLAUDE_HTTP_PORT (proxy-config edit)."
@@ -1684,6 +1692,11 @@ tunnel-start() {
         local spid sname snew
         spid=$(_listeners "$CLAUDE_SOCKS_PORT" | head -1)
         sname=$(_proc_name "$spid")
+        if _killswitch_on; then
+            echo "[Err] ${sname:-another program} (PID ${spid:-?}) is on SOCKS port $CLAUDE_SOCKS_PORT. With the kill switch on the tunnel does not move silently."
+            echo "      Fix: close that program, or move the tunnel for good: proxy-config set SOCKS_PORT $((CLAUDE_SOCKS_PORT+10))"
+            return 1
+        fi
         if ! snew=$(_find_free_port $((CLAUDE_SOCKS_PORT+1))); then
             echo "[Err] SOCKS port $CLAUDE_SOCKS_PORT is used by '$sname' and no free port found nearby."
             return 1
@@ -1827,6 +1840,46 @@ proxy-off() {
     fi
 }
 
+# Kill switch: everything that would let Claude/Codex traffic leak, checked right
+# before launch. Prints one reason and one fix and fails; silent when all is well.
+_killswitch_check() {  # <http port> <socks port>
+    _killswitch_on || return 0
+    local http="$1" socks="$2" hosts dir own='' spid sstamp port pid fix state
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
+    if [ -n "$hosts" ]; then
+        echo "[Kill switch] NO_PROXY would send $hosts DIRECT (from your own IP) - not launched."
+        echo "              Fix: remove the matching entries from CLAUDE_NO_PROXY (proxy-config edit)."
+        return 1
+    fi
+    # Our ssh is the one the owner published - checked by start identity, so a reused PID is not it.
+    if dir=$(_recovery_identity 2>/dev/null) && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null \
+       && [ -n "$sstamp" ] && [ "$(_recovery_process_identity "$spid" 2>/dev/null)" = "$sstamp" ]; then own=$spid; fi
+    for port in "$http" "$socks"; do
+        if [ "$port" = "$http" ]; then fix="proxy-config set HTTP_PORT $((http+10))"; else fix="proxy-config set SOCKS_PORT $((socks+10))"; fi
+        for pid in $(_listeners "$port"); do
+            [ "$pid" = "$own" ] && continue
+            echo "[Kill switch] $(_proc_name "$pid" || :) (PID $pid) is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched."
+            echo "              Fix: close that program, or move the tunnel: $fix"
+            return 1
+        done
+        if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            echo "[Kill switch] another user's program is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched."
+            echo "              Fix: move the tunnel: $fix"
+            return 1
+        fi
+    done
+    # Claude reads its settings.json over the shell, so it must name this same port.
+    if [ "$http" = "$CLAUDE_HTTP_PORT" ] && [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] && command -v jq >/dev/null 2>&1; then
+        _killswitch_ensure_pin >/dev/null
+        state=$(_killswitch_pin_state)
+        if [ "$state" != "pinned $http" ]; then
+            echo "[Kill switch] Claude's settings ($CLAUDE_SETTINGS) could not be pointed at the tunnel on port $http ($state) - not launched."
+            echo "              Fix: repair that file (valid JSON), or 'proxy-killswitch off'."
+            return 1
+        fi
+    fi
+}
+
 # Kill switch: show it, or switch it (saved to the conf file).
 proxy-killswitch() {
     local action="${1:-status}" running=0 f state hosts
@@ -1943,6 +1996,7 @@ proxy-up() {
         fi
         sleep 1; waited=$((waited+1))
     done
+    _killswitch_check "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
