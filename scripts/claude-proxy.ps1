@@ -258,7 +258,7 @@ function Open-RecoveryLock {
 }
 function Write-RecoveryStatus {
     param([string]$Identity,[string]$Provider,$State)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh')) { throw 'Invalid recovery record' }
     $dest = Join-Path $Identity "$Provider.json"
     $tmp = "$dest.$([guid]::NewGuid()).tmp"
     try {
@@ -275,7 +275,7 @@ function Write-RecoveryStatus {
 }
 function Get-RecoveryStatus {
     param([string]$Identity,[string]$Provider)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh')) { throw 'Invalid recovery record' }
     try { return ([IO.File]::ReadAllText((Join-Path $Identity "$Provider.json")) | ConvertFrom-Json -ErrorAction Stop) }
     catch { return [pscustomobject]@{ phase='unknown'; generation=-1; event='none' } }
 }
@@ -355,14 +355,40 @@ function Test-RecoveryPortConflict {
     }
     return $false
 }
+# Why an ssh exited, from its own stderr: auth|hostkey|forward|network|unknown.
+# Auth and hostkey failures will not heal by retrying, so the owner waits longer
+# for them; network trouble retries at the normal pace.
+function Get-RecoverySshClass {
+    param([string]$ErrFile)
+    $t=try { [IO.File]::ReadAllText($ErrFile) } catch { '' }
+    if (-not $t.Trim()) { return 'unknown' }
+    if ($t -match 'host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED') { return 'hostkey' }
+    if ($t -match 'permission denied|too many authentication failures|load key|no such identity|bad permissions') { return 'auth' }
+    if ($t -match 'address already in use|cannot listen to port|could not request local forwarding|forwarding failed') { return 'forward' }
+    if ($t -match 'timed out|could not resolve|connection refused|no route to host|network is unreachable|connection closed|connection reset|broken pipe') { return 'network' }
+    return 'unknown'
+}
+function Get-RecoverySshHint {
+    param([string]$Class,[string]$Server)
+    switch ($Class) {
+        auth    { return "SSH login to $Server was refused - load your key (ssh-add <key>) or check the user name, then 'proxy-restart'." }
+        hostkey { return "The host key of $Server changed. If your admin expected that: ssh-keygen -R $Server, then run 'ssh $Server' once." }
+        forward { return "A tunnel port is held by another program - see 'proxy-status'." }
+        network { return "Cannot reach $Server - network down, Wi-Fi changed, or the server is offline. Retrying." }
+        default { return "ssh to $Server exited without a known reason - see $($script:TUNNEL_LOG)" }
+    }
+}
 function Start-RecoverySsh {
+    param([string]$ErrFile=$script:TUNNEL_LOG)
     $dest = if ($script:SSH_USER) { "$($script:SSH_USER)@$($script:SSH_HOST)" } else { $script:SSH_HOST }
     $a = @('-N','-C','-L',"$($script:HTTP_PORT):127.0.0.1:$($script:REMOTE_PROXY_PORT)",'-D',"$($script:SOCKS_PORT)",'-o','BatchMode=yes','-o','ConnectTimeout=15','-o','ServerAliveInterval=15','-o','ServerAliveCountMax=3','-o','ExitOnForwardFailure=yes','-o','StrictHostKeyChecking=accept-new')
     if ($script:SSH_KEY) { $a += @('-i',('"'+$script:SSH_KEY+'"'),'-p',"$($script:SSH_PORT)") }
     $a += $dest
-    $launch = @{FilePath='ssh';ArgumentList=$a;PassThru=$true;RedirectStandardError=$script:TUNNEL_LOG}
+    $launch = @{FilePath='ssh';ArgumentList=$a;PassThru=$true;RedirectStandardError=$ErrFile}
     if ($env:OS -eq 'Windows_NT') { $launch.WindowStyle='Hidden' }
-    return (Start-Process @launch -ErrorAction Stop)
+    $p = Start-Process @launch -ErrorAction Stop
+    $null = $p.Handle   # Windows PowerShell keeps ExitCode only if the handle was opened while running
+    return $p
 }
 function Invoke-RecoveryWorker {
     param([string]$DescriptorPath)
@@ -370,6 +396,7 @@ function Invoke-RecoveryWorker {
     $lease = Open-RecoveryLock $dir
     if (-not $lease) { return }
     $ssh = $null; $started=''; $sshAt=0; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
+    $classified=$true; $lastClass=''; $errFile=Join-Path $dir 'ssh.err'
     try {
         $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
         foreach ($k in $script:CONF_KEYS) { if ($null -ne $cfg.$k) { Set-Variable -Scope Script -Name $k -Value $cfg.$k } }
@@ -385,9 +412,23 @@ function Invoke-RecoveryWorker {
             $now = Get-RecoveryTime
             $ownedId=if ($ssh -and -not $ssh.HasExited) {$ssh.Id}else{0}
             $conflict=Test-RecoveryPortConflict $ownedId
+            if ($ssh -and $ssh.HasExited -and -not $classified) {
+                # The ssh we started has exited: record why before deciding on a retry.
+                $class=Get-RecoverySshClass $errFile
+                $lines=@(try { Get-Content -LiteralPath $errFile -Tail 5 -ErrorAction Stop } catch { })
+                Write-RecoveryStatus $dir ssh @{class=$class;exit=$ssh.ExitCode;at=$now;line="$(if ($lines.Count) { $lines[-1] })"}
+                if ($class -ne $lastClass) {
+                    Add-Content (Join-Path $dir 'events.log') "[ssh] ${class}: $(Get-RecoverySshHint $class $script:SSH_HOST)"
+                    foreach ($l in $lines) { Add-Content (Join-Path $dir 'events.log') "[ssh]   $l" }
+                    $lastClass=$class
+                }
+                $classified=$true
+                if ($class -in @('auth','hostkey')) { $next=$now+$script:WATCHDOG_MAX_BACKOFF }
+            }
             if ((-not $ssh -or $ssh.HasExited) -and $now -ge $next -and -not $conflict) {
                 if ($ssh) { $ssh.Dispose(); $ssh=$null }
-                try { $ssh=Start-RecoverySsh; $started="$($ssh.StartTime.ToUniversalTime().Ticks)"; $sshAt=$now }
+                $classified=$false
+                try { $ssh=Start-RecoverySsh $errFile; $started="$($ssh.StartTime.ToUniversalTime().Ticks)"; $sshAt=$now }
                 catch { $ssh=$null; Add-Content (Join-Path $dir 'events.log') "SSH launch failed: $($_.Exception.Message). Check SSH agent/credentials and TUNNEL_LOG." }
                 $retries++; $next=$now+$delay; $delay=[Math]::Min($script:WATCHDOG_MAX_BACKOFF,$delay*2)
             }
@@ -399,7 +440,7 @@ function Invoke-RecoveryWorker {
                 $sample=if ($conflict) {@{kind='conflict'}}else{Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT}
                 if ($connecting -and $sample.kind -eq 'tunnel') { $allTunnel=$false; continue }
                 if ($sample.kind -ne 'tunnel') { $allTunnel=$false }
-                if ($sample.kind -eq 'healthy') { $delay=2; $retries=0 }
+                if ($sample.kind -eq 'healthy') { $delay=2; $retries=0; $lastClass=''; Remove-Item (Join-Path $dir 'ssh.json') -ErrorAction SilentlyContinue }
                 $r=Get-RecoveryTransition -State $states[$provider] -Sample $sample -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
                 $s=$r.State
                 if ($r.Event -eq 'none') { $s.event=if ($states[$provider]) { $states[$provider].event } else { 'none' } }
@@ -436,6 +477,7 @@ function Invoke-RecoveryWorker {
             $ssh.Dispose()
         }
         Stop-RecoveryDesktopContext $desktop
+        Remove-Item (Join-Path $dir 'ssh.json') -ErrorAction SilentlyContinue
         $lease.Dispose()
     }
 }
@@ -580,25 +622,32 @@ function Start-RecoverySubscriber {
     param([string]$Identity,[string]$Provider)
     $messages=@{}
     foreach ($e in @('lost','prolonged','restored','progress')) { $messages[$e]=Get-RecoveryMessage $e }
+    # Login and host-key failures do not heal by waiting: say so once per change.
+    $hints=@{}
+    foreach ($c in @('auth','hostkey')) { $hints[$c]=Get-RecoverySshHint $c $script:SSH_HOST }
+    $lines=[Collections.ArrayList]::Synchronized([Collections.ArrayList]::new())
     $ps=[PowerShell]::Create()
     [void]$ps.AddScript({
-        param($path,$provider,$messages)
-        $seen=-1
+        param($path,$provider,$messages,$sshPath,$hints,$lines)
+        $seen=-1; $seenSsh=''
+        function Say([string]$Text) { [void]$lines.Add($Text); [Console]::Error.WriteLine("`n[$provider proxy] $Text") }
         while ($true) {
             try {
+                $why=try { ([IO.File]::ReadAllText($sshPath) | ConvertFrom-Json -ErrorAction Stop).class } catch { '' }
+                if ("$why" -ne $seenSsh) { if ($hints.ContainsKey("$why")) { Say $hints["$why"] }; $seenSsh="$why" }
                 $s=[IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
                 if ($s.generation -ne $seen) {
                     if ($seen -ne -1 -or $s.phase -ne 'healthy') {
-                        if ($messages.ContainsKey($s.event)) { [Console]::Error.WriteLine("`n[$provider proxy] $($messages[$s.event])") }
+                        if ($messages.ContainsKey($s.event)) { Say $messages[$s.event] }
                     }
                     $seen=$s.generation
                 }
             } catch { }
             Start-Sleep -Milliseconds 500
         }
-    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages)
+    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages).AddArgument((Join-Path $Identity 'ssh.json')).AddArgument($hints).AddArgument($lines)
     $async=$ps.BeginInvoke()
-    return [pscustomobject]@{PowerShell=$ps;Async=$async}
+    return [pscustomobject]@{PowerShell=$ps;Async=$async;Lines=$lines}
 }
 function Stop-RecoverySubscriber {
     param($Handle)
@@ -1272,8 +1321,20 @@ function tunnel-start {
     Write-Host "[SSH] Starting tunnel to $($script:SSH_HOST)..." -ForegroundColor Cyan
 
     if ($script:TUNNEL_WATCHDOG) {
-        Start-RecoveryOwner | Out-Null
-        for ($i=0; $i -lt 50 -and -not (Test-Port $script:HTTP_PORT); $i++) { Start-Sleep -Milliseconds 100 }
+        $dir = Start-RecoveryOwner
+        for ($i=0; $i -lt 100 -and -not (Test-Port $script:HTTP_PORT); $i++) { Start-Sleep -Milliseconds 100 }
+        if (-not (Test-Port $script:HTTP_PORT)) {
+            # Report first (the owner's ssh.json explains it), then stop the owner
+            # so it does not keep retrying a tunnel that can't start.
+            Write-Host "[Err] SSH tunnel failed to start within 10s." -ForegroundColor Red
+            $why = (Get-RecoveryStatus $dir ssh).class
+            if ($why) { Write-Host "       $(Get-RecoverySshHint $why $script:SSH_HOST)" -ForegroundColor Yellow }
+            Write-Host "       ssh said:" -ForegroundColor DarkGray
+            $err = Join-Path $dir 'ssh.err'
+            if (-not (Test-Path $err)) { $err = $script:TUNNEL_LOG }
+            Get-Content -LiteralPath $err -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "       $_" -ForegroundColor DarkGray }
+            try { Stop-RecoveryOwner $dir 15 } catch { }
+        }
         return
     }
     Write-Warning 'Automatic recovery is disabled.'
