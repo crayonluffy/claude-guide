@@ -1049,7 +1049,8 @@ _claude_settings_proxy_off() {
     for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
 }
 
-_killswitch_on() { [ "${CLAUDE_KILLSWITCH:-on}" = on ]; }
+# Anything but an explicit "off" counts as on: a typo must not open a leak.
+_killswitch_on() { [ "${CLAUDE_KILLSWITCH:-on}" != off ]; }
 
 # What Claude's own settings say: 'pinned <port>' (exactly our proxy),
 # 'mismatch <port>' (a proxy, but not ours), or 'unpinned sync-off|no-jq|missing'.
