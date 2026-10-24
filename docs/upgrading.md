@@ -2,6 +2,30 @@
 
 ## Getting the newest profile (any time)
 
+### 2.9.0 (Windows, macOS, Linux, WSL) — kill switch
+
+Claude and Codex do not connect directly any more. When the tunnel is down,
+they cannot connect.
+
+- **Claude keeps the proxy.** The profile keeps the proxy in Claude's
+  `settings.json`. `proxy-off` and `cc-stop` do not remove it. Plain `claude`
+  and the IDE extensions use the tunnel. If the tunnel is down, they show
+  "connection refused". Start the tunnel with `cc` or `proxy-up`.
+- **`cc` and `cx` examine the setup before they start.** They stop and tell you
+  the fix if `NO_PROXY` sends an API host directly, or if another program uses
+  the proxy port.
+- **The tunnel does not move to a different port.** If another program uses
+  the proxy port, `tunnel-start` stops and tells you the fix.
+- **Optional: plain `claude` and `codex` through the tunnel.** Set
+  `proxy-config set PLAIN_COMMANDS auto`. The setup wizard asks new users.
+- **New command:** `proxy-killswitch` shows the status.
+
+The kill switch is on after the update. To use the behavior before 2.9.0,
+run `proxy-killswitch off`.
+
+Run `proxy-update` and open a new terminal window. Version tags:
+`powershell-v2.9.0` and `bash-v2.9.0`.
+
 ### 2.8.0 (Windows, macOS, Linux, WSL) — one self-healing tunnel, clearer errors
 
 - **One recovery owner per user.** Every terminal joins the same tunnel, even

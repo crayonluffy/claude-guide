@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.8.0"
+CLAUDE_PROXY_VERSION="2.9.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 

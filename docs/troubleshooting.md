@@ -64,6 +64,11 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 | `The host key of <server> changed` | Ask your admin whether the VM was rebuilt. If so: `ssh-keygen -R <server>`, then `ssh <server>` once and answer `yes`. |
 | `Cannot reach <server> ... Retrying` | Network down, Wi-Fi changed, or the VM is off. Nothing to do; sessions stay open and reconnect when it's back. |
 | `Another program (<name>, PID <pid>) took proxy port ...` | While the tunnel was down, `<name>` started listening on the proxy port, so Claude/Codex could be talking to it. Exit the session, close or reconfigure that program (or `proxy-config set HTTP_PORT 8090`), then `cc` again. Nothing was stopped for you. |
+| `[Kill switch] NO_PROXY would send ... DIRECT` | Your `NO_PROXY` setting sends API traffic directly. Remove the entry that the message names (`proxy-config edit`). Then start `cc` again. |
+| `[Kill switch] <program> (PID n) is on proxy port ...` | Another program uses the proxy port. Close that program. Or move the tunnel: `proxy-config set HTTP_PORT 8090`. |
+| `[Kill switch] Claude's settings ... could not be pointed at the tunnel` | Claude's `settings.json` is not valid JSON. Repair the file, or restore the `.bak` copy. |
+| `tunnel-start`: `... With the kill switch on the tunnel does not move silently` | Another program uses the proxy port. Close that program, or use the `proxy-config set` command in the message. |
+| Plain `claude` shows "connection refused" | The kill switch is on and the tunnel is down. Start the tunnel: `cc` or `proxy-up`. To let `claude` connect directly, run `proxy-killswitch off`. |
 | `cc-stop` refuses: `Claude/Codex session(s) are still running` | Another window still has `cc`/`cx` open (an npm-installed Claude shows up as `node`). Close it, use `proxy-restart` to reconnect instead, or `cc-stop -Force`. |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard: answer **n** to "keep these settings" and every prompt comes pre-filled with the current value, so you only retype what's wrong: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 
@@ -79,6 +84,11 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 | `The host key of <server> changed` | Ask your admin whether the VM was rebuilt. If so: `ssh-keygen -R <server>`, then `ssh <server>` once and answer `yes`. |
 | `Cannot reach <server> ... Retrying` | Network down, Wi-Fi changed, or the VM is off. Nothing to do; sessions stay open and reconnect when it's back. |
 | `Another program (<name>, PID <pid>) took proxy port ...` | While the tunnel was down, `<name>` started listening on the proxy port, so Claude/Codex could be talking to it. Exit the session, close or reconfigure that program (or `proxy-config set HTTP_PORT 8090`), then `cc` again. Nothing was stopped for you. |
+| `[Kill switch] NO_PROXY would send ... DIRECT` | Your `NO_PROXY` setting sends API traffic directly. Remove the entry that the message names (`proxy-config edit`). Then start `cc` again. |
+| `[Kill switch] <program> (PID n) is on proxy port ...` | Another program uses the proxy port. Close that program. Or move the tunnel: `proxy-config set HTTP_PORT 8090`. |
+| `[Kill switch] Claude's settings ... could not be pointed at the tunnel` | Claude's `settings.json` is not valid JSON. Repair the file, or restore the `.bak` copy. |
+| `tunnel-start`: `... With the kill switch on the tunnel does not move silently` | Another program uses the proxy port. Close that program, or use the `proxy-config set` command in the message. |
+| Plain `claude` shows "connection refused" | The kill switch is on and the tunnel is down. Start the tunnel: `cc` or `proxy-up`. To let `claude` connect directly, run `proxy-killswitch off`. |
 | `cc-stop` refuses: `Claude/Codex session(s) still running` | Another terminal still has `cc`/`cx` open. Close it, use `proxy-restart` to reconnect instead, or `cc-stop --force`. |
 | SSH keeps asking for the passphrase | Setup adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
 | **WSL:** `cc`/`cx` returns immediately, no tunnel | A backgrounded `ssh -f` can't answer a passphrase prompt, and WSL has no persistent ssh-agent. The script auto-starts one; if it still fails, run `ssh-add ~/.ssh/<your-key>` once, or enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`). |

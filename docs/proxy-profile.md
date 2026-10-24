@@ -114,12 +114,6 @@ variables and Claude settings. Recovery state lives in the `main` folder of the
 recovery directory, with the tunnel record, SSH's last errors (`ssh.err`) and
 one entry per open session.
 
-This is script-level recovery, **not an OS firewall kill switch**. It retains
-the configured proxy during failure, but cannot prevent an application or tool
-that ignores those settings from making direct requests. OS network rules are
-needed for that guarantee. Intentional `proxy-off` / `cc-stop` removes proxy
-settings; avoid them during an outage if you want those settings retained.
-
 Bash uses Linux `/proc/uptime`, or macOS's built-in `osascript` and Foundation
 system uptime. PowerShell uses .NET Stopwatch for elapsed time. Verification
 covers Linux Bash, zsh and Linux-hosted PowerShell 7 with fake SSH/transport
@@ -127,6 +121,47 @@ adapters, plus an end-to-end run against a real SSH server (`tests/e2e/run.sh`:
 killed SSH, hung link, refused login, port takeover, stop from a stale
 terminal); native Windows PowerShell 5.1/OpenSSH and macOS console behavior
 still need platform smoke tests.
+
+## Kill switch (2.9.0+)
+
+The kill switch keeps Claude and Codex from connecting directly. When the
+tunnel is down, they cannot connect. They do not use your own IP address.
+The kill switch is on by default.
+
+What the kill switch does:
+
+1. It keeps the proxy in Claude's `~/.claude/settings.json`. `proxy-off` and
+   `cc-stop` remove the proxy from your terminal only. Claude reads its
+   settings file before your terminal, so plain `claude` and the IDE
+   extensions use the tunnel. If the tunnel is down, they show "connection
+   refused".
+2. It examines each `cc` and `cx` before the start. It stops the start and
+   tells you the fix if:
+   - `NO_PROXY` sends an API host directly (for example `*` or `*.com`).
+   - Another program uses the proxy port.
+   - The profile cannot write the proxy into Claude's settings file.
+3. It does not move the tunnel to a different port. If another program uses
+   the proxy port, `tunnel-start` stops and tells you the program and the fix.
+
+Plain `codex` reads only the proxy in your terminal. To protect it, set
+`proxy-config set PLAIN_COMMANDS auto`. Then plain `claude` and `codex` start
+through the tunnel, the same as `cc-safe` and `cx-safe`. Only the application
+writes to the output, so `claude -p "..." | jq` continues to work.
+
+| Command | What it does |
+|---|---|
+| `proxy-killswitch` | Shows the status: Claude settings, Codex, `NO_PROXY`. |
+| `proxy-killswitch on` | Sets the kill switch on and writes the proxy into Claude's settings. |
+| `proxy-killswitch off` | Sets the kill switch off. This is the behavior before 2.9.0. |
+
+The kill switch does not protect the Claude Desktop app, web browsers, or
+other applications. `chrome-proxy` has its own rules. The kill switch is not
+a firewall: a program that ignores proxy settings can still connect directly.
+
+| Setting (PowerShell) | Bash setting | Default |
+|---|---|---|
+| `KILLSWITCH` | `CLAUDE_KILLSWITCH` | `on` (any value other than `off` is on) |
+| `PLAIN_COMMANDS` | `CLAUDE_PLAIN_COMMANDS` | `off`; the setup wizard asks |
 
 ## Desktop alerts while the CLI owns the terminal
 
@@ -224,7 +259,7 @@ manual visibility check above; parser and mocked tests do not establish them.
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals: a dead/leftover ssh is killed and restarted; if another app has the port, it's left alone and the tunnel uses the next free port (`8081`, …) automatically |
+| `cc` | Proxy ON + launch **Claude** (`--dangerously-skip-permissions`). Auto-heals: a dead/leftover ssh is killed and restarted. If another app has the port, `cc` stops and tells you the fix (kill switch on), or uses the next free port (kill switch off) |
 | `cc -c` / `cc -r` | Same, but **continue** the last Claude session / **pick one to resume**. Anything after `cc` is passed to `claude` as-is (`cc --resume <id>`, `cc "fix the tests"`, …) |
 | `cc-safe` | Same as `cc`, but keeps Claude's permission prompts (accepts the same extra arguments) |
 | `cx` | Proxy ON + launch **Codex** (approvals off). Extra arguments pass through too: `cx resume` |
@@ -238,7 +273,8 @@ manual visibility check above; parser and mocked tests do not establish them.
 | `proxy-doctor` | Diagnose each part (tunnel, ports, env, settings, API reachability) and print exactly what's wrong + how to fix it |
 | `cc-install` | Check **Node.js**, **Claude Code** and **Codex**; install or update whatever is missing or too old (asks first; downloads go through the proxy). `cc-install --check` (`-Check`) only reports; `cc-install claude` does just that one; `-y` answers yes. The setup wizard runs it as its last step |
 | `tunnel-start` / `tunnel-stop` | Manage just the SSH tunnel |
-| `proxy-on` / `proxy-off` | Set / clear the proxy env vars **and** sync `~/.claude/settings.json` |
+| `proxy-on` / `proxy-off` | Set / clear the proxy env vars. With the kill switch on, `~/.claude/settings.json` keeps the proxy |
+| `proxy-killswitch` | Show the kill switch; `proxy-killswitch on` / `off` changes it — see [Kill switch](#kill-switch-290) |
 | `proxy-config` | Show your settings; `proxy-config edit` opens the settings file, `proxy-config set SSH_HOST myvm` changes one value |
 | `proxy-update` | Download the newest profile from this guide and install it — **your settings are kept**. `proxy-update --check` (`-Check` on Windows) only tells you whether there is one |
 | `proxy-nodes` | List the nodes (JP / JP2 / SG / US …) and which one is active; `proxy-nodes --refresh` (`-Refresh` on Windows) reloads the catalogue and creates the `ssh` aliases; `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS) — see [Nodes](proxy-nodes.md) |
