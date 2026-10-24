@@ -46,6 +46,7 @@ CLAUDE_HTTP_PORT=18080 CLAUDE_SOCKS_PORT=11080
 CLAUDE_WATCHDOG_INTERVAL=0 CLAUDE_WATCHDOG_FAILS=2 CLAUDE_WATCHDOG_NOTICE_AFTER=60
 CLAUDE_WATCHDOG_MAX_BACKOFF=30 CLAUDE_WATCHDOG_STARTUP_GRACE=0
 _listeners() { :; }
+_port_bound() { return 1; }
 _tunnel_ssh_args() { _CP_SSH_ARGS=(); }
 _wd_sleep() { :; }
 # Clock advances 5 s per pass; the file survives subshells.

@@ -94,6 +94,7 @@ mkdir "$scratch/worker";echo 0 > "$scratch/tick"
 CLAUDE_HTTP_PORT=18080 CLAUDE_SOCKS_PORT=11080
 CLAUDE_WATCHDOG_INTERVAL=0 CLAUDE_WATCHDOG_FAILS=2 CLAUDE_WATCHDOG_NOTICE_AFTER=60
 _listeners() { :; }
+_port_bound() { return 1; }
 _tunnel_ssh_args() { _CP_SSH_ARGS=(); }
 ssh() { exec sleep 100; }
 _wd_sleep() { :; }
