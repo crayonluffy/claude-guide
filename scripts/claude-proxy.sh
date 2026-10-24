@@ -90,6 +90,10 @@ CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 # when something would leak (a NO_PROXY that exempts the API, another program on
 # the proxy port). 'off' = the pre-2.9 behaviour. See 'proxy-killswitch'.
 CLAUDE_KILLSWITCH=on
+# auto = plain 'claude' and 'codex' also start through the tunnel (like cc-safe /
+# cx-safe, but quiet: only the app writes to stdout). off = they run untouched:
+# Claude is still protected by its pinned settings; plain 'codex' is not.
+CLAUDE_PLAIN_COMMANDS=off
 
 # WSL only: ALSO keep the WINDOWS-side Claude (%USERPROFILE%\.claude\settings.json)
 # pointed at this tunnel while it is up. Windows reaches WSL's 127.0.0.1 ports
@@ -142,7 +146,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -2012,6 +2016,12 @@ proxy-up() {
 # All-in-one: proxy stack + launch Claude / Codex
 # ============================================================
 
+# Path of the real program, never a shell function of the same name
+# (PLAIN_COMMANDS=auto defines 'claude' / 'codex' functions).
+_bin_path() {
+    if [ -n "${ZSH_VERSION:-}" ]; then whence -p "$1"; else type -P "$1"; fi
+}
+
 # _launch_via_proxy <label> <binary> <install hint> <skip-prompts flag> [args...]
 # Flags the wrapper understands: --safe (keep the app's prompts), --no-verify.
 # EVERYTHING ELSE is passed straight to the app, so 'cc -c', 'cc -r',
@@ -2019,11 +2029,12 @@ proxy-up() {
 _launch_via_proxy() {
     local label="$1" bin="$2" hint="$3" skip_flag="$4"
     shift 4
-    local safe=0
+    local safe=0 quiet=0
     local up_args=() app_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --safe)      safe=1 ;;
+            --quiet)     quiet=1 ;;
             --no-verify) up_args+=(--no-verify) ;;
             --node)      up_args+=(--node "${2:-}"); shift ;;
             --node=*)    up_args+=("$1") ;;
@@ -2034,20 +2045,23 @@ _launch_via_proxy() {
 
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Locate the app first, so we don't bring the tunnel up only to find it missing.
-    if ! command -v "$bin" >/dev/null 2>&1; then
-        echo "[Err] '$bin' not found - install it first: $hint"
+    if ! _bin_path "$bin" >/dev/null 2>&1; then
+        echo "[Err] '$bin' not found - install it first: $hint" >&2
         return 1
     fi
 
     # Steps 1-3: bring up tunnel + env vars + verify
     local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity saved_int
     [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
-    proxy-up "${up_args[@]}" || return 1
+    # Quiet (plain claude/codex): the profile's own lines go to stderr, so stdout
+    # carries only the app's output ('claude -p ... | jq' keeps working).
+    if [ "$quiet" -eq 1 ]; then proxy-up "${up_args[@]}" >&2 || return 1
+    else proxy-up "${up_args[@]}" || return 1; fi
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
         identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
-        echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
+        [ "$quiet" -eq 1 ] || echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
     else
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
@@ -2055,11 +2069,12 @@ _launch_via_proxy() {
     saved_int=$(trap -p INT)
     trap '_recovery_unsubscribe "$subscriber" "$subscriber_stamp"' INT
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
-    echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
+    [ "$quiet" -eq 1 ] || echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
+    # 'command': the real program, not a plain-command wrapper of the same name.
     if [ $safe -eq 1 ]; then
-        if "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
+        if command "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
     else
-        if "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
+        if command "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
     fi
     [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
     trap - INT
@@ -2071,6 +2086,22 @@ cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code
 cx() { _launch_via_proxy Codex  codex  "npm install -g @openai/codex"            --dangerously-bypass-approvals-and-sandbox "$@"; }
 cc-safe() { cc --safe "$@"; }
 cx-safe() { cx --safe "$@"; }
+
+# PLAIN_COMMANDS=auto: plain 'claude' / 'codex' start through the tunnel too, in
+# safe mode (the app's own prompts) and quietly. Version/help need no network.
+_plain_launch() {  # <label> <bin> <install hint> <skip flag> [app args]
+    local bin="$2"
+    case "${5:-}" in --version|-v|--help|-h) shift 4; command "$bin" "$@"; return;; esac
+    _launch_via_proxy "$@" --safe --no-verify --quiet
+}
+if [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ]; then
+    claude() { _plain_launch Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
+    codex()  { _plain_launch Codex  codex  "npm install -g @openai/codex" --dangerously-bypass-approvals-and-sandbox "$@"; }
+else
+    # Also undoes 'auto' when the setting changes in a running shell.
+    case "$(type -t claude 2>/dev/null; whence -w claude 2>/dev/null)" in *function*) unset -f claude;; esac
+    case "$(type -t codex 2>/dev/null; whence -w codex 2>/dev/null)" in *function*) unset -f codex;; esac
+fi
 
 cc-stop() {
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
@@ -2958,7 +2989,7 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
     local label="$1" bin="$2" pkg="$3" hint="$4" latest cur
     latest=$(npm view "$pkg" version 2>/dev/null)
     if command -v "$bin" >/dev/null 2>&1; then
-        cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+        cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
         if [ -z "$latest" ]; then
             echo "[OK]  $label ${cur:-(version unknown)} installed (npm registry not reachable - can't check for updates)"
             return 0
@@ -2985,7 +3016,7 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
     echo "[Tools] npm install -g $pkg@latest"
     npm install -g "$pkg@latest" || { echo "[Err] npm install failed (see above)."; return 1; }
     hash -r 2>/dev/null
-    cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+    cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
     if [ -n "$cur" ]; then
         echo "[OK]  $label $cur ready - run it through the proxy with '${5:-$bin}'"
     else

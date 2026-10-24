@@ -94,7 +94,11 @@ tunnel-start() { :; }
 _tunnel_health() { echo 'ok 123 ssh 8080'; }
 proxy-on() { export HTTPS_PROXY=http://127.0.0.1:8080; }
 _verify_proxy_ip() { echo unexpected-ip-probe >> "$scratch/unexpected"; }
-claude() { printf '%s\n' "$@" > "$scratch/app.args"; return 17; }
+# The launcher calls the real binary via 'command' (so plain-command wrappers can't
+# recurse); intercept that for 'claude' and leave every other command alone.
+_fake_claude() { printf '%s\n' "$@" > "$scratch/app.args"; return 17; }
+command() { if [ "$1" = claude ]; then shift; _fake_claude "$@"; else builtin command "$@"; fi; }
+_bin_path() { echo "/fake/$1"; }
 CLAUDE_TUNNEL_WATCHDOG=0
 if _launch_via_proxy Claude claude hint skip --no-verify --safe 'hello world'; then echo 'FAIL: dead proxy allowed launch';exit 1;fi
 assert test ! -e "$scratch/app.args"

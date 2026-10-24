@@ -35,7 +35,10 @@ echo 'PASS: legacy watchdog detected; reused shell PID cannot authorize terminat
 # Test interruption cleanup on the native foreground function path.
 eval "$(sed -n '/^proxy-up() {/,/^cc-stop() {/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}" | sed '$d')"
 proxy-up() { :; }
-claude() { trap -p INT > "$scratch/foreground.trap";return 130; }
+# The launcher calls the real binary via 'command'; intercept that for 'claude' only.
+_fake_claude() { trap -p INT > "$scratch/foreground.trap";return 130; }
+command() { if [ "$1" = claude ]; then shift; _fake_claude "$@"; else builtin command "$@"; fi; }
+_bin_path() { echo "/fake/$1"; }
 CLAUDE_TUNNEL_WATCHDOG=0
 trap ':' INT
 saved=$(trap -p INT)

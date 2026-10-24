@@ -81,3 +81,12 @@ print 'PASS: zsh - NO_PROXY exemption matcher'
 CLAUDE_HTTP_PORT=8080   # earlier steps moved it
 [[ -z $(_killswitch_ensure_pin) ]] || fail 'ensure_pin not silent when pinned'
 print 'PASS: zsh - kill switch pins Claude settings on load'
+
+# Plain commands: the wrapper exists, finds the real binary, and passes --version through.
+mkdir -p "$scratch/pbin"; print '#!/bin/sh\necho "fake $*"' > "$scratch/pbin/claude"; chmod +x "$scratch/pbin/claude"
+out=$( PATH="$scratch/pbin:$PATH"; set +eu; print 'CLAUDE_PLAIN_COMMANDS=auto' > "$CLAUDE_PROXY_CONF"
+       source "$repo/scripts/claude-proxy.sh" >/dev/null 2>&1
+       print -- "$(whence -w claude) | $(_bin_path claude) | $(claude --version)" )
+[[ $out == "claude: function | $scratch/pbin/claude | fake --version" ]] || fail "plain wrapper: $out"
+rm -f "$CLAUDE_PROXY_CONF"
+print 'PASS: zsh - plain claude wrapper, real-binary lookup, version passthrough'
