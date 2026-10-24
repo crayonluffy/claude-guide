@@ -102,6 +102,7 @@ $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 $script:TUNNEL_WATCHDOG=1
 $script:WATCHDOG_INTERVAL=5
 $script:WATCHDOG_FAILS=2
+$script:WATCHDOG_IDLE_INTERVAL=60   # seconds between checks while no cc/cx session uses the tunnel
 $script:WATCHDOG_NOTICE_AFTER=60
 $script:WATCHDOG_PROBE_TIMEOUT=3
 $script:WATCHDOG_PROGRESS_INTERVAL=30
@@ -114,7 +115,7 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -177,8 +178,9 @@ function Get-RecoveryTransition {
     return @{State=$s;Event=$event}
 }
 function Get-RecoveryMessage {
-    param([string]$Event)
+    param([string]$Event,$Detail)   # Detail: @{Pid;Name;Port} for takeover
     switch ($Event) {
+        takeover {"Another program ($(if ($Detail.Name) {$Detail.Name} else {'unknown'}), PID $($Detail.Pid)) took proxy port $($Detail.Port) while the tunnel was down. Claude/Codex traffic may go to it - exit this session now; nothing was stopped."}
         lost {'Proxy connection lost. Retrying; proxy settings remain enabled.'}
         prolonged {'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.'}
         restored {'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.'}
@@ -258,7 +260,7 @@ function Open-RecoveryLock {
 }
 function Write-RecoveryStatus {
     param([string]$Identity,[string]$Provider,$State)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover')) { throw 'Invalid recovery record' }
     $dest = Join-Path $Identity "$Provider.json"
     $tmp = "$dest.$([guid]::NewGuid()).tmp"
     try {
@@ -275,7 +277,7 @@ function Write-RecoveryStatus {
 }
 function Get-RecoveryStatus {
     param([string]$Identity,[string]$Provider)
-    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh')) { throw 'Invalid recovery record' }
+    if ($Provider -notin @('claude','codex','owner','descriptor','desktop','ssh','takeover')) { throw 'Invalid recovery record' }
     try { return ([IO.File]::ReadAllText((Join-Path $Identity "$Provider.json")) | ConvertFrom-Json -ErrorAction Stop) }
     catch { return [pscustomobject]@{ phase='unknown'; generation=-1; event='none' } }
 }
@@ -313,8 +315,16 @@ function Start-RecoveryOwner {
         return $dir
     }
     if ((Test-Port $script:HTTP_PORT) -or (Test-Port $script:SOCKS_PORT)) {
-        if ((Test-RecoveryOwner $dir) -and -not (Test-Path (Join-Path $dir 'stopped'))) { return $dir }
-        throw 'Existing tunnel has no recovery owner. Run proxy-restart once to migrate it.'
+        # A tunnel from an older profile (ssh on our ports, nothing that heals it) is
+        # replaced by one with an owner on the same ports. A foreign program is never touched.
+        $h = Get-TunnelHealth
+        if ($h.Status -notin @('ok','stale')) {
+            throw "Port $($script:HTTP_PORT)/$($script:SOCKS_PORT) is held by another program ($($h.OwnerName), PID $($h.OwnerPid)) - see proxy-status."
+        }
+        Write-Host '[Upgrade] Replacing the tunnel from an older profile with a self-healing one on the same ports (open sessions reconnect within seconds).' -ForegroundColor Yellow
+        if (-not (tunnel-stop)) { throw 'The old tunnel could not be stopped - run proxy-doctor.' }
+        for ($i=0; $i -lt 50 -and ((Test-Port $script:HTTP_PORT) -or (Test-Port $script:SOCKS_PORT)); $i++) { Start-Sleep -Milliseconds 100 }
+        if ((Test-Port $script:HTTP_PORT) -or (Test-Port $script:SOCKS_PORT)) { throw "Ports $($script:HTTP_PORT) / $($script:SOCKS_PORT) did not free up after the old tunnel stopped - run proxy-doctor." }
     }
     # Serialise descriptor publication and worker startup separately from the worker lease.
     $gate = $null
@@ -327,7 +337,9 @@ function Start-RecoveryOwner {
                 Write-RecoveryStatus $dir descriptor $cfg
                 Remove-Item (Join-Path $dir 'stopped') -ErrorAction SilentlyContinue
                 $profileFile=Resolve-RecoveryProfile $script:RECOVERY_PROFILE
-                $exe = (Get-Process -Id $PID).Path
+                # The engine itself, not the current host: under the ISE the host is
+                # powershell_ise.exe, which cannot run -File.
+                $exe = Join-Path $PSHOME ($(if ($PSVersionTable.PSEdition -eq 'Core') {'pwsh'} else {'powershell'}) + $(if ($env:OS -eq 'Windows_NT') {'.exe'} else {''}))
                 $launch = @{ FilePath=$exe; ArgumentList=@('-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+$profileFile+'"'),'-RecoveryWorker','-RecoveryDescriptor',('"'+(Join-Path $dir 'descriptor.json')+'"')); PassThru=$true }
                 if ($env:OS -eq 'Windows_NT') { $launch.WindowStyle='Hidden' }
                 $proc = Start-Process @launch
@@ -339,21 +351,51 @@ function Start-RecoveryOwner {
     if (Test-Path (Join-Path $dir 'stopped')) { throw 'Recovery worker is still stopping; retry after it exits.' }
     return $dir
 }
+# First listener on a tunnel port that is not our ssh, as @{Pid;Name;Port}; $null if none.
 function Test-RecoveryPortConflict {
     param([int]$OwnedProcessId=0)
     if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
         foreach ($port in @($script:HTTP_PORT,$script:SOCKS_PORT)) {
             foreach ($c in @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)) {
-                if ($c.OwningProcess -ne $OwnedProcessId) { return $true }
+                if ($c.OwningProcess -ne $OwnedProcessId) {
+                    return @{Pid=$c.OwningProcess;Name="$((Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName)";Port=$port}
+                }
             }
         }
     } elseif (-not $OwnedProcessId) {
         # Portable worker smoke tests have no Windows Get-NetTCPConnection.
         foreach ($c in [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) {
-            if ($c.Port -in @($script:HTTP_PORT,$script:SOCKS_PORT)) { return $true }
+            if ($c.Port -in @($script:HTTP_PORT,$script:SOCKS_PORT)) { return @{Pid='-';Name='another program';Port=$c.Port} }
         }
     }
-    return $false
+    return $null
+}
+# Live cc/cx sessions on a slot. Each entry holds the window's PID and start
+# ticks, so a closed window (or a reused PID) never counts.
+function Get-RecoverySessionCount {
+    param([string]$Identity)
+    $sd=Join-Path $Identity 'sessions'; $n=0
+    if (-not (Test-Path -LiteralPath $sd)) { return 0 }
+    foreach ($f in @(Get-ChildItem -LiteralPath $sd -File -ErrorAction SilentlyContinue)) {
+        $id,$ticks=("$(try { [IO.File]::ReadAllText($f.FullName) } catch { '' })".Trim() -split '\|',2)
+        if ($id -match '^\d+$' -and (Test-RecoveryProcess ([int]$id) $ticks)) { $n++ }
+        else { Remove-Item -LiteralPath $f.FullName -ErrorAction SilentlyContinue }
+    }
+    return $n
+}
+# Sleep between probes. While idle (nobody to protect), end early when a window
+# asks (<dir>\wake), a session starts, or the owned ssh exits.
+function Wait-RecoveryInterval {
+    param([string]$Identity,[double]$Seconds,[switch]$Idle,$Ssh)
+    $stop=Join-Path $Identity 'stopped'; $wake=Join-Path $Identity 'wake'
+    for ($i=0; $i -lt $Seconds*10 -and -not (Test-Path $stop); $i++) {
+        if ($Idle -and $i % 5 -eq 0) {
+            if (Test-Path $wake) { Remove-Item $wake -ErrorAction SilentlyContinue; return }
+            if ((Get-RecoverySessionCount $Identity) -gt 0) { return }
+            if ($Ssh -and $Ssh.HasExited) { return }
+        }
+        Start-Sleep -Milliseconds 100
+    }
 }
 # Why an ssh exited, from its own stderr: auth|hostkey|forward|network|unknown.
 # Auth and hostkey failures will not heal by retrying, so the owner waits longer
@@ -396,7 +438,7 @@ function Invoke-RecoveryWorker {
     $lease = Open-RecoveryLock $dir
     if (-not $lease) { return }
     $ssh = $null; $started=''; $sshAt=0; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
-    $classified=$true; $lastClass=''; $errFile=Join-Path $dir 'ssh.err'
+    $classified=$true; $lastClass=''; $errFile=Join-Path $dir 'ssh.err'; $conflictSeen=''
     try {
         $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
         foreach ($k in $script:CONF_KEYS) { if ($null -ne $cfg.$k) { Set-Variable -Scope Script -Name $k -Value $cfg.$k } }
@@ -412,6 +454,16 @@ function Invoke-RecoveryWorker {
             $now = Get-RecoveryTime
             $ownedId=if ($ssh -and -not $ssh.HasExited) {$ssh.Id}else{0}
             $conflict=Test-RecoveryPortConflict $ownedId
+            $takeover=$false
+            if ($conflict) {
+                # A new program on our port is announced once, loudly; it is never killed.
+                $key="$($conflict.Pid)|$($conflict.Port)"
+                if ($key -ne $conflictSeen) {
+                    $takeover=$true; $conflictSeen=$key
+                    Write-RecoveryStatus $dir takeover $conflict
+                    Add-Content (Join-Path $dir 'events.log') "[Recovery] $(Get-RecoveryMessage takeover $conflict)"
+                }
+            } else { $conflictSeen=''; Remove-Item (Join-Path $dir 'takeover.json') -ErrorAction SilentlyContinue }
             if ($ssh -and $ssh.HasExited -and -not $classified) {
                 # The ssh we started has exited: record why before deciding on a retry.
                 $class=Get-RecoverySshClass $errFile
@@ -435,15 +487,21 @@ function Invoke-RecoveryWorker {
             # A live ssh younger than the grace may still be connecting: its dead
             # probes are neither an outage notice nor a reason to kill it.
             $connecting=$ssh -and -not $ssh.HasExited -and ($now-$sshAt) -lt $grace
-            $allTunnel=$true
+            $allTunnel=$true; $allHealthy=$true
             foreach ($provider in @('claude','codex')) {
                 $sample=if ($conflict) {@{kind='conflict'}}else{Test-RecoveryTransport $provider $script:HTTP_PORT $script:SOCKS_PORT}
+                if ($sample.kind -ne 'healthy') { $allHealthy=$false }
                 if ($connecting -and $sample.kind -eq 'tunnel') { $allTunnel=$false; continue }
                 if ($sample.kind -ne 'tunnel') { $allTunnel=$false }
                 if ($sample.kind -eq 'healthy') { $delay=2; $retries=0; $lastClass=''; Remove-Item (Join-Path $dir 'ssh.json') -ErrorAction SilentlyContinue }
                 $r=Get-RecoveryTransition -State $states[$provider] -Sample $sample -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER
                 $s=$r.State
-                if ($r.Event -eq 'none') { $s.event=if ($states[$provider]) { $states[$provider].event } else { 'none' } }
+                if ($takeover) {
+                    # Overrides lost/progress: this is the notice windows must show.
+                    if ($r.Event -eq 'none') { $s.generation++ }
+                    $s.event='takeover'
+                }
+                elseif ($r.Event -eq 'none') { $s.event=if ($states[$provider]) { $states[$provider].event } else { 'none' } }
                 else {
                     if ($conflict) {Add-Content (Join-Path $dir 'events.log') 'Local port conflict: keeping fixed ports and leaving the other process untouched.'}
                     $s.event=$r.Event; Add-Content (Join-Path $dir 'events.log') "[$provider] $(Get-RecoveryMessage $r.Event)" }
@@ -454,7 +512,10 @@ function Invoke-RecoveryWorker {
             # Nothing observed yet (ssh still connecting) is not "unavailable".
             $attention=if ($states.Count) {Get-RecoveryDesktopTransition -State $desktopState -States $states -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER} else {@{State=$desktopState;Event='none'}}
             $desktopState=$attention.State
-            if ($attention.Event -in @('lost','prolonged','restored') -and $desktop.Backend -ne 'off') {
+            if ($takeover -and $desktop.Backend -ne 'off') {
+                if (-not (Send-RecoveryDesktopNotification $desktop takeover "$($conflict.Pid)|$($conflict.Name)|$($conflict.Port)")) { $desktop.LastSubmission='failed' }
+            }
+            elseif ($attention.Event -in @('lost','prolonged','restored') -and $desktop.Backend -ne 'off') {
                 if (-not (Send-RecoveryDesktopNotification $desktop $attention.Event (Get-RecoveryDesktopScope $states))) {
                     $desktop.LastSubmission='failed'
                     Add-Content (Join-Path $dir 'events.log') '[Notify] Desktop submission unavailable or failed; terminal/status/log fallbacks remain enabled. Try proxy-notify test.'
@@ -469,7 +530,10 @@ function Invoke-RecoveryWorker {
           } catch {
             try { Add-Content (Join-Path $dir 'events.log') "[Recovery] Monitor error, retrying: $($_.Exception.Message)" } catch { }
           }
-            for ($i=0; $i -lt $script:WATCHDOG_INTERVAL*10 -and -not (Test-Path (Join-Path $dir 'stopped')); $i++) { Start-Sleep -Milliseconds 100 }
+            # Nobody to protect and nothing to heal: probe rarely (Chrome may still use it).
+            $idle=$allHealthy -and -not $conflict -and (Get-RecoverySessionCount $dir) -eq 0
+            $secs=if ($idle) { if ($null -ne $script:WATCHDOG_IDLE_INTERVAL) {$script:WATCHDOG_IDLE_INTERVAL} else {60} } else { $script:WATCHDOG_INTERVAL }
+            Wait-RecoveryInterval $dir $secs -Idle:$idle -Ssh $ssh
         }
     } finally {
         if ($ssh) {
@@ -477,7 +541,7 @@ function Invoke-RecoveryWorker {
             $ssh.Dispose()
         }
         Stop-RecoveryDesktopContext $desktop
-        Remove-Item (Join-Path $dir 'ssh.json') -ErrorAction SilentlyContinue
+        Remove-Item (Join-Path $dir 'ssh.json'),(Join-Path $dir 'takeover.json') -ErrorAction SilentlyContinue
         $lease.Dispose()
     }
 }
@@ -507,6 +571,9 @@ function Get-RecoveryDesktopMessage {
         lost {return @{Title='Proxy connection lost';Body="${Providers}: reconnecting. Sessions stay open.";Icon='Warning';Tooltip='Proxy recovery: reconnecting';Event=$Event}}
         prolonged {return @{Title='Proxy still unavailable';Body="${Providers}: retrying for a prolonged outage. Keep waiting or exit normally; sessions stay open.";Icon='Warning';Tooltip='Proxy recovery: reconnecting';Event=$Event}}
         restored {return @{Title='Proxy connection restored';Body="${Providers}: connected again. Retry any failed request your CLI did not retry.";Icon='Info';Tooltip='Proxy recovery: connected';Event=$Event}}
+        takeover {
+            $pid_,$name,$port=("$Providers" -split '\|',3)
+            return @{Title='Proxy port taken';Body="$(if ($name) {$name} else {'unknown'}) (PID $pid_) took port $port. Exit Claude/Codex sessions now.";Icon='Warning';Tooltip='Proxy port taken by another program';Event=$Event}}
         test {return @{Title='[TEST] Proxy desktop notifications';Body='This is a test. No proxy, network, or session was changed.';Icon='Info';Tooltip='Proxy notification test';Event=$Event}}
     }
     return $null
@@ -622,13 +689,21 @@ function Start-RecoverySubscriber {
     param([string]$Identity,[string]$Provider)
     $messages=@{}
     foreach ($e in @('lost','prolonged','restored','progress')) { $messages[$e]=Get-RecoveryMessage $e }
+    $messages['takeover']=Get-RecoveryMessage takeover @{Pid='{pid}';Name='{name}';Port='{port}'}
+    # Registered before the app launches, so an idle owner sees the session at once.
+    $sd=Join-Path $Identity 'sessions'
+    $session=Join-Path $sd "$PID-$([guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.Directory]::CreateDirectory($sd) | Out-Null
+        [IO.File]::WriteAllText($session,"$PID|$((Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)")
+    } catch { $session=$null }
     # Login and host-key failures do not heal by waiting: say so once per change.
     $hints=@{}
     foreach ($c in @('auth','hostkey')) { $hints[$c]=Get-RecoverySshHint $c $script:SSH_HOST }
     $lines=[Collections.ArrayList]::Synchronized([Collections.ArrayList]::new())
     $ps=[PowerShell]::Create()
     [void]$ps.AddScript({
-        param($path,$provider,$messages,$sshPath,$hints,$lines)
+        param($path,$provider,$messages,$sshPath,$hints,$lines,$takeoverPath)
         $seen=-1; $seenSsh=''
         function Say([string]$Text) { [void]$lines.Add($Text); [Console]::Error.WriteLine("`n[$provider proxy] $Text") }
         while ($true) {
@@ -638,20 +713,27 @@ function Start-RecoverySubscriber {
                 $s=[IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
                 if ($s.generation -ne $seen) {
                     if ($seen -ne -1 -or $s.phase -ne 'healthy') {
-                        if ($messages.ContainsKey($s.event)) { Say $messages[$s.event] }
+                        if ($s.event -eq 'takeover') {
+                            $t=try { [IO.File]::ReadAllText($takeoverPath) | ConvertFrom-Json } catch { $null }
+                            if ($t) { Say ($messages.takeover.Replace('{pid}',"$($t.Pid)").Replace('{name}',"$(if ($t.Name) {$t.Name} else {'unknown'})").Replace('{port}',"$($t.Port)")) }
+                        }
+                        elseif ($messages.ContainsKey($s.event)) { Say $messages[$s.event] }
                     }
                     $seen=$s.generation
                 }
             } catch { }
             Start-Sleep -Milliseconds 500
         }
-    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages).AddArgument((Join-Path $Identity 'ssh.json')).AddArgument($hints).AddArgument($lines)
+    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages).AddArgument((Join-Path $Identity 'ssh.json')).AddArgument($hints).AddArgument($lines).AddArgument((Join-Path $Identity 'takeover.json'))
     $async=$ps.BeginInvoke()
-    return [pscustomobject]@{PowerShell=$ps;Async=$async;Lines=$lines}
+    return [pscustomobject]@{PowerShell=$ps;Async=$async;Lines=$lines;Session=$session}
 }
 function Stop-RecoverySubscriber {
     param($Handle)
-    if ($Handle) { try { $Handle.PowerShell.Stop() } finally { $Handle.PowerShell.Dispose() } }
+    if ($Handle) {
+        try { $Handle.PowerShell.Stop() } finally { $Handle.PowerShell.Dispose() }
+        if ($Handle.Session) { Remove-Item -LiteralPath $Handle.Session -ErrorAction SilentlyContinue }
+    }
 }
 
 function Wait-RecoveryDemo { param([double]$Seconds) Start-Sleep -Milliseconds ([int]($Seconds*1000)) }
@@ -1270,6 +1352,12 @@ function proxy-node {
 # ============================================================
 
 function tunnel-start {
+    # Without ssh the background start fails silently and you only get "failed to start".
+    if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+        Write-Host "[Err] 'ssh' not found - no tunnel is possible. Install the OpenSSH Client:" -ForegroundColor Red
+        Write-Host "       Settings > Apps > Optional features > Add a feature > OpenSSH Client, then open a new window." -ForegroundColor Yellow
+        return
+    }
     if (Use-RecoveryRecord) {
         Write-Host '[Recovery] Shared owner running; retaining the established ports.'
         return
@@ -1441,9 +1529,23 @@ function proxy-up {
     tunnel-start
     if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
 
-    if ((Test-RecoveryTransport $Provider $script:HTTP_PORT $script:SOCKS_PORT).kind -ne 'healthy') {
-        Write-Host "[Err] $Provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor." -ForegroundColor Red
-        return $false
+    # An idle owner may not have noticed a dropped link yet: wake it and give it
+    # the startup grace to heal before refusing.
+    $identity=Join-Path (Get-RecoveryRoot) 'main'; $waited=0; $woke=$false
+    $grace=if ($null -ne $script:WATCHDOG_STARTUP_GRACE) {$script:WATCHDOG_STARTUP_GRACE} else {20}
+    while ((Test-RecoveryTransport $Provider $script:HTTP_PORT $script:SOCKS_PORT).kind -ne 'healthy') {
+        if (-not $woke) {
+            $woke=$true
+            if ((Test-Path -LiteralPath $identity) -and (Test-RecoveryOwner $identity)) {
+                [IO.File]::WriteAllText((Join-Path $identity 'wake'),'wake')
+                Write-Host '[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect...' -ForegroundColor Yellow
+            } else { $waited=$grace }
+        }
+        if ($waited -ge $grace) {
+            Write-Host "[Err] $Provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor." -ForegroundColor Red
+            return $false
+        }
+        Start-Sleep -Seconds 1; $waited++
     }
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -1639,8 +1741,13 @@ function tunnel-stop {
 
 function cc-stop {
     param([switch]$Force)
-    $agents=@(Get-Process -Name claude,codex -ErrorAction SilentlyContinue)
-    if ($agents.Count -and -not $Force) { Write-Warning 'Claude/Codex sessions are still running. Use proxy-restart to reconnect, or cc-stop -Force for explicit shutdown.'; return }
+    # Registered cc/cx sessions count too: npm-installed Claude runs as node.exe.
+    # Other users' processes are not ours to protect (-IncludeUserName needs admin).
+    $sid=(Get-Process -Id $PID).SessionId
+    $agents=@(Get-Process -Name claude,codex -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $sid })
+    $sessions=Get-RecoverySessionCount (Join-Path (Get-RecoveryRoot) 'main')
+    $n=[Math]::Max($agents.Count,$sessions)
+    if ($n -and -not $Force) { Write-Warning "$n Claude/Codex session(s) are still running. Use proxy-restart to reconnect, or cc-stop -Force for explicit shutdown."; return }
 
     $stopped = tunnel-stop
     Stop-NodeTunnels      # per-node Chrome tunnels (chrome-proxy <node>) go too
@@ -1660,8 +1767,20 @@ function proxy-status {
     $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
     proxy-notify status
     $identity=Get-RecoveryIdentity
-    Write-Host "[Recovery] State: $identity"
-    foreach ($provider in @('claude','codex')) { Write-Host "${provider}: $((Get-RecoveryStatus $identity $provider) | ConvertTo-Json -Compress)" }
+    $now=Get-RecoveryTime
+    foreach ($provider in @('claude','codex')) {
+        $st=Get-RecoveryStatus $identity $provider
+        $line="[Recovery] $($provider.PadRight(6)): $($st.phase)"
+        if ($st.phase -in @('recovering','prolonged') -and $null -ne $st.outage_start) { $line+=" for $([int]($now-$st.outage_start))s, $($st.retry_count) retries" }
+        if ($st.event -and $st.event -ne 'none') { $line+=" (last notice: $($st.event))" }
+        Write-Host $line
+    }
+    Write-Host "[Recovery] Ports   : HTTP $($script:HTTP_PORT) / SOCKS $($script:SOCKS_PORT)   sessions: $(Get-RecoverySessionCount $identity)"
+    Write-Host "[Recovery] Logs    : $(Join-Path $identity 'events.log')  ssh: $(Join-Path $identity 'ssh.err')"
+    $why=(Get-RecoveryStatus $identity ssh).class
+    if ($why) { Write-Host "[!!]  Last ssh error : $(Get-RecoverySshHint $why $script:SSH_HOST)" -ForegroundColor Yellow }
+    $t=Get-RecoveryStatus $identity takeover
+    if ($t.Pid) { Write-Host "[!!]  $(Get-RecoveryMessage takeover $t)" -ForegroundColor Red }
 
     Write-Host ""
     Write-Host "=== Proxy Status (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
