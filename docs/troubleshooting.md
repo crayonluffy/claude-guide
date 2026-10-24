@@ -60,6 +60,11 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 | `proxy-update` / `proxy-config` : not recognized | Your profile is older than v2.0. Re-run the wizard once (it keeps your settings): `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 | `cc -c` starts a *new* session instead of continuing | Same cause — profiles before v2.0 dropped extra arguments. Update as above. |
 | `proxy-status` shows `Tunnel BROKEN : stale ssh` | A leftover ssh from a dropped connection. Just run `cc` — it kills the stale ssh and starts a fresh tunnel automatically. |
+| `SSH login to <server> was refused` | The key isn't loaded or the user name is wrong. `ssh-add <key>` (or fix `SSH_USER` with `proxy-config`), then `proxy-restart`. |
+| `The host key of <server> changed` | Ask your admin whether the VM was rebuilt. If so: `ssh-keygen -R <server>`, then `ssh <server>` once and answer `yes`. |
+| `Cannot reach <server> ... Retrying` | Network down, Wi-Fi changed, or the VM is off. Nothing to do; sessions stay open and reconnect when it's back. |
+| `Another program (<name>, PID <pid>) took proxy port ...` | While the tunnel was down, `<name>` started listening on the proxy port, so Claude/Codex could be talking to it. Exit the session, close or reconfigure that program (or `proxy-config set HTTP_PORT 8090`), then `cc` again. Nothing was stopped for you. |
+| `cc-stop` refuses: `Claude/Codex session(s) are still running` | Another window still has `cc`/`cx` open (an npm-installed Claude shows up as `node`). Close it, use `proxy-restart` to reconnect instead, or `cc-stop -Force`. |
 | Setup looks wrong (bad alias, host, key, or profile) | Re-run the wizard: answer **n** to "keep these settings" and every prompt comes pre-filled with the current value, so you only retype what's wrong: `irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 \| iex` |
 
 ---
@@ -68,8 +73,13 @@ If a teardown ever looks stuck, `cc-stop` kills every **ssh** process on both po
 
 | Symptom | Fix |
 |---------|-----|
-| `lsof: command not found` (Linux / WSL) | Install it: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
-| Tunnel never comes up | Check the log: `cat /tmp/claude-tunnel.log` (auth error vs. network timeout). Also make sure the VM is running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager). |
+| `lsof: command not found` (Linux / WSL) | Not needed from 2.8.0 when `ss` is installed (it is on most systems). Older profiles: `sudo apt install lsof` (Debian/Ubuntu) or `sudo dnf install lsof`. |
+| Tunnel never comes up | `tunnel-start` prints the reason and SSH's own error. More in `proxy-status` and the log (`/tmp/claude-tunnel-<uid>.log`). Also make sure the VM is running [`webproxy-manager`](https://github.com/crayonluffy/forge/tree/main/webproxy-manager). |
+| `SSH login to <server> was refused` | The key isn't loaded or the user name is wrong. `ssh-add ~/.ssh/<your-key>` (or fix `CLAUDE_SSH_USER` with `proxy-config`), then `proxy-restart`. |
+| `The host key of <server> changed` | Ask your admin whether the VM was rebuilt. If so: `ssh-keygen -R <server>`, then `ssh <server>` once and answer `yes`. |
+| `Cannot reach <server> ... Retrying` | Network down, Wi-Fi changed, or the VM is off. Nothing to do; sessions stay open and reconnect when it's back. |
+| `Another program (<name>, PID <pid>) took proxy port ...` | While the tunnel was down, `<name>` started listening on the proxy port, so Claude/Codex could be talking to it. Exit the session, close or reconfigure that program (or `proxy-config set HTTP_PORT 8090`), then `cc` again. Nothing was stopped for you. |
+| `cc-stop` refuses: `Claude/Codex session(s) still running` | Another terminal still has `cc`/`cx` open. Close it, use `proxy-restart` to reconnect instead, or `cc-stop --force`. |
 | SSH keeps asking for the passphrase | Setup adds the key to the Keychain on macOS. To redo it: `ssh-add --apple-use-keychain ~/.ssh/<your-key>` (macOS) or `ssh-add ~/.ssh/<your-key>` (Linux). |
 | **WSL:** `cc`/`cx` returns immediately, no tunnel | A backgrounded `ssh -f` can't answer a passphrase prompt, and WSL has no persistent ssh-agent. The script auto-starts one; if it still fails, run `ssh-add ~/.ssh/<your-key>` once, or enable systemd in `/etc/wsl.conf` (`[boot]\nsystemd=true`). |
 | **WSL:** wizard says `No private key found` although it's in Downloads | It looks in WSL's `~/Downloads` *and* `C:\Users\*\Downloads`. If your Windows drive isn't mounted at `/mnt/c` (custom `automount` in `/etc/wsl.conf`), answer the "Full path to your private key" prompt with the mounted path. |

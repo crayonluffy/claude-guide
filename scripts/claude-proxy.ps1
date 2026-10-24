@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.7.1'
+$script:PROFILE_VERSION = '2.8.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
