@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.11.0'
+$script:PROFILE_VERSION = '2.11.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -1055,6 +1055,18 @@ function Get-AppCommand {
     return (Get-Command $Name -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 
+# Codex (0.16x+) runs a shared background server that keeps the proxy settings
+# it was started with: a later cx would go through that old proxy - another
+# node, a stopped tunnel, or no proxy at all. --no-daemon makes this Codex use
+# the proxy cx sets. Checked once per session; older Codex has no such option.
+function Get-CodexPreArgs($Exe) {
+    if ($null -eq $script:CODEX_NO_DAEMON) {
+        $help = try { & $Exe --help 2>$null | Out-String } catch { '' }
+        $script:CODEX_NO_DAEMON = [bool]($help -match '--no-daemon')
+    }
+    if ($script:CODEX_NO_DAEMON) { '--no-daemon' }
+}
+
 # Plain 'claude' / 'codex' with PLAIN_COMMANDS=auto: through the tunnel, in safe
 # mode (the app's own prompts), quietly - profile messages only on failure, on
 # stderr - so 'claude -p ... | ConvertFrom-Json' keeps working.
@@ -1079,6 +1091,7 @@ function Invoke-PlainLaunch {
     if ($script:TUNNEL_WATCHDOG) {
         try { $identity = Start-RecoveryOwner $name 6>$null; $subscriber = Start-RecoverySubscriber $identity $name } catch { [Console]::Error.WriteLine("[Warn] $($_.Exception.Message)") }
     }
+    if ($name -eq 'codex') { $rest = @(Get-CodexPreArgs $exe) + $rest }
     try { & $exe @rest }
     finally {
         $exitCode = $global:LASTEXITCODE
@@ -2139,6 +2152,7 @@ function cx {
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
     try {
     $pre = @()
+    $pre += @(Get-CodexPreArgs $exe)
     if (-not $o.Safe) { $pre += '--dangerously-bypass-approvals-and-sandbox' }
     $app = $o.App
     if ($ctx) { Invoke-WithNodeEnv $ctx { & $exe @pre @app } } else { & $exe @pre @app }

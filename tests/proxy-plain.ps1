@@ -61,6 +61,20 @@ try {
  Remove-Item function:codex
  'PASS: switching off removes only our functions'
 
+ # 6b) Codex without its shared background server (--no-daemon) when it supports it.
+ [IO.File]::WriteAllText((Join-Path $scratch 'codex.ps1'),"if (`$args[0] -eq '--help') { '      --no-daemon   Run without the shared background server'; return }; Write-Output ('codex ARGS:' + (`$args -join ' ')); `$global:LASTEXITCODE=3")
+ $script:CODEX_NO_DAEMON=$null
+ $script:PLAIN_COMMANDS='auto'; Set-PlainCommands
+ $out=@(codex resume 6>&1)
+ Assert ($out[-1] -eq 'codex ARGS:--no-daemon resume') "plain codex: $($out -join ' / ')"
+ $out=@(cx exec ls 6>&1)
+ Assert ($out[-1] -eq 'codex ARGS:--no-daemon --dangerously-bypass-approvals-and-sandbox exec ls') "cx: $($out -join ' / ')"
+ [IO.File]::WriteAllText((Join-Path $scratch 'codex.ps1'),"if (`$args[0] -eq '--help') { 'Usage: codex'; return }; Write-Output ('codex ARGS:' + (`$args -join ' '))")
+ $script:CODEX_NO_DAEMON=$null
+ $out=@(cx exec ls 6>&1)
+ Assert ($out[-1] -eq 'codex ARGS:--dangerously-bypass-approvals-and-sandbox exec ls') "old codex: $($out -join ' / ')"
+ 'PASS: cx runs Codex without its shared background server (--no-daemon) when Codex supports it'
+
  # 7) Not installed: a clear error, not recursion.
  $script:PLAIN_COMMANDS='auto'; Set-PlainCommands
  $env:PATH='/nonexistent'

@@ -37,6 +37,12 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.11.1 (Windows, macOS, Linux, WSL): `cx --node` works with new Codex versions
+
+- **Fixed: `cx --node sg` stops with `workspace routing discovery failed`.** New Codex versions (0.16x and later) use one shared background server. This server keeps the proxy it started with, so `cx` could not use the proxy of the node. `cx` and plain `codex` now start Codex with `--no-daemon` when Codex has this option. Each Codex window then uses its own proxy. This also closes a kill switch gap: before, the shared server could connect without the tunnel.
+
+Type `proxy-update` and open a new terminal window. Release tag: `v2.11.1`.
+
 ### 2.11.0 (Windows, macOS, Linux, WSL): stop one node; plain ssh aliases as nodes
 
 - **New: `cc-stop sg` / `cx-stop sg`.** Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). `cc-stop` without a node still stops all tunnels.
