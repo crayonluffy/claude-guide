@@ -185,19 +185,20 @@ The automated tests examine the alert sequence, the command arguments, failed al
 | `cx-safe` | The same, but Codex asks for approval. |
 | `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
 | `proxy-restart` | Replaces the tunnel for **all** terminal windows if it does not work. It does not change the proxy settings or `settings.json`, so Claude and Codex in other tabs continue. |
-| `cc-stop` | Proxy OFF for `cc` and `cx`. It stops each **ssh** on the tunnel ports (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. |
+| `cc-stop` | Proxy OFF for `cc` and `cx`, for all nodes. It stops each tunnel (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. |
 | `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
 | `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
 | `proxy-status` | Shows what runs, and your current external IP address. |
 | `proxy-doctor` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
 | `proxy-killswitch` | Shows the kill switch. `proxy-killswitch on` / `off` changes it. Refer to [Kill switch](#kill-switch-290). |
 | `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
-| `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel. |
+| `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |
 | `proxy-on` / `proxy-off` | Sets or clears the proxy settings in the terminal. With the kill switch on, `~/.claude/settings.json` keeps the proxy. |
 | `proxy-config` | Shows your settings. `proxy-config edit` opens the settings file. `proxy-config set SSH_HOST myvm` changes one value. |
 | `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
 | `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `proxy-nodes --refresh` (`-Refresh` on Windows) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
-| `proxy-node sg` | Makes `sg` the node that `cc` and `cx` use (restarts the tunnel if it is up). Short form: `cc --node sg`. |
+| `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel. Other terminals and the default node do not change. |
+| `proxy-node sg` | Makes `sg` the default node for `cc` and `cx` (restarts the tunnel if it is up). It refuses while a session uses the default node; `--force` changes it anyway. |
 | `chrome-proxy` | Opens Chrome through the SOCKS5 proxy (a separate profile; it starts the tunnel if necessary). `chrome-proxy sg` opens Chrome through node `sg` on its **own** tunnel and profile, so more regions can be open at the same time. `chrome-proxy sg https://…` also opens a URL. `chrome-proxy jp --profile work` (`-Profile` on Windows) opens a different Chrome profile through the same node. |
 | `chrome-profiles` | Shows the Chrome profiles of all nodes (`chrome-profiles jp`: only the profiles of `jp`). |
 | `cc-help` | Shows this list. (A new shell shows only one line: "claude-proxy v… ready". `BANNER=0` in the settings file stops it.) |
@@ -420,7 +421,8 @@ The profile reads the connection from your `jpvpn` alias (step 1). Thus the sett
 | `HTTP_PORT` | `8080` | The local HTTP port. The tunnel forwards it to the VM proxy (Claude and Codex). |
 | `REMOTE_PROXY_PORT` | `8888` | The tinyproxy port on the VM (webproxy-manager). |
 | `SOCKS_PORT` | `1080` | The local SOCKS5 port (Chrome and other applications). |
-| `NODE_SOCKS_BASE` | `1180` | The first port for the Chrome tunnels of the nodes (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
+| `NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (`cc --node <node>`). Refer to [Nodes](proxy-nodes.md). |
+| `NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
 | `NODES_FROM` | `''` | The VM that gives the node list over SSH (`proxy-nodes -From` sets it). Refer to [Nodes](proxy-nodes.md). |
 | `PROXY_DOMAIN` | `''` | Get the node list from the public DNS of this domain (`proxy-nodes -Domain` sets it). |
 | `CHROME_EXE` | `''` | Set it only if `chrome.exe` is not in Program Files or `%LOCALAPPDATA%`. |
@@ -535,7 +537,8 @@ The table shows all the keys of the settings file. A key that you do not write k
 | `CLAUDE_HTTP_PORT` | `8080` | The local HTTP port. The tunnel forwards it to the VM proxy (Claude and Codex). |
 | `CLAUDE_REMOTE_PROXY_PORT` | `8888` | The tinyproxy port on the VM (webproxy-manager). |
 | `CLAUDE_SOCKS_PORT` | `1080` | The local SOCKS5 port (Chrome and other applications). |
-| `CLAUDE_NODE_SOCKS_BASE` | `1180` | The first port for the Chrome tunnels of the nodes (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
+| `CLAUDE_NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (`cc --node <node>`). Refer to [Nodes](proxy-nodes.md). |
+| `CLAUDE_NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
 | `CLAUDE_NODES_FROM` | `""` | The VM that gives the node list over SSH (`proxy-nodes --from` sets it). Refer to [Nodes](proxy-nodes.md). |
 | `CLAUDE_PROXY_DOMAIN` | `""` | Get the node list from the public DNS of this domain (`proxy-nodes --domain` sets it). |
 | `CLAUDE_CHROME_BIN` | `""` | Set it only if Chrome is not in the usual location (macOS: the application name or path; WSL: `/mnt/c/.../chrome.exe`). |

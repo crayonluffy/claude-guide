@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.9.0'
+$script:PROFILE_VERSION = '2.10.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -3059,7 +3059,7 @@ function cc-help {
     Write-Host ""
     Write-Host "  -- nodes (jp / sg / us ...) --" -ForegroundColor DarkGray
     Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray
-    Write-Host "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
+    Write-Host "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
     Write-Host "  proxy-nodes -From jpvpn - get the node list privately from a VM over SSH (-Domain <d>: public DNS)" -ForegroundColor DarkGray

@@ -137,7 +137,10 @@ The background recovery cannot ask for a passphrase. Refer to [recovery settings
 | `Unknown node 'sg'` | The catalogue does not contain this node. To get the latest catalogue, type `proxy-nodes --refresh`. An alias in `~/.ssh/config` is also accepted. |
 | A node shows `<not provisioned>` | The admin added the node but not its address. You do not have to do anything. |
 | `sg tunnel failed to start`, or *Permission denied (publickey)* | Your key is not on that VM. Ask the admin. To examine it, type `ssh sgvpn`. The `Host sgvpn` block in `~/.ssh/config` uses the same `IdentityFile` as `jpvpn`. |
-| `Port 1181 (reserved for the sg tunnel) is used by '…'` | A different program uses a port from `1180` to `1189`. Type `proxy-config set NODE_SOCKS_BASE 1280` (Windows: the same key, without a prefix). |
+| `[Err] <program> (PID n) is on port 8181, which this node's tunnel uses` | A different program uses a port of the node tunnel. Close that program, or move the node ports with the `proxy-config set NODE_…_BASE` command in the message. |
+| `Node '<name>' would use port …, which the default tunnel uses` | The node ports and the main ports are the same. Use the `proxy-config set NODE_…_BASE` command in the message. |
+| `proxy-node sg`: `[Node] n session(s) use the default node` | A `cc` or `cx` session uses the default node. It would move to the new node. For one terminal, type `cc --node sg`. To change the default anyway, type `proxy-node sg --force`. |
+| `cc --node sg` worked before, but now the default node does not change | From 2.10, `cc --node` changes only that terminal. To change the default, type `proxy-node sg`. |
 | `<vm> answered, but doesn't serve the node list yet` | That VM runs the old `ForceCommand` of sshu-manager. Admin: install forge `proxynodes-manager` on that VM with `--sshd`. The profile did not change your setup. |
 | `<vm> has no 'claude-proxy-nodes' command` | forge `proxynodes-manager` is not installed on that VM. Or select a different VM that serves the list: `proxy-nodes --from <other vm>`. |
 | `Could not get the node list from <vm>: …` | The last line is the error from ssh. Type `ssh <vm>` to examine the connection. The list download cannot ask for a passphrase, so load a key with a passphrase into `ssh-agent`. `proxy-nodes --refresh` also tries the other VMs in your list. |

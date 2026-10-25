@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.9.0"
+CLAUDE_PROXY_VERSION="2.10.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -3335,7 +3335,7 @@ cc-help() {
     echo ""
     echo "  -- nodes (jp / sg / us ...) --"
     echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
-    echo "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)"
+    echo "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)"
     echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
     echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
     echo "  proxy-nodes --from jpvpn - get the node list privately from a VM over SSH (--domain <d>: public DNS)"

@@ -35,6 +35,25 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 ## Version history
 
+### 2.10.0 (Windows, macOS, Linux, WSL): more nodes at the same time
+
+Each node can have its own tunnel. You can use different nodes in different terminals at the same time.
+
+| Command | Before 2.10 | From 2.10 |
+|---|---|---|
+| `cc --node sg`, `cx --node sg`, `proxy-up --node sg` | Changed the default node and restarted the shared tunnel. Other terminals lost their connection. | Changes **this terminal only**. Node `sg` gets its own tunnel. Nothing is saved. |
+| `proxy-node sg` | Changed the default node. | The same, but it refuses while a `cc` or `cx` session uses the default node (`--force` changes it anyway). |
+| `chrome-proxy sg` | Started its own `ssh` that did not repair itself. | Uses the self-healing tunnel of `sg`. |
+| `tunnel-start`, `tunnel-stop`, `proxy-restart` | The default tunnel. | The default tunnel, or one node: `tunnel-stop sg`. |
+| `cc-stop` | The default tunnel and the Chrome tunnels. | All tunnels of all nodes. |
+| `proxy-status`, `proxy-doctor` | The default tunnel. | One line for each node tunnel. |
+
+> **Note:** If you used `cc --node sg` to change the default node, use `proxy-node sg` now.
+
+A node tunnel uses the ports `NODE_HTTP_BASE` + slot (new, default `8180`) and `NODE_SOCKS_BASE` + slot (`1180`). The first `chrome-proxy` or `tunnel-start` for a node replaces an old Chrome tunnel on these ports.
+
+Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.10.0` and `bash-v2.10.0`.
+
 ### 2.9.0 (Windows, macOS, Linux, WSL): kill switch
 
 Claude and Codex do not connect directly any more. When the tunnel is down, they cannot connect.

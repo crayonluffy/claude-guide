@@ -72,7 +72,8 @@ proxy-update    # get the newest profile; your settings (proxy-config) stay
 cc-install      # examine / install / update Node.js, Claude Code and Codex  (--check: report only)
 
 proxy-nodes     # the nodes (jp / jp2 / sg / us …) and the node that you use
-proxy-node sg   # move Claude and Codex to a different node   (or: cc --node sg)
+cc --node sg    # Claude through node sg, in this terminal only   (also cx --node sg)
+proxy-node sg   # make sg the default node for new terminals
 chrome-proxy us # a Chrome window through 'us': its own tunnel and profile; other nodes stay open
 chrome-proxy jp --profile work   # a different Chrome profile through the same node (chrome-profiles shows them)
 proxy-nodes --from jpvpn         # get the node list privately from one of your VMs (over SSH)
