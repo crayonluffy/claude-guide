@@ -203,6 +203,15 @@ assert test "$(printf '%s' "$nojq" | jq -r .env.NO_PROXY)" = 'localhost,a"b\c'
 assert test "$(printf '%s' "$nojq" | jq -r .env.HTTPS_PROXY)" = http://127.0.0.1:8181
 echo 'PASS: the --settings JSON is valid with and without jq'
 
+# 8) proxy-node changes the default only when no session would silently move.
+out=$(run '' '_recovery_sessions() { case "$1" in */main) echo 2;; *) echo 0;; esac; }; proxy-node sg; echo "rc=$?"; grep CLAUDE_SSH_HOST "$CLAUDE_PROXY_CONF"' 2>&1)
+case "$out" in *'2 session(s)'*'cc --node sg'*'--force'*'rc=1'*'CLAUDE_SSH_HOST=jpvpn'*) ;; *) echo "FAIL: proxy-node moved running sessions: $out" >&2; exit 1;; esac
+out=$(run '' '_tunnel_health() { echo down; }; _recovery_sessions() { case "$1" in */main) echo 2;; *) echo 0;; esac; }; _node_ensure_alias() { :; }; proxy-node --force sg >/dev/null; echo "rc=$?"; grep CLAUDE_SSH_HOST "$CLAUDE_PROXY_CONF"' 2>&1)
+case "$out" in *'rc=0'*'CLAUDE_SSH_HOST="sgvpn"'*) ;; *) echo "FAIL: proxy-node --force: $out" >&2; exit 1;; esac
+out=$(run '' '_tunnel_health() { echo down; }; _recovery_sessions() { echo 0; }; _node_ensure_alias() { :; }; proxy-node sg >/dev/null; echo "rc=$?"' 2>&1)
+case "$out" in *'rc=0'*) ;; *) echo "FAIL: proxy-node with no sessions: $out" >&2; exit 1;; esac
+echo 'PASS: proxy-node refuses to move running sessions unless --force'
+
 # No owner may outlive the test.
 for d in "$root"/*; do
     if _recovery_owner_pid "$d" >/dev/null; then echo "FAIL: owner left running in ${d##*/}" >&2; exit 1; fi

@@ -1642,8 +1642,12 @@ proxy-nodes() {
     echo ""
 }
 
-proxy-node() {
-    local want="${1:-}" line idx name alias host user sport pport rest
+proxy-node() {  # [--force] [node]
+    local force=0 want='' line idx name alias host user sport pport rest n dir
+    while [ $# -gt 0 ]; do
+        case "$1" in --force|-f) force=1 ;; *) want="$1" ;; esac
+        shift
+    done
     if [ -z "$want" ]; then
         name=$(_node_active_name)
         if [ -n "$name" ]; then
@@ -1668,6 +1672,16 @@ proxy-node() {
     if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then
         echo "[OK] '$name' is already the active node ($alias)"
         return 0
+    fi
+
+    # Sessions on the default tunnel would move to the new node without notice.
+    n=0
+    if dir=$(_recovery_identity main 2>/dev/null); then n=$(_recovery_sessions "$dir"); fi
+    if [ "$n" -gt 0 ] && [ "$force" -eq 0 ]; then
+        echo "[Node] $n session(s) use the default node ($CLAUDE_SSH_HOST). They would move to $name."
+        echo "       For this terminal only: cc --node $name   (or cx --node $name)"
+        echo "       Move them anyway:        proxy-node $name --force"
+        return 1
     fi
 
     local was_up=0 env_on=0
