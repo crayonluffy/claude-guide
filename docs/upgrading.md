@@ -35,6 +35,8 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 ## Version history
 
+From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
+
 ### 2.10.0 (Windows, macOS, Linux, WSL): more nodes at the same time
 
 Each node can have its own tunnel. You can use different nodes in different terminals at the same time.
@@ -52,7 +54,7 @@ Each node can have its own tunnel. You can use different nodes in different term
 
 A node tunnel uses the ports `NODE_HTTP_BASE` + slot (new, default `8180`) and `NODE_SOCKS_BASE` + slot (`1180`). The first `chrome-proxy` or `tunnel-start` for a node replaces an old Chrome tunnel on these ports.
 
-Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.10.0` and `bash-v2.10.0`.
+Type `proxy-update` and open a new terminal window. Release tag: `v2.10.0`. The release notes are on the GitHub release of the same name.
 
 ### 2.9.0 (Windows, macOS, Linux, WSL): kill switch
 
@@ -66,7 +68,7 @@ Claude and Codex do not connect directly any more. When the tunnel is down, they
 
 The kill switch is on after the update. To use the behavior from before 2.9.0, type `proxy-killswitch off`.
 
-Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.9.0` and `bash-v2.9.0`.
+Type `proxy-update` and open a new terminal window. Release tag: `v2.9.0`. The release notes are on the GitHub release of the same name.
 
 ### 2.8.0 (Windows, macOS, Linux, WSL): one self-healing tunnel, clearer errors
 
@@ -79,7 +81,7 @@ Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2
 - Windows: `proxy-status` is easier to read. The background owner runs in PowerShell, not in the ISE. `tunnel-start` tells you if `ssh` is not installed.
 - macOS, Linux, WSL: the profile works without `lsof` when `ss` is installed. A stopped `ssh` cannot stop the recovery any more.
 
-Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.8.0` and `bash-v2.8.0`.
+Type `proxy-update` and open a new terminal window. Release tag: `v2.8.0`. The release notes are on the GitHub release of the same name.
 
 ### 2.7.1 (Windows, macOS, Linux, WSL): `cc` and `cx` start again on Windows
 
@@ -145,7 +147,7 @@ chrome-proxy sg --profile sg https://www.google.com/
 
 Close the proxy Chrome windows that have the problem before you try again. `proxy-nodes --refresh` updates the catalogue. The new load of the profile updates the `chrome-proxy` command. If the browser continues to fail, refer to [node troubleshooting](proxy-nodes.md#chrome-opens-httpsg-or-reports-err_socks_connection_failed) for the SSH and SOCKS checks.
 
-Each script has its own version tag: `powershell-v2.4.1` for `claude-proxy.ps1` and `bash-v2.5.2` for `claude-proxy.sh`. Later versions use the same names: `powershell-v<version>` and `bash-v<version>`.
+Each script has its own version tag: `powershell-v2.4.1` for `claude-proxy.ps1` and `bash-v2.5.2` for `claude-proxy.sh`. From 2.8.0, each version has one tag for the two profiles: `v<version>` (for example `v2.10.0`).
 
 ### Earlier versions
 
