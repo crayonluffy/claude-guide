@@ -3057,9 +3057,12 @@ function cc-help {
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host "  cc-install      - Check / install / update Node.js, Claude Code and Codex (-Check: report only)" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  -- nodes (jp / sg / us ...) --" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray
-    Write-Host "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
+    Write-Host "  -- nodes (jp / sg / us ...): several at the same time, one tunnel each --" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes     - List the nodes; a node must be listed here first (-Refresh: get the latest list)" -ForegroundColor DarkGray
+    Write-Host "  cc --node sg    - Claude through 'sg' in THIS window only (also: cx --node sg, proxy-up -Node sg)" -ForegroundColor DarkGray
+    Write-Host "                    e.g. window 1: cc (default node)   window 2: cc --node sg   - both run at the same time" -ForegroundColor DarkGray
+    Write-Host "  proxy-node sg   - Make 'sg' the default node for new cc / cx (refuses while a session uses it; -Force)" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start -Node sg - Start only the tunnel of 'sg' (tunnel-stop -Node sg / proxy-restart -Node sg)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
     Write-Host "  proxy-nodes -From jpvpn - get the node list privately from a VM over SSH (-Domain <d>: public DNS)" -ForegroundColor DarkGray
@@ -3070,8 +3073,8 @@ function cc-help {
     Write-Host "  proxy-shortcut  - Desktop shortcut that opens a window with cc/cx ready (no `$PROFILE needed)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
-    Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray
-    Write-Host "  tunnel-stop     - Stop the SSH tunnel" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start    - Start the SSH tunnel of the default node (tunnel-start -Node sg: node sg only)" -ForegroundColor DarkGray
+    Write-Host "  tunnel-stop     - Stop the SSH tunnel of the default node (tunnel-stop -Node sg: node sg only)" -ForegroundColor DarkGray
     Write-Host "  proxy-on        - Set proxy env vars + sync Claude settings.json" -ForegroundColor DarkGray
     Write-Host "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)" -ForegroundColor DarkGray
     Write-Host "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly" -ForegroundColor DarkGray
