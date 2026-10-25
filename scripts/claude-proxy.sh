@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.11.0"
+CLAUDE_PROXY_VERSION="2.11.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -2255,6 +2255,17 @@ _bin_path() {
     if [ -n "${ZSH_VERSION:-}" ]; then whence -p "$1"; else type -P "$1"; fi
 }
 
+# Codex (0.16x+) runs a shared background server that keeps the proxy settings
+# it was started with: a later cx would go through that old proxy - another
+# node, a stopped tunnel, or no proxy at all. --no-daemon makes this Codex use
+# the proxy cx sets. Checked once per shell; older Codex has no such option.
+_codex_no_daemon() {
+    if [ -z "${_CLAUDE_CODEX_NO_DAEMON:-}" ]; then
+        if command codex --help 2>/dev/null | grep -q -- '--no-daemon'; then _CLAUDE_CODEX_NO_DAEMON=yes; else _CLAUDE_CODEX_NO_DAEMON=no; fi
+    fi
+    [ "$_CLAUDE_CODEX_NO_DAEMON" = yes ]
+}
+
 # _launch_via_proxy <label> <binary> <install hint> <skip-prompts flag> [args...]
 # Flags the wrapper understands: --safe (keep the app's prompts), --no-verify.
 # EVERYTHING ELSE is passed straight to the app, so 'cc -c', 'cc -r',
@@ -2318,6 +2329,7 @@ _launch_via_proxy() {
     [ "$quiet" -eq 1 ] || echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
     # 'command': the real program, not a plain-command wrapper of the same name.
     # A per-terminal node sets the proxy for this one process only.
+    if [ "$bin" = codex ] && _codex_no_daemon; then pre_args+=(--no-daemon); fi
     [ $safe -eq 1 ] || pre_args+=("$skip_flag")
     if [ -n "$url" ]; then
         if env http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" \

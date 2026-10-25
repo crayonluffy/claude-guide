@@ -73,3 +73,26 @@ set +e; out=$(run auto 'PATH=/usr/bin:/bin; claude -p hi' 2>&1); rc=$?; set -e
 assert test "$rc" != 0
 case "$out" in *"'claude' not found"*) ;; *) echo "FAIL: missing binary: $out" >&2; exit 1;; esac
 echo 'PASS: a missing binary is reported, not recursed into'
+
+# 8) Codex runs a shared background server that keeps the proxy it started
+#    with. cx must not use it: --no-daemon (when this Codex supports it) makes
+#    Codex use the proxy cx sets - the node of this terminal, never direct.
+cat > "$scratch/bin/codex" <<BIN
+#!/bin/sh
+if [ "\$1" = --help ]; then echo "      --no-daemon   Run without the shared background server"; exit 0; fi
+echo "codex ARGS:\$*"
+echo call >> "$scratch/codex.calls"
+exit 3
+BIN
+chmod +x "$scratch/bin/codex"
+set +e; out=$(run off 'cx exec ls' 2>/dev/null | tail -1); set -e
+assert test "$out" = 'codex ARGS:--no-daemon --dangerously-bypass-approvals-and-sandbox exec ls'
+set +e; out=$(run auto 'codex resume' 2>/dev/null); set -e
+assert test "$out" = 'codex ARGS:--no-daemon resume'
+set +e; out=$(run auto 'codex --version' 2>/dev/null); set -e
+assert test "$out" = 'codex ARGS:--version'
+# An older Codex without the option: nothing is added.
+printf '#!/bin/sh\n[ "$1" = --help ] && { echo "Usage: codex"; exit 0; }\necho "codex ARGS:$*"\n' > "$scratch/bin/codex"
+set +e; out=$(run off 'cx exec ls' 2>/dev/null | tail -1); set -e
+assert test "$out" = 'codex ARGS:--dangerously-bypass-approvals-and-sandbox exec ls'
+echo 'PASS: cx runs Codex without its shared background server (--no-daemon) when Codex supports it'
