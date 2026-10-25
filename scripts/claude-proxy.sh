@@ -2330,6 +2330,7 @@ _launch_via_proxy() {
     return "$rc"
 }
 
+cx-stop() { cc-stop "$@"; }   # Claude and Codex share each tunnel: the same stop
 cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
 cx() { _launch_via_proxy Codex  codex  "npm install -g @openai/codex"            --dangerously-bypass-approvals-and-sandbox "$@"; }
 cc-safe() { cc --safe "$@"; }
@@ -2351,11 +2352,40 @@ else
     case "$(type -t codex 2>/dev/null; whence -w codex 2>/dev/null)" in *function*) unset -f codex;; esac
 fi
 
-cc-stop() {
+# cc-stop <node> / cx-stop <node>: stop the tunnel of one node only. The other
+# nodes keep running. Refuses while a cc/cx session uses that node (--force).
+_node_stop() {  # <node> <force 0|1>
+    local slot dir n url
+    slot=$(_node_slot "$1") || return 1
+    dir="$(_recovery_root)/$slot"
+    n=$(_recovery_sessions "$dir" 2>/dev/null || echo 0)
+    if [ "${n:-0}" -gt 0 ] && [ "$2" -eq 0 ]; then
+        echo "[Stop] $n Claude/Codex session(s) use node $1. Stopping its tunnel would cut them off."
+        echo "       Proxy stuck?  proxy-restart $1     Stop anyway?  cc-stop $1 --force"
+        return 1
+    fi
+    if [ "$slot" = main ]; then
+        tunnel-stop || return 1
+        proxy-off
+        return 0
+    fi
+    tunnel-stop "$1" || return 1
+    # This shell went through that node ('proxy-up --node'): clear it too.
+    url="http://127.0.0.1:$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT")"
+    if [ "${HTTPS_PROXY:-}" = "$url" ]; then
+        unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
+        echo "[OK] Env vars cleared (this shell used node $1)"
+    fi
+}
+
+cc-stop() {  # [--force] [node]
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
     # result so cc-stop never falsely claims success when a port is still held.
-    local rc=0 force=0 others n sessions dir
-    case "${1:-}" in --force|-f) force=1 ;; esac
+    local rc=0 force=0 others n sessions dir node='' a
+    for a in "$@"; do
+        case "$a" in --force|-f) force=1 ;; *) node=$a ;; esac
+    done
+    if [ -n "$node" ]; then _node_stop "$node" "$force"; return; fi
 
     # The tunnel and settings.json are shared by every window. Stopping them
     # while Claude/Codex runs elsewhere is what used to kill the other tabs.
@@ -3361,6 +3391,7 @@ cc-help() {
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
     echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
+    echo "  cc-stop sg      - Stop only the tunnel of node 'sg' (cx-stop sg: the same); other nodes keep running"
     echo "  proxy-notify test - show a real desktop test alert (no proxy/session changes)"
     echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
     echo "  proxy-status    - Show what's running + your external IP"

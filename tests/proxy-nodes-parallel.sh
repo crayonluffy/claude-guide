@@ -287,3 +287,29 @@ run '' 'cc --node devbox --no-verify -p hi' >/dev/null 2>&1
 assert grep -qx 'tunnel-start devbox' "$scratch/ts7"
 assert test "$(sed -n 2p "$scratch/claude.argv" | jq -r .env.HTTPS_PROXY)" = http://127.0.0.1:8280
 echo 'PASS: cc --node <plain ssh alias> goes through that alias'
+
+# 12) cc-stop <node> / cx-stop <node>: stop one node's tunnel only.
+out=$(run '' '
+    tunnel-stop() { echo "tunnel-stop ${1:-default}"; }; _recovery_stop_owners() { echo "stop-all"; }
+    proxy-off() { echo proxy-off; }; _node_tunnels_stop() { :; }; _other_agents() { :; }
+    d=$(_recovery_identity node-sg); mkdir -p "$d/sessions"; _recovery_process_identity $$ > "$d/sessions/$$"
+    echo "== guarded"; cc-stop sg; echo "rc=$?"
+    echo "== forced"; cc-stop sg --force
+    rm -f "$d/sessions/$$"
+    echo "== cx"; cx-stop sg
+    echo "== env"; export HTTPS_PROXY=http://127.0.0.1:8181; cc-stop sg >/dev/null; echo "env:${HTTPS_PROXY:-cleared}"
+    echo "== other env"; export HTTPS_PROXY=http://127.0.0.1:8080; cc-stop sg >/dev/null; echo "env:${HTTPS_PROXY:-cleared}"
+    echo "== default"; cc-stop jp
+    echo "== unknown"; cc-stop nowhere; echo "rc=$?"' 2>&1)
+sect() { printf '%s\n' "$out" | sed -n "/^== $1\$/,/^== /p"; }
+case "$(sect guarded)" in *'1 Claude/Codex session(s) use node sg'*'cc-stop sg --force'*'rc=1'*) ;; *) echo "FAIL: guard: $(sect guarded)" >&2; exit 1;; esac
+if sect guarded | grep -q 'tunnel-stop'; then echo 'FAIL: stopped under a session' >&2; exit 1; fi
+sect forced | grep -qx 'tunnel-stop sg' || { echo "FAIL: --force: $(sect forced)" >&2; exit 1; }
+sect cx | grep -qx 'tunnel-stop sg' || { echo "FAIL: cx-stop: $(sect cx)" >&2; exit 1; }
+if printf '%s\n' "$out" | sed -n '/^== forced$/,/^== default$/p' | grep -q 'stop-all\|proxy-off'; then echo 'FAIL: cc-stop sg stopped other nodes or cleared the shell' >&2; exit 1; fi
+sect env | grep -qx 'env:cleared' || { echo "FAIL: env of sg not cleared: $(sect env)" >&2; exit 1; }
+sect 'other env' | grep -qx 'env:http://127.0.0.1:8080' || { echo "FAIL: other env cleared: $(sect 'other env')" >&2; exit 1; }
+case "$(sect default)" in *'tunnel-stop default'*'proxy-off'*) ;; *) echo "FAIL: cc-stop <default node>: $(sect default)" >&2; exit 1;; esac
+if sect default | grep -q 'stop-all'; then echo 'FAIL: cc-stop <default> stopped other nodes' >&2; exit 1; fi
+case "$(sect unknown)" in *"Unknown node 'nowhere'"*'rc=1'*) ;; *) echo "FAIL: unknown: $(sect unknown)" >&2; exit 1;; esac
+echo 'PASS: cc-stop / cx-stop <node> stop one node only, guarded by its sessions'
