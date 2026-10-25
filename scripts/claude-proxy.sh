@@ -65,6 +65,11 @@ CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
 # (0-based, catalogue order) listens on NODE_SOCKS_BASE + i.
 CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
 CLAUDE_NODE_SOCKS_BASE=1180
+# 2.10: every node can have its own tunnel at the same time ('cc --node sg' in
+# one terminal, the default node in another). Node i (its catalogue slot) uses
+# HTTP NODE_HTTP_BASE + i and SOCKS NODE_SOCKS_BASE + i; the default node keeps
+# HTTP_PORT / SOCKS_PORT.
+CLAUDE_NODE_HTTP_BASE=8180
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
 # Where 'proxy-nodes --refresh' gets the node list from (set with 'proxy-nodes --from / --domain'):
@@ -146,7 +151,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -1264,6 +1269,46 @@ _node_provisioned() {  # <host>
 
 _node_socks_port() {  # <idx>
     echo $((CLAUDE_NODE_SOCKS_BASE + $1))
+}
+
+# The recovery slot of a node: 'main' for the default node (main ports), else
+# node-<name>. Fails, with the reason on stderr, for an unknown or unprovisioned node.
+_node_slot() {  # <node name or alias>
+    local line idx name alias host
+    if ! line=$(_node_lookup "$1"); then
+        [ "$1" != "$CLAUDE_SSH_HOST" ] || { echo main; return 0; }
+        echo "[Err] Unknown node '$1'. 'proxy-nodes' lists them ('proxy-nodes --refresh' fetches the latest)." >&2
+        return 1
+    fi
+    IFS='|' read -r idx name alias host _ <<< "$line"
+    if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then echo main; return 0; fi
+    if ! _node_provisioned "$host"; then
+        echo "[Err] Node '$name' has no address in the catalogue yet - ask your admin, then 'proxy-nodes --refresh'." >&2
+        return 1
+    fi
+    echo "node-$name"
+}
+
+# Point this shell's tunnel settings at a node: its ssh alias (which carries
+# user, key and port) and its fixed ports. Call it in a subshell - the worker
+# that runs there then supervises that node. The default node changes nothing.
+_node_ctx() {  # <node name or alias>
+    local line idx name alias host user sport pport http socks
+    [ "$(_node_slot "$1")" != main ] || return 0
+    line=$(_node_lookup "$1") || return 1
+    IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
+    if [ "$http" = "$CLAUDE_HTTP_PORT" ] || [ "$http" = "$CLAUDE_SOCKS_PORT" ]; then
+        echo "[Err] Node '$name' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $((CLAUDE_HTTP_PORT + 100))" >&2
+        return 1
+    fi
+    if [ "$socks" = "$CLAUDE_HTTP_PORT" ] || [ "$socks" = "$CLAUDE_SOCKS_PORT" ]; then
+        echo "[Err] Node '$name' would use port $socks, which the default tunnel uses. Fix: proxy-config set NODE_SOCKS_BASE $((CLAUDE_SOCKS_PORT + 100))" >&2
+        return 1
+    fi
+    CLAUDE_SSH_HOST=$alias CLAUDE_SSH_USER='' CLAUDE_SSH_KEY='' CLAUDE_SSH_PORT=${sport:-22}
+    CLAUDE_HTTP_PORT=$http CLAUDE_SOCKS_PORT=$socks CLAUDE_REMOTE_PROXY_PORT=${pport:-8888}
+    export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_SOCKS_PORT CLAUDE_REMOTE_PROXY_PORT
 }
 
 _ssh_config_has_alias() {  # <alias>
