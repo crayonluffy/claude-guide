@@ -13,6 +13,7 @@ foreach($case in @(@(0,'healthy','healthy','none'),@(5,'recovering','recovering'
 }
 'PASS: combined desktop outage, partial recovery, and one prolonged warning'
 $script:DESKTOP_NOTIFICATIONS='off'
+$script:WATCHDOG_IDLE_INTERVAL=0   # an idle owner would otherwise wait 60s per healthy pass
 $c=New-RecoveryDesktopContext
 Assert ($c.Backend -eq 'off') 'off switch ignored'
 Assert (-not (Send-RecoveryDesktopNotification $c lost 'Claude and Codex')) 'off context delivered notification'

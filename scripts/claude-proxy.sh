@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.7.1"
+CLAUDE_PROXY_VERSION="2.10.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -65,6 +65,11 @@ CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
 # (0-based, catalogue order) listens on NODE_SOCKS_BASE + i.
 CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
 CLAUDE_NODE_SOCKS_BASE=1180
+# 2.10: every node can have its own tunnel at the same time ('cc --node sg' in
+# one terminal, the default node in another). Node i (its catalogue slot) uses
+# HTTP NODE_HTTP_BASE + i and SOCKS NODE_SOCKS_BASE + i; the default node keeps
+# HTTP_PORT / SOCKS_PORT.
+CLAUDE_NODE_HTTP_BASE=8180
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
 # Where 'proxy-nodes --refresh' gets the node list from (set with 'proxy-nodes --from / --domain'):
@@ -83,6 +88,18 @@ CLAUDE_PROXY_DOMAIN=""
 CLAUDE_SYNC_SETTINGS=1
 CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 
+# Kill switch (2.9): Claude and Codex fail closed. While 'on', Claude's
+# settings.json keeps the proxy permanently - proxy-off / cc-stop clear only the
+# shell - so plain 'claude' and the IDE extensions go through the tunnel or get
+# "connection refused", never out from your own IP. cc / cx also refuse to start
+# when something would leak (a NO_PROXY that exempts the API, another program on
+# the proxy port). 'off' = the pre-2.9 behaviour. See 'proxy-killswitch'.
+CLAUDE_KILLSWITCH=on
+# auto = plain 'claude' and 'codex' also start through the tunnel (like cc-safe /
+# cx-safe, but quiet: only the app writes to stdout). off = they run untouched:
+# Claude is still protected by its pinned settings; plain 'codex' is not.
+CLAUDE_PLAIN_COMMANDS=off
+
 # WSL only: ALSO keep the WINDOWS-side Claude (%USERPROFILE%\.claude\settings.json)
 # pointed at this tunnel while it is up. Windows reaches WSL's 127.0.0.1 ports
 # through WSL2 localhost forwarding (on by default). 1 to enable.
@@ -96,7 +113,11 @@ CLAUDE_NO_PROXY="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 CLAUDE_PROXY_BANNER=1
 
 # Where the background ssh writes its errors (auth failure vs. network timeout).
-CLAUDE_TUNNEL_LOG="/tmp/claude-tunnel.log"
+# Per-UID: a single shared /tmp/claude-tunnel.log is created by whoever runs
+# first (often root, mode 644), and then every `ssh 2>$CLAUDE_TUNNEL_LOG` by any
+# other user fails on the REDIRECT - before ssh even starts - so the tunnel dies
+# with no usable error. The pidfile below derives from this, so it splits too.
+CLAUDE_TUNNEL_LOG="${CLAUDE_TUNNEL_LOG:-${TMPDIR:-/tmp}/claude-tunnel-$(id -u).log}"
 
 # v2.5: every terminal tab shares ONE tunnel, so one hung tunnel used to freeze
 # them all. A small background watchdog now owns the ssh process: it restarts
@@ -107,6 +128,7 @@ CLAUDE_TUNNEL_LOG="/tmp/claude-tunnel.log"
 CLAUDE_TUNNEL_WATCHDOG=1
 CLAUDE_WATCHDOG_INTERVAL=5      # seconds between health checks
 CLAUDE_WATCHDOG_FAILS=2          # failed checks in a row before the tunnel is restarted
+CLAUDE_WATCHDOG_IDLE_INTERVAL=60 # seconds between checks while no cc/cx session uses the tunnel
 
 CLAUDE_WATCHDOG_NOTICE_AFTER=60
 CLAUDE_WATCHDOG_PROBE_TIMEOUT=3
@@ -129,19 +151,49 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
 # ============================================================
 
 # PIDs listening on a TCP port, one per line (empty if none).
+# Minimal Linux images ship without lsof; ss -p names the same processes (our own).
 _listeners() {
-    lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null
+    if command -v lsof >/dev/null 2>&1; then lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null; return 0; fi
+    ss -ltnp 2>/dev/null | awk -v port="$1" 'NR > 1 && $4 ~ ("[:.]" port "$")' \
+        | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
+}
+
+# TCP ports a PID listens on, one per line.
+_pid_listen_ports() {
+    if command -v lsof >/dev/null 2>&1; then
+        lsof -aPn -p "$1" -iTCP -sTCP:LISTEN -Fn 2>/dev/null | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u
+        return 0
+    fi
+    # "pid=12," never matches pid=123.
+    ss -ltnp 2>/dev/null | awk -v pid="pid=$1," 'NR > 1 && index($0, pid) { n = split($4, a, ":"); print a[n] }' | sort -u
+}
+
+# Is ANYONE listening on this TCP port - including another user?
+# lsof and ss only NAME processes you own, but both still SEE the socket, so
+# "can I bind here?" must not be answered from a PID list. A root-owned :8080
+# looked FREE to a normal user, so the fallback below never fired and ssh died
+# with "bind: Address already in use" seconds AFTER reporting [OK].
+_port_bound() {
+    local p=$1
+    if command -v ss >/dev/null 2>&1; then
+        # $4 is "Local Address:Port" ([::1]:8080, 0.0.0.0:8080, *:8080).
+        # The [:.] guard stops :80 matching :8080.
+        ss -ltn 2>/dev/null | awk -v port="$p" '$4 ~ ("[:.]" port "$") { f = 1 } END { exit !f }'
+        return $?
+    fi
+    # No ss: lsof still sees only our own sockets, but it beats nothing.
+    [ -n "$(_listeners "$p")" ]
 }
 
 _port_in_use() {
-    [ -n "$(_listeners "$1")" ]
+    _port_bound "$1"
 }
 
 # Short command name of a PID ("" if gone).
@@ -196,9 +248,7 @@ _tunnel_health() {
         pid=$socks_pids
         name=$(_proc_name "$pid")
         if _is_ssh_name "$name"; then
-            other=$(lsof -aPn -p "$pid" -iTCP -sTCP:LISTEN -Fn 2>/dev/null \
-                    | sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u \
-                    | grep -vx "$CLAUDE_SOCKS_PORT")
+            other=$(_pid_listen_ports "$pid" | grep -vx "$CLAUDE_SOCKS_PORT")
             if [ "$(_count "$other")" -eq 1 ]; then
                 echo "ok $pid $name $other"
             elif printf '%s\n' "$other" | grep -qx "$CLAUDE_HTTP_PORT"; then
@@ -296,8 +346,12 @@ _recovery_step() {
     fi
     printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$phase" "$start" "$now" "$notice" "$retries" "$next" "$gen" "$failure" "$event"
 }
-_recovery_message() {
+_recovery_message() {  # <event> [pid|name|port, for takeover]
+    local pid name port
     case "$1" in
+        takeover)
+            IFS='|' read -r pid name port <<< "${2:-}"
+            echo "Another program (${name:-unknown}, PID $pid) took proxy port $port while the tunnel was down. Claude/Codex traffic may go to it - exit this session now; nothing was stopped." ;;
         lost) echo 'Proxy connection lost. Retrying; proxy settings remain enabled.' ;;
         prolonged) echo 'Proxy is still unavailable. Your session has not been terminated. Keep retrying, or exit normally and resume later.' ;;
         restored) echo 'Proxy connection restored. Your session is still running. Retry any failed request if the application did not retry it automatically.' ;;
@@ -370,13 +424,84 @@ _recovery_signal_owned() {
     [ -n "$2" ] && [ "$actual" = "$2" ] || return 1
     kill -TERM "$1" 2>/dev/null
 }
+# Stop the owner's own ssh without ever blocking on it: a stopped or wedged ssh
+# leaves SIGTERM pending, and 'wait' on it would hang the owner - and recovery for
+# every terminal. TERM, then KILL after 5s. A zombie (exited, not yet reaped) is gone.
+_recovery_stop_ssh() {  # <pid> <start identity>
+    local i=0
+    _recovery_signal_owned "$1" "$2" || return 0
+    while [ "$(_recovery_process_identity "$1" 2>/dev/null)" = "$2" ] && [ "$i" -lt 50 ]; do
+        case "$(ps -o stat= -p "$1" 2>/dev/null)" in Z*) break;; esac
+        sleep .1; i=$((i+1))
+    done
+    if [ "$i" -ge 50 ]; then kill -KILL "$1" 2>/dev/null || :; fi
+    wait "$1" 2>/dev/null || :
+}
 _recovery_retry_record() { printf '%s\n' "$1" | awk -F'|' -v OFS='|' -v n="$2" -v t="$3" '{$5=n;$6=t;print}'; }
+_recovery_root() { echo "${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery"; }
+# One owner per user and slot. The slot is 'main' (the default node on the main
+# ports). It must NOT depend on host or ports: a terminal with stale settings
+# would otherwise get its own owner and fight the live one for the same ports.
 _recovery_identity() {
-    local root="${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery" key
-    key=$(printf '%s\n' "$CLAUDE_SSH_USER" "$CLAUDE_SSH_HOST" "$CLAUDE_SSH_PORT" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_REMOTE_PROXY_PORT" | cksum | awk '{print $1}')
-    (umask 077; mkdir -p "$root/$key") || return 1
-    chmod 700 "$root" "$root/$key" || return 1
-    printf '%s/%s\n' "$root" "$key"
+    local root slot="${1:-main}"
+    root=$(_recovery_root)
+    (umask 077; mkdir -p "$root/$slot") || return 1
+    chmod 700 "$root" "$root/$slot" || return 1
+    printf '%s/%s\n' "$root" "$slot"
+}
+# The live owner publishes the tunnel it runs as key=value lines. Read back as
+# literal text (never eval'd), so a value cannot execute anything.
+_recovery_record_write() {
+    _recovery_write "$1/tunnel.rec" "$(printf 'host=%s\nuser=%s\nport=%s\nkey=%s\nhttp=%s\nsocks=%s\nremote=%s' \
+        "$CLAUDE_SSH_HOST" "$CLAUDE_SSH_USER" "$CLAUDE_SSH_PORT" "$CLAUDE_SSH_KEY" \
+        "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_REMOTE_PROXY_PORT")" rec
+}
+_recovery_record_get() { sed -n "s/^$2=//p" "$1/tunnel.rec" 2>/dev/null | head -1; }
+# A terminal whose settings are stale (old conf, fallback port, another node)
+# must use the tunnel that is actually running, not recompute its own.
+# Adopts only while the owner is live; otherwise changes nothing.
+_recovery_adopt() {
+    local dir="${1:-}" v
+    [ -n "$dir" ] || dir=$(_recovery_identity) || return 1
+    _recovery_owner_pid "$dir" >/dev/null || return 1
+    [ -r "$dir/tunnel.rec" ] || return 1
+    v=$(_recovery_record_get "$dir" host);   [ -z "$v" ] || CLAUDE_SSH_HOST=$v
+    CLAUDE_SSH_USER=$(_recovery_record_get "$dir" user)
+    v=$(_recovery_record_get "$dir" port);   [ -z "$v" ] || CLAUDE_SSH_PORT=$v
+    CLAUDE_SSH_KEY=$(_recovery_record_get "$dir" key)
+    v=$(_recovery_record_get "$dir" http);   [ -z "$v" ] || CLAUDE_HTTP_PORT=$v
+    v=$(_recovery_record_get "$dir" socks);  [ -z "$v" ] || CLAUDE_SOCKS_PORT=$v
+    v=$(_recovery_record_get "$dir" remote); [ -z "$v" ] || CLAUDE_REMOTE_PROXY_PORT=$v
+    export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_PORT CLAUDE_SSH_KEY \
+           CLAUDE_HTTP_PORT CLAUDE_SOCKS_PORT CLAUDE_REMOTE_PROXY_PORT
+}
+# Why an ssh exited, from its own stderr: auth|hostkey|forward|network|unknown.
+# Auth and hostkey failures will not heal by retrying, so the owner waits longer
+# for them; network trouble retries at the normal pace.
+_recovery_ssh_class() {
+    local f="$1"
+    [ -s "$f" ] || { echo unknown; return; }
+    if grep -qiE 'host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' "$f"; then echo hostkey
+    elif grep -qiE 'permission denied|too many authentication failures|load key|no such identity|bad permissions' "$f"; then echo auth
+    elif grep -qiE 'address already in use|cannot listen to port|could not request local forwarding|forwarding failed' "$f"; then echo forward
+    elif grep -qiE 'timed out|could not resolve|connection refused|no route to host|network is unreachable|connection closed|connection reset|broken pipe' "$f"; then echo network
+    else echo unknown
+    fi
+}
+_recovery_ssh_hint() {  # <class> <server>
+    case "$1" in
+        auth)    echo "SSH login to $2 was refused - load your key (ssh-add <key>) or check the user name, then 'proxy-restart'." ;;
+        hostkey) echo "The host key of $2 changed. If your admin expected that: ssh-keygen -R $2, then run 'ssh $2' once." ;;
+        forward) echo "A tunnel port is held by another program - see 'proxy-status'." ;;
+        network) echo "Cannot reach $2 - network down, Wi-Fi changed, or the server is offline. Retrying." ;;
+        *)       echo "ssh to $2 exited without a known reason - see $CLAUDE_TUNNEL_LOG" ;;
+    esac
+}
+# Last exit reason, as 'class|time|last stderr line' (read by proxy-status and terminals).
+_recovery_ssh_note() {  # <dir> <class> <now>
+    local last
+    last=$(tail -n 1 "$1/ssh.err" 2>/dev/null | tr -d '\r|')
+    _recovery_write "$1/ssh.status" "$2|$3|$last" ssh
 }
 _recovery_status() { case "$2" in claude|codex) cat "$1/$2.state" 2>/dev/null;; *) return 1;; esac; }
 _recovery_write() {
@@ -395,13 +520,71 @@ _recovery_owner_stop() {
     fi
     return 0
 }
-_recovery_owner_start() {
-    local dir pid i=0
-    dir=$(_recovery_identity) || return 1
-    if ! _recovery_owner_pid "$dir" >/dev/null; then
-        if _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
-            echo '[Recovery] Existing tunnel has no current recovery owner. Run proxy-restart once to migrate it.' >&2
+# A tunnel started by an older profile (ssh on our ports, nothing that can heal it)
+# is replaced by one with an owner, on the same ports. Only that ssh and the old
+# watchdog are stopped; a foreign program on the ports is never touched.
+_recovery_migrate() {
+    local i=0 state
+    state=$(_tunnel_health | awk '{print $1}')
+    case "$state" in
+        ok|stale|down) ;;
+        *) echo "[Err] Port $CLAUDE_HTTP_PORT or $CLAUDE_SOCKS_PORT is used by another program - see proxy-status." >&2; return 1 ;;
+    esac
+    echo '[Upgrade] Replacing the tunnel from an older profile with a self-healing one on the same ports (open sessions reconnect within seconds).' >&2
+    tunnel-stop >/dev/null 2>&1 || { echo '[Err] The old tunnel could not be stopped - run proxy-doctor.' >&2; return 1; }
+    while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Err] Ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not free up after the old tunnel stopped - run proxy-doctor." >&2
+        return 1
+    fi
+}
+# A tunnel left on a node's ports by 2.9 'chrome-proxy <node>' (an ssh with no
+# owner) is replaced. Anything that is not ssh is refused and never touched.
+_recovery_migrate_node() {
+    local port pid name fix i=0 found=0
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        if [ "$port" = "$CLAUDE_HTTP_PORT" ]; then fix="NODE_HTTP_BASE $((port + 100))"; else fix="NODE_SOCKS_BASE $((port + 100))"; fi
+        for pid in $(_listeners "$port"); do
+            name=$(_proc_name "$pid")
+            case "$name" in ssh|*/ssh) found=1; continue;; esac
+            echo "[Err] ${name:-another program} (PID $pid) is on port $port, which this node's tunnel uses. Close it, or move the node ports: proxy-config set $fix" >&2
             return 1
+        done
+        if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            echo "[Err] Another user's program is on port $port, which this node's tunnel uses. Move the node ports: proxy-config set $fix" >&2
+            return 1
+        fi
+    done
+    [ "$found" -eq 1 ] || return 0
+    echo "[Upgrade] Replacing the Chrome tunnel to $CLAUDE_SSH_HOST from an older profile with a self-healing one on the same ports." >&2
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        for pid in $(_listeners "$port"); do kill "$pid" 2>/dev/null || :; done
+    done
+    while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Err] The old tunnel on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not stop - run proxy-doctor." >&2
+        return 1
+    fi
+}
+# Start (or find) the owner of the default node, or of <node> on its own ports.
+# A node's owner runs in a subshell with the node's settings, so this shell keeps its own.
+_recovery_owner_start() {  # [provider] [node]
+    local slot=main
+    if [ -n "${2:-}" ]; then slot=$(_node_slot "$2") || return 1; fi
+    if [ "$slot" != main ]; then
+        ( _node_ctx "$2" || exit 1; _recovery_slot_start "$slot" )
+        return
+    fi
+    _recovery_slot_start main
+}
+_recovery_slot_start() {  # <slot>
+    local dir pid i=0
+    dir=$(_recovery_identity "$1") || return 1
+    if ! _recovery_owner_pid "$dir" >/dev/null; then
+        if [ "$1" != main ]; then
+            _recovery_migrate_node || return 1
+        elif _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+            _recovery_migrate || return 1
         fi
         rm -f "$dir/stopped"
         ( _recovery_worker "$dir" ) </dev/null >>"$CLAUDE_TUNNEL_LOG" 2>&1 &
@@ -411,33 +594,64 @@ _recovery_owner_start() {
     fi
     echo "$dir"
 }
-_recovery_port_conflict() {
-    local pid port
+# First listener on a tunnel port that is not our ssh, as 'pid|name|port'.
+# A socket with no visible PID (another user's) counts only while our ssh is
+# down - otherwise it is our own forward, seen without lsof.
+_recovery_port_conflict() {  # <owned ssh pid>
+    local pid port alive=0
+    _recovery_process_identity "$1" >/dev/null 2>&1 && alive=1
     for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
         for pid in $(_listeners "$port"); do
-            [ "$pid" = "$1" ] || return 0
+            [ "$pid" = "$1" ] || { printf '%s|%s|%s\n' "$pid" "$(_proc_name "$pid" | tr -d '|')" "$port"; return 0; }
         done
+        if [ "$alive" -eq 0 ] && [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            printf "%s|another user's program|%s\n" - "$port"; return 0
+        fi
     done
     return 1
 }
 _recovery_worker() {
-    local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel conflict
+    local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel all_healthy conflict
+    local takeover cinfo conflict_seen=''
+    local classified=1 sshclass='' lastclass=''
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
     me=$(sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
+    _recovery_record_write "$dir"
     trap '' HUP
-    trap '_recovery_signal_owned "$spid" "$stamp" || :; wait "$spid" 2>/dev/null || :; _recovery_release "$dir" "$me"; exit 0' TERM INT
+    trap '_recovery_stop_ssh "$spid" "$stamp"; rm -f "$dir/ssh.status" "$dir/takeover" "$dir/ssh.pid"; _recovery_release "$dir" "$me"; exit 0' TERM INT
     _tunnel_ssh_args
     desktop_backend=$(_recovery_desktop_backend)
     [ "$desktop_backend" != off ] || desktop_result=off
     while [ ! -e "$dir/stopped" ]; do
         now=$(_recovery_now)
-        conflict=0
-        _recovery_port_conflict "$spid" && conflict=1
+        conflict=0 takeover=0
+        if cinfo=$(_recovery_port_conflict "$spid"); then
+            conflict=1
+            # A new program on our port is announced once, loudly; it is never killed.
+            if [ "$cinfo" != "$conflict_seen" ]; then takeover=1; conflict_seen=$cinfo; _recovery_write "$dir/takeover" "$cinfo" "$me"; fi
+        else
+            conflict_seen=''; rm -f "$dir/takeover"
+        fi
+        if [ "$classified" -eq 0 ] && ! _recovery_process_identity "$spid" >/dev/null; then
+            # The ssh we started has exited: record why before deciding on a retry.
+            sshclass=$(_recovery_ssh_class "$dir/ssh.err")
+            _recovery_ssh_note "$dir" "$sshclass" "$now"
+            if [ "$sshclass" != "$lastclass" ]; then
+                echo "[ssh] $sshclass: $(_recovery_ssh_hint "$sshclass" "$CLAUDE_SSH_HOST")"
+                if [ -s "$dir/ssh.err" ]; then tail -n 5 "$dir/ssh.err" | sed 's/^/[ssh]   /'; fi
+                lastclass=$sshclass
+            fi
+            classified=1
+            case "$sshclass" in auth|hostkey) next=$((now+${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}));; esac
+        fi
         if ! _recovery_process_identity "$spid" >/dev/null; then
             if [ "$now" -ge "$next" ] && [ "$conflict" -eq 0 ]; then
-                ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" & spid=$!
+                ssh -o BatchMode=yes "${_CP_SSH_ARGS[@]}" 2>"$dir/ssh.err" & spid=$!
+                classified=0
                 stamp=$(_recovery_process_identity "$spid") || stamp=''; sshat=$now
+                # Published so launch checks can tell our ssh from anything else on the port.
+                _recovery_write "$dir/ssh.pid" "$spid|$stamp" "$me"
                 retries=$((retries+1)); next=$((now+delay))
                 delay=$((delay*2)); [ "$delay" -le "${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}" ] || delay=${CLAUDE_WATCHDOG_MAX_BACKOFF:-30}
             fi
@@ -446,17 +660,23 @@ _recovery_worker() {
         # checks are neither an outage notice nor a reason to kill it.
         connecting=0
         if [ $((now-sshat)) -lt "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ] && _recovery_process_identity "$spid" >/dev/null; then connecting=1; fi
-        all_tunnel=1
+        all_tunnel=1 all_healthy=1
         for provider in claude codex; do
             if [ "$conflict" -eq 1 ]; then sample='conflict|0|000|000|local-port-conflict'
             else sample=$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"); fi
+            case "$sample" in healthy\|*) :;; *) all_healthy=0;; esac
             case "$connecting:$sample" in 1:tunnel\|*) all_tunnel=0; continue;; esac
             case "$sample" in tunnel\|*) :;; *) all_tunnel=0;; esac
-            case "$sample" in healthy\|*) delay=2; retries=0;; esac
+            case "$sample" in healthy\|*) delay=2; retries=0; rm -f "$dir/ssh.status"; lastclass='';; esac
             old=$(_recovery_status "$dir" "$provider") || old=''
             state=$(_recovery_step "$old" "$sample" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
             event=$(printf '%s' "$state" | cut -d'|' -f9)
-            if [ "$event" = none ] && [ -n "$old" ]; then
+            if [ "$takeover" -eq 1 ]; then
+                # Overrides lost/progress: this is the notice terminals must show.
+                [ "$event" != none ] || state=$(printf '%s\n' "$state" | awk -F'|' -v OFS='|' '{$7=$7+1;print}')
+                state="${state%|*}|takeover"
+                [ "$provider" != claude ] || printf '[Recovery] %s\n' "$(_recovery_message takeover "$cinfo")"
+            elif [ "$event" = none ] && [ -n "$old" ]; then
                 prior=$(printf '%s' "$old" | cut -d'|' -f9)
                 state="${state%|*}|$prior"
             elif [ "$event" != none ]; then
@@ -469,8 +689,13 @@ _recovery_worker() {
         cs=$(_recovery_status "$dir" claude) || cs=''; xs=$(_recovery_status "$dir" codex) || xs=''
         # Nothing observed yet (ssh still connecting) is not "unavailable".
         [ -z "$cs$xs" ] || desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
-        case "$cs$xs:${desktop_state##*|}" in
-            :*) :;;
+        case "$takeover:$cs$xs:${desktop_state##*|}" in
+            1:*)
+                desktop_event=takeover
+                if [ "$desktop_backend" != off ]; then
+                    if _recovery_desktop_send "$desktop_backend" takeover "$cinfo"; then desktop_result=submitted; else desktop_result=failed; fi
+                fi;;
+            0::*) :;;
             *:lost|*:prolonged|*:restored)
                 desktop_event=${desktop_state##*|}; scope=$(_recovery_desktop_scope "$cs" "$xs")
                 if [ "$desktop_backend" != off ]; then
@@ -481,37 +706,78 @@ _recovery_worker() {
         _recovery_write "$dir/desktop.status" "$desktop_backend|$desktop_result|$desktop_event|$now" "$me"
         if [ "$all_tunnel" -eq 1 ]; then fails=$((fails+1)); else fails=0; fi
         if [ "$fails" -ge "${CLAUDE_WATCHDOG_FAILS:-2}" ]; then
-            _recovery_signal_owned "$spid" "$stamp" || :
-            wait "$spid" 2>/dev/null || :; spid=''; stamp=''; fails=0
+            _recovery_stop_ssh "$spid" "$stamp"; spid=''; stamp=''; fails=0
         fi
-        _wd_sleep "${CLAUDE_WATCHDOG_INTERVAL:-5}"
+        # Nobody to protect and nothing to heal: probe rarely (Chrome may still use it).
+        if [ "$all_healthy" -eq 1 ] && [ "$(_recovery_sessions "$dir")" -eq 0 ]; then
+            _recovery_idle_sleep "${CLAUDE_WATCHDOG_IDLE_INTERVAL:-60}" "$dir" "$spid"
+        else
+            _wd_sleep "${CLAUDE_WATCHDOG_INTERVAL:-5}"
+        fi
     done
-    _recovery_signal_owned "$spid" "$stamp" || :
-    wait "$spid" 2>/dev/null || :
+    _recovery_stop_ssh "$spid" "$stamp"
+    rm -f "$dir/ssh.status" "$dir/takeover" "$dir/ssh.pid"
     _recovery_release "$dir" "$me"
 }
+# Live cc/cx sessions on a slot. Each subscriber is one session; its entry holds
+# the subscriber's start identity, so a dead or reused PID never counts.
+_recovery_sessions() {  # <dir>
+    local f pid stamp n=0
+    # ls, not a glob: an empty directory is a fatal "no matches found" in zsh.
+    # Entries are PIDs, so word splitting is safe.
+    for pid in $(ls "$1/sessions" 2>/dev/null); do
+        f="$1/sessions/$pid"
+        [ -f "$f" ] || continue
+        stamp=''
+        read -r stamp < "$f" 2>/dev/null || :
+        if [ -n "$stamp" ] && [ "$(_recovery_process_identity "$pid" 2>/dev/null)" = "$stamp" ]; then n=$((n+1)); else rm -f "$f"; fi
+    done
+    echo "$n"
+}
+# Sleep between probes while nobody uses the tunnel; end early when a terminal
+# asks (<dir>/wake), a session starts, or the owned ssh exits.
+_recovery_idle_sleep() {  # <seconds> <dir> [ssh pid]
+    local i=0 dir="$2"
+    while [ "$i" -lt "$1" ]; do
+        if [ -e "$dir/wake" ]; then rm -f "$dir/wake"; return 0; fi
+        [ "$(_recovery_sessions "$dir")" -eq 0 ] || return 0
+        [ -z "${3:-}" ] || kill -0 "$3" 2>/dev/null || return 0
+        _wd_sleep 1; i=$((i+1))
+    done
+}
 _recovery_subscribe() {
-    local dir="$1" provider="$2" parent stamp
+    local dir="$1" provider="$2" parent stamp sub
     parent=$$; stamp=$(_recovery_process_identity "$parent")
     (
-        trap 'exit 0' TERM
+        local me
+        me=$(sh -c 'echo $PPID')
+        trap 'rm -f "$dir/sessions/$me"; exit 0' TERM
         trap '' HUP
-        local state gen event phase seen=-1
+        local state gen event phase seen=-1 sshwhy seenssh=''
         while [ "$(_recovery_process_identity "$parent")" = "$stamp" ]; do
+            sshwhy=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null) || sshwhy=''
+            if [ "$sshwhy" != "$seenssh" ]; then
+                case "$sshwhy" in auth|hostkey) printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_ssh_hint "$sshwhy" "$CLAUDE_SSH_HOST")" >&2;; esac
+                seenssh=$sshwhy
+            fi
             state=$(_recovery_status "$dir" "$provider") || state=''
             if [ -n "$state" ]; then
                 IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
                 if [ "$gen" != "$seen" ]; then
                     if [ "$seen" != -1 ] || [ "$phase" != healthy ]; then
-                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event")" >&2
+                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event" "$(cat "$dir/takeover" 2>/dev/null)")" >&2
                     fi
                     seen=$gen
                 fi
             fi
             sleep 1 & wait $! || :
         done
+        rm -f "$dir/sessions/$me"
     ) </dev/null >/dev/null &
-    echo "$!"
+    sub=$!
+    # Registered here, before cc launches, so an idle owner sees the session at once.
+    (umask 077; mkdir -p "$dir/sessions" && _recovery_process_identity "$sub" > "$dir/sessions/$sub") 2>/dev/null || :
+    echo "$sub"
 }
 _recovery_unsubscribe() {
     # Caller supplies the start identity captured immediately after subscribing.
@@ -575,7 +841,11 @@ _recovery_desktop_backend() {
     esac
 }
 _recovery_desktop_message() {
+    local pid name port
     case "$1" in
+        takeover)
+            IFS='|' read -r pid name port <<< "$2"
+            printf 'Proxy port taken|%s (PID %s) took port %s. Exit Claude/Codex sessions now.\n' "${name:-unknown}" "$pid" "$port";;
         lost) printf 'Proxy connection lost|%s: reconnecting. Sessions stay open.\n' "$2";;
         prolonged) printf 'Proxy still unavailable|%s: retrying for a prolonged outage. Keep waiting or exit normally; sessions stay open.\n' "$2";;
         restored) printf 'Proxy connection restored|%s: connected again. Retry any failed request your CLI did not retry.\n' "$2";;
@@ -626,6 +896,7 @@ _recovery_desktop_send() {
     esac
 }
 proxy-notify() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local action="${1:-status}" backend identity result
     [ $# -le 1 ] || { echo 'usage: proxy-notify [status|test]'; return 2; }
     case "$action" in status|test) :;; *) echo 'usage: proxy-notify [status|test]'; return 2;; esac
@@ -679,6 +950,24 @@ _legacy_watchdog_stop() {
     return 0
 }
 _watchdog_pid() { local dir; dir=$(_recovery_identity) && _recovery_owner_pid "$dir"; }
+# Live owners in every state directory (this slot and any left by older versions).
+# Node tunnels (node-*) are included only with 'all': a plain tunnel-stop leaves
+# the terminals that use another node alone.
+_recovery_owned_dirs() {  # [all]
+    local d
+    find "$(_recovery_root)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
+        case "${d##*/}:${1:-}" in node-*:all) ;; node-*:*) continue;; esac
+        _recovery_owner_pid "$d" >/dev/null && printf '%s\n' "$d"
+    done
+}
+_recovery_stop_owners() {  # [all]
+    local d rc=0
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        _recovery_owner_stop "$d" || rc=1
+    done <<< "$(_recovery_owned_dirs "${1:-}")"
+    return $rc
+}
 _wd_sleep() { sleep "$1" & wait $!; }
 _wd_log() { echo "[watchdog] $*" >> "$CLAUDE_TUNNEL_LOG"; }
 _tunnel_watchdog() { local dir; dir=$(_recovery_identity) && _recovery_worker "$dir"; }
@@ -730,9 +1019,38 @@ _ensure_ssh_agent() {
     fi
 }
 
+# Hosts Claude and Codex talk to. A NO_PROXY entry matching any of them would
+# send that traffic DIRECT, from the user's real IP (telemetry included).
+_CLAUDE_API_HOSTS="api.anthropic.com claude.ai statsig.anthropic.com api.openai.com chatgpt.com auth.openai.com"
+
+# API hosts a NO_PROXY list exempts, one per line (nothing when it is safe).
+# Same rules as curl and Node's proxy-from-env: '*' is everything; an entry
+# matches the host itself and its subdomains; a leading '*' or '.' and a ':port'
+# are ignored; IP ranges never match a host name.
+_noproxy_exempts() {  # <NO_PROXY list>
+    local list h e
+    list=$(printf '%s' "$1" | tr 'A-Z,' 'a-z\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/:[0-9]*$//')
+    for h in $(echo "$_CLAUDE_API_HOSTS"); do   # zsh does not split a bare $var
+        while IFS= read -r e; do
+            [ -n "$e" ] || continue
+            if [ "$e" = '*' ]; then echo "$h"; break; fi
+            e=${e#\*}; e=${e#.}
+            [ -n "$e" ] || continue
+            case "$h" in "$e"|*".$e") echo "$h"; break;; esac
+        done <<< "$list"
+    done
+}
+
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+# Does this settings.json already carry exactly our proxy? (Then never rewrite it.)
+_settings_file_pinned() {  # <settings.json>
+    jq -e --arg url "http://127.0.0.1:$CLAUDE_HTTP_PORT" --arg np "$CLAUDE_NO_PROXY" \
+        '.env.HTTPS_PROXY == $url and .env.HTTP_PROXY == $url and .env.NO_PROXY == $np' "$1" >/dev/null 2>&1
+}
+
 _settings_file_proxy_on() {  # <settings.json>
     local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
+    _settings_file_pinned "$f" && return 0
     mkdir -p "$(dirname "$f")"
     [ -f "$f" ] || echo '{}' > "$f"
     cp "$f" "${f}.bak" 2>/dev/null
@@ -745,6 +1063,7 @@ _settings_file_proxy_on() {  # <settings.json>
     else
         rm -f "$tmp"
         echo "[Warn] Could not update $f (invalid JSON?) - left it untouched"
+        return 1
     fi
 }
 
@@ -777,6 +1096,33 @@ _claude_settings_proxy_off() {
     command -v jq >/dev/null 2>&1 || return 0
     local f
     for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
+}
+
+# Anything but an explicit "off" counts as on: a typo must not open a leak.
+_killswitch_on() { [ "${CLAUDE_KILLSWITCH:-on}" != off ]; }
+
+# What Claude's own settings say: 'pinned <port>' (exactly our proxy),
+# 'mismatch <port>' (a proxy, but not ours), or 'unpinned sync-off|no-jq|missing'.
+_killswitch_pin_state() {
+    local url port
+    [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] || { echo 'unpinned sync-off'; return; }
+    command -v jq >/dev/null 2>&1 || { echo 'unpinned no-jq'; return; }
+    url=$(jq -r '.env.HTTPS_PROXY // empty' "$CLAUDE_SETTINGS" 2>/dev/null)
+    [ -n "$url" ] || { echo 'unpinned missing'; return; }
+    port=${url%/}; port=${port##*:}
+    if _settings_file_pinned "$CLAUDE_SETTINGS"; then echo "pinned $port"; else echo "mismatch $port"; fi
+}
+
+# Pin every Claude settings file that is missing or wrong; silent when all are right.
+_killswitch_ensure_pin() {
+    _killswitch_on && [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] && command -v jq >/dev/null 2>&1 || return 0
+    local f changed=0
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        _settings_file_pinned "$f" && continue
+        _settings_file_proxy_on "$f" >/dev/null 2>&1 && changed=1
+    done <<< "$(_settings_targets 2>/dev/null)"
+    [ "$changed" -eq 0 ] || echo "[Kill switch] Claude's settings now point at the tunnel (127.0.0.1:$CLAUDE_HTTP_PORT): while it is down Claude cannot connect, so it never goes out directly. Details: proxy-killswitch"
 }
 
 # ============================================================
@@ -969,6 +1315,46 @@ _node_socks_port() {  # <idx>
     echo $((CLAUDE_NODE_SOCKS_BASE + $1))
 }
 
+# The recovery slot of a node: 'main' for the default node (main ports), else
+# node-<name>. Fails, with the reason on stderr, for an unknown or unprovisioned node.
+_node_slot() {  # <node name or alias>
+    local line idx name alias host
+    if ! line=$(_node_lookup "$1"); then
+        [ "$1" != "$CLAUDE_SSH_HOST" ] || { echo main; return 0; }
+        echo "[Err] Unknown node '$1'. 'proxy-nodes' lists them ('proxy-nodes --refresh' fetches the latest)." >&2
+        return 1
+    fi
+    IFS='|' read -r idx name alias host _ <<< "$line"
+    if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then echo main; return 0; fi
+    if ! _node_provisioned "$host"; then
+        echo "[Err] Node '$name' has no address in the catalogue yet - ask your admin, then 'proxy-nodes --refresh'." >&2
+        return 1
+    fi
+    echo "node-$name"
+}
+
+# Point this shell's tunnel settings at a node: its ssh alias (which carries
+# user, key and port) and its fixed ports. Call it in a subshell - the worker
+# that runs there then supervises that node. The default node changes nothing.
+_node_ctx() {  # <node name or alias>
+    local line idx name alias host user sport pport http socks
+    [ "$(_node_slot "$1")" != main ] || return 0
+    line=$(_node_lookup "$1") || return 1
+    IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
+    if [ "$http" = "$CLAUDE_HTTP_PORT" ] || [ "$http" = "$CLAUDE_SOCKS_PORT" ]; then
+        echo "[Err] Node '$name' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $((CLAUDE_HTTP_PORT + 100))" >&2
+        return 1
+    fi
+    if [ "$socks" = "$CLAUDE_HTTP_PORT" ] || [ "$socks" = "$CLAUDE_SOCKS_PORT" ]; then
+        echo "[Err] Node '$name' would use port $socks, which the default tunnel uses. Fix: proxy-config set NODE_SOCKS_BASE $((CLAUDE_SOCKS_PORT + 100))" >&2
+        return 1
+    fi
+    CLAUDE_SSH_HOST=$alias CLAUDE_SSH_USER='' CLAUDE_SSH_KEY='' CLAUDE_SSH_PORT=${sport:-22}
+    CLAUDE_HTTP_PORT=$http CLAUDE_SOCKS_PORT=$socks CLAUDE_REMOTE_PROXY_PORT=${pport:-8888}
+    export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_SOCKS_PORT CLAUDE_REMOTE_PROXY_PORT
+}
+
 _ssh_config_has_alias() {  # <alias>
     grep -qiE "^Host[[:space:]]+$1([[:space:]]|$)" "$HOME/.ssh/config" 2>/dev/null
 }
@@ -1042,36 +1428,28 @@ _node_ensure_alias() {  # <catalogue line>
     _known_hosts_add "$host" "$sport" "$hostkey"
 }
 
-# --- per-node Chrome tunnels (SOCKS only; the main tunnel is untouched) ------
-_node_tunnel_start() {  # <name> <alias> <port>
-    local name="$1" alias="$2" port="$3" pid pname attempts=0
-    if _port_in_use "$port"; then
-        pid=$(_ssh_listeners "$port" | head -1)
-        if [ -n "$pid" ]; then
-            echo "[OK]  $name tunnel already running (PID $pid, SOCKS 127.0.0.1:$port)"
-            return 0
-        fi
-        pid=$(_listeners "$port" | head -1); pname=$(_proc_name "$pid")
-        echo "[Err] Port $port (reserved for the $name tunnel) is used by '${pname:-unknown}' (PID $pid). Move the node ports: proxy-config set NODE_SOCKS_BASE 1280"
-        return 1
-    fi
-    _is_wsl && _ensure_ssh_agent
-    echo "[SSH] Starting $name tunnel to $alias (SOCKS 127.0.0.1:$port)..."
-    ssh -N -f -C -D "$port" \
-        -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
-        -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
-        "$alias" 2>"$CLAUDE_TUNNEL_LOG.$name"
-    while ! _port_in_use "$port" && [ $attempts -lt 10 ]; do
-        sleep 0.5; attempts=$((attempts+1))
+# --- node tunnels (2.10: one self-healing owner per node, see _recovery_owner_start) ---
+
+# proxy-status: one line per node tunnel (2.10 owners), then any unsupervised
+# Chrome tunnel a profile before 2.10 left behind.
+_node_status_lines() {
+    local d slot host http socks why n nname nport npid header=0 owned=''
+    for slot in $(ls "$(_recovery_root)" 2>/dev/null); do
+        case "$slot" in node-*) ;; *) continue;; esac
+        d="$(_recovery_root)/$slot"
+        _recovery_owner_pid "$d" >/dev/null || continue
+        [ "$header" -eq 1 ] || { echo "=== Node tunnels (cc --node / chrome-proxy <node>) ==="; header=1; }
+        host=$(_recovery_record_get "$d" host); http=$(_recovery_record_get "$d" http); socks=$(_recovery_record_get "$d" socks)
+        n=$(_recovery_sessions "$d"); owned="$owned $socks"
+        echo "[ON]  ${slot#node-}  $host  HTTP 127.0.0.1:$http  SOCKS 127.0.0.1:$socks  sessions: $n  (tunnel-stop ${slot#node-} stops it)"
+        why=$(cut -d'|' -f1 "$d/ssh.status" 2>/dev/null)
+        [ -z "$why" ] || echo "[!!]    last ssh error: $(_recovery_ssh_hint "$why" "$host")"
     done
-    if _port_in_use "$port"; then
-        echo "[OK]  $name tunnel up: SOCKS 127.0.0.1:$port -> $alias"
-    else
-        echo "[Err] $name tunnel failed to start within 5s. ssh said:"
-        sed 's/^/       /' "$CLAUDE_TUNNEL_LOG.$name" 2>/dev/null | head -5
-        echo "       (first time? run 'ssh $alias' once to accept the host key)"
-        return 1
-    fi
+    while IFS='|' read -r nname nport npid; do
+        [ -n "$npid" ] || continue
+        case " $owned " in *" $nport "*) continue;; esac
+        echo "[ON]  Chrome tunnel : $nname -> 127.0.0.1:$nport (PID $npid, from an older profile - not self-healing; 'cc-stop' ends it)"
+    done <<< "$(_node_tunnels_running)"
 }
 
 # Running per-node tunnels: "name|port|pid" per line.
@@ -1256,8 +1634,12 @@ proxy-nodes() {
     echo ""
 }
 
-proxy-node() {
-    local want="${1:-}" line idx name alias host user sport pport rest
+proxy-node() {  # [--force] [node]
+    local force=0 want='' line idx name alias host user sport pport rest n dir
+    while [ $# -gt 0 ]; do
+        case "$1" in --force|-f) force=1 ;; *) want="$1" ;; esac
+        shift
+    done
     if [ -z "$want" ]; then
         name=$(_node_active_name)
         if [ -n "$name" ]; then
@@ -1284,6 +1666,16 @@ proxy-node() {
         return 0
     fi
 
+    # Sessions on the default tunnel would move to the new node without notice.
+    n=0
+    if dir=$(_recovery_identity main 2>/dev/null); then n=$(_recovery_sessions "$dir"); fi
+    if [ "$n" -gt 0 ] && [ "$force" -eq 0 ]; then
+        echo "[Node] $n session(s) use the default node ($CLAUDE_SSH_HOST). They would move to $name."
+        echo "       For this terminal only: cc --node $name   (or cx --node $name)"
+        echo "       Move them anyway:        proxy-node $name --force"
+        return 1
+    fi
+
     local was_up=0 env_on=0
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] && was_up=1
     [ -n "${HTTPS_PROXY:-}" ] && env_on=1
@@ -1307,7 +1699,58 @@ proxy-node() {
 # 1. SSH tunnel: -L (HTTP proxy for Claude) + -D (SOCKS5 for Chrome)
 # ============================================================
 
-tunnel-start() {
+# What to tell the user when the tunnel does not come up: the classified reason
+# and its fix first, then the actual ssh output (owner's stderr, else the log).
+_recovery_failure_report() {  # [slot dir]
+    local dir="${1:-}" why=''
+    [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
+    if [ -n "$dir" ]; then why=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null); fi
+    echo "[Err] SSH tunnel failed to start within 10s."
+    if [ -n "$why" ]; then echo "       $(_recovery_ssh_hint "$why" "$CLAUDE_SSH_HOST")"; fi
+    echo "       ssh said:"
+    if [ -n "$dir" ] && [ -s "$dir/ssh.err" ]; then tail -n 5 "$dir/ssh.err" | sed 's/^/       /'
+    else tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'; fi
+    echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
+}
+
+# tunnel-start <node> for a node that is not the default: its own owner and ports.
+_node_tunnel_up() {  # <node>
+    local line dir attempts=0 http='' socks='' alias=''
+    if ! command -v ssh >/dev/null 2>&1; then echo "[Err] 'ssh' not found - no tunnel is possible. Install an OpenSSH client."; return 1; fi
+    if line=$(_node_lookup "$1"); then _node_ensure_alias "$line" || return 1; fi
+    read -r http socks alias <<< "$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT $CLAUDE_SOCKS_PORT $CLAUDE_SSH_HOST")"
+    [ -n "$http" ] || return 1
+    if _is_wsl 2>/dev/null; then _ensure_ssh_agent; fi
+    dir=$(_recovery_owner_start claude "$1") || return 1
+    while ! _port_in_use "$http" && [ $attempts -lt 20 ]; do sleep 0.5; attempts=$((attempts+1)); done
+    if _port_in_use "$http"; then
+        echo "[OK]  $1 tunnel up: HTTP 127.0.0.1:$http  SOCKS 127.0.0.1:$socks  -> $alias  (self-healing; this node only)"
+        return 0
+    fi
+    _recovery_failure_report "$dir"
+    _recovery_owner_stop "$dir" >/dev/null
+    return 1
+}
+
+tunnel-start() {  # [node]
+    if [ -n "${1:-}" ]; then
+        local nslot
+        nslot=$(_node_slot "$1") || return 1
+        if [ "$nslot" != main ]; then _node_tunnel_up "$1"; return; fi
+    fi
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
+    # Everything below needs an ssh client, and without this guard the failure
+    # is opaque: the backgrounded start swallows "command not found" and you get
+    # a bare "tunnel failed to start" instead.
+    if ! command -v ssh >/dev/null 2>&1; then
+        echo "[Err] 'ssh' not found - no tunnel is possible. Install an OpenSSH client:"
+        echo "       Debian/Ubuntu: sudo apt install openssh-client"
+        echo "       Fedora/RHEL:   sudo dnf install openssh-clients"
+        echo "       Alpine:        sudo apk add openssh-client"
+        echo "       macOS:         included with the system (check your PATH)"
+        return 1
+    fi
+
     # Auto-heal: a HEALTHY tunnel is reused (adopting its port if it's on a
     # fallback), a STALE ssh is killed and replaced, and a FOREIGN app keeps its
     # port - the tunnel simply falls back to the next free port instead.
@@ -1331,14 +1774,18 @@ tunnel-start() {
     fi
     case "$tstate" in
         ok)
+            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ] && ! _watchdog_pid >/dev/null; then
+                # Started by an older profile: give it an owner on the same ports (replaces it).
+                [ "$hport" = "$CLAUDE_HTTP_PORT" ] || export CLAUDE_HTTP_PORT=$hport
+                _watchdog_spawn >/dev/null || return 1
+                echo "[OK]  Self-healing tunnel up on HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT"
+                return 0
+            fi
             if [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
                 echo "[OK]  SSH tunnel already running (PID $hpid) on fallback port $hport - using it"
             else
                 echo "[OK]  SSH tunnel already running (PID $hpid)"
-            fi
-            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = "1" ] && ! _watchdog_pid >/dev/null; then
-                echo "[Info] This tunnel has no watchdog (started by an older profile) - 'proxy-restart' adds auto-reconnect."
             fi
             return 0
             ;;
@@ -1347,6 +1794,12 @@ tunnel-start() {
             tunnel-stop
             ;;
         foreign)
+            if _killswitch_on; then
+                # A moved port would no longer match Claude's pinned settings: refuse instead.
+                echo "[Err] $hname (PID $hpid) is on proxy port $CLAUDE_HTTP_PORT. With the kill switch on the tunnel does not move silently."
+                echo "      Fix: close that program, or move the tunnel for good: proxy-config set HTTP_PORT $((CLAUDE_HTTP_PORT+10))"
+                return 1
+            fi
             echo "[Info] Port $CLAUDE_HTTP_PORT is used by '$hname' (PID $hpid) - that's another app, leaving it alone."
             if ! newp=$(_find_free_port $((CLAUDE_HTTP_PORT+1))); then
                 echo "[Err] No free port found in $((CLAUDE_HTTP_PORT+1))-$((CLAUDE_HTTP_PORT+20)) - free one up or change CLAUDE_HTTP_PORT (proxy-config edit)."
@@ -1363,6 +1816,11 @@ tunnel-start() {
         local spid sname snew
         spid=$(_listeners "$CLAUDE_SOCKS_PORT" | head -1)
         sname=$(_proc_name "$spid")
+        if _killswitch_on; then
+            echo "[Err] ${sname:-another program} (PID ${spid:-?}) is on SOCKS port $CLAUDE_SOCKS_PORT. With the kill switch on the tunnel does not move silently."
+            echo "      Fix: close that program, or move the tunnel for good: proxy-config set SOCKS_PORT $((CLAUDE_SOCKS_PORT+10))"
+            return 1
+        fi
         if ! snew=$(_find_free_port $((CLAUDE_SOCKS_PORT+1))); then
             echo "[Err] SOCKS port $CLAUDE_SOCKS_PORT is used by '$sname' and no free port found nearby."
             return 1
@@ -1397,25 +1855,41 @@ tunnel-start() {
             echo "       Watchdog on: reconnects by itself if the link drops (log: $CLAUDE_TUNNEL_LOG)"
         fi
     else
-        # Don't leave a watchdog retrying a tunnel that can't start (bad key, host down ...).
+        # Report first (the owner's ssh.status is what explains it), then stop the
+        # watchdog so it does not keep retrying a tunnel that can't start.
+        _recovery_failure_report
         _watchdog_stop >/dev/null
-        echo "[Err] SSH tunnel failed to start within 10s. ssh said:"
-        tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'
-        echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
         return 1
     fi
 }
 
-tunnel-stop() {
+tunnel-stop() {  # [node]
+    if [ -n "${1:-}" ]; then
+        local nslot ndir
+        nslot=$(_node_slot "$1") || return 1
+        if [ "$nslot" != main ]; then
+            ndir=$(_recovery_identity "$nslot") || return 1
+            if _recovery_owner_pid "$ndir" >/dev/null; then
+                _recovery_owner_stop "$ndir" || return 1
+                echo "[OK] $1 tunnel stopped (other nodes keep running)"
+            else
+                echo "[Info] No $1 tunnel running"
+            fi
+            return 0
+        fi
+    fi
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
     local pid name port still p wd_msg
     local ssh_pids=() survivors=()
 
-    # The watchdog goes first, or it would just start ssh again (it takes its ssh with it).
-    if _watchdog_pid >/dev/null; then
-        _watchdog_stop || return 1
+    # The owner goes first, or it would just start ssh again (it takes its ssh with it).
+    # Every live owner under this profile's state root counts: after an upgrade the
+    # previous version's owner can sit in a differently named directory.
+    if [ -n "$(_recovery_owned_dirs)" ]; then
+        _recovery_stop_owners || return 1
         echo "[OK] Recovery stopped; proxy settings remain enabled until proxy-off."
         return 0
     fi
@@ -1497,15 +1971,132 @@ proxy-on() {
 proxy-off() {
     unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
     echo "[OK] Env vars cleared"
-    _claude_settings_proxy_off
+    if ! _killswitch_on; then
+        _claude_settings_proxy_off
+    elif [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ]; then
+        echo "[Kill switch] Claude's settings keep the proxy, so plain 'claude' cannot go out directly ('proxy-killswitch off' allows that)."
+    fi
+}
+
+# Kill switch: everything that would let Claude/Codex traffic leak, checked right
+# before launch. Prints one reason and one fix and fails; silent when all is well.
+_killswitch_check() {  # <http port> <socks port> [slot dir]
+    _killswitch_on || return 0
+    local http="$1" socks="$2" hosts dir="${3:-}" own='' spid sstamp port pid fix state
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
+    if [ -n "$hosts" ]; then
+        echo "[Kill switch] NO_PROXY would send $hosts DIRECT (from your own IP) - not launched."
+        echo "              Fix: remove the matching entries from CLAUDE_NO_PROXY (proxy-config edit)."
+        return 1
+    fi
+    # Our ssh is the one the owner published - checked by start identity, so a reused PID is not it.
+    [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
+    if [ -n "$dir" ] && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null \
+       && [ -n "$sstamp" ] && [ "$(_recovery_process_identity "$spid" 2>/dev/null)" = "$sstamp" ]; then own=$spid; fi
+    for port in "$http" "$socks"; do
+        if [ "$port" = "$http" ]; then fix="proxy-config set HTTP_PORT $((http+10))"; else fix="proxy-config set SOCKS_PORT $((socks+10))"; fi
+        for pid in $(_listeners "$port"); do
+            [ "$pid" = "$own" ] && continue
+            echo "[Kill switch] $(_proc_name "$pid" || :) (PID $pid) is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched."
+            echo "              Fix: close that program, or move the tunnel: $fix"
+            return 1
+        done
+        if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            echo "[Kill switch] another user's program is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched."
+            echo "              Fix: move the tunnel: $fix"
+            return 1
+        fi
+    done
+    # Claude reads its settings.json over the shell, so it must name this same port.
+    if [ "$http" = "$CLAUDE_HTTP_PORT" ] && [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] && command -v jq >/dev/null 2>&1; then
+        _killswitch_ensure_pin >/dev/null
+        state=$(_killswitch_pin_state)
+        if [ "$state" != "pinned $http" ]; then
+            echo "[Kill switch] Claude's settings ($CLAUDE_SETTINGS) could not be pointed at the tunnel on port $http ($state) - not launched."
+            echo "              Fix: repair that file (valid JSON), or 'proxy-killswitch off'."
+            return 1
+        fi
+    fi
+}
+
+# proxy-doctor's kill-switch lines, with its own ok / warn / fail markers.
+_killswitch_report() {  # <ok> <warn> <bad>
+    local ok="$1" warn="$2" bad="$3" state hosts
+    if ! _killswitch_on; then
+        echo "$warn Kill switch OFF - with the tunnel down, plain 'claude' / 'codex' go out from your own IP. Fix: proxy-killswitch on"
+        return 0
+    fi
+    state=$(_killswitch_pin_state)
+    case "$state" in
+        "pinned $CLAUDE_HTTP_PORT") echo "$ok  Kill switch on - Claude's settings pinned to 127.0.0.1:$CLAUDE_HTTP_PORT" ;;
+        mismatch*) echo "$bad Kill switch on, but Claude's settings point at port ${state#mismatch } (tunnel: $CLAUDE_HTTP_PORT). Fix: proxy-killswitch on" ;;
+        'unpinned sync-off') echo "$warn Kill switch on, but settings.json is not managed (SYNC_SETTINGS=0): only cc-launched Claude is protected" ;;
+        'unpinned no-jq') echo "$warn Kill switch on, but jq is missing: Claude's settings cannot be pinned. Fix: install jq" ;;
+        *) echo "$bad Kill switch on, but Claude's settings are not pinned ($state). Fix: proxy-killswitch on" ;;
+    esac
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
+    [ -z "$hosts" ] || echo "$bad NO_PROXY would send $hosts DIRECT - cc/cx refuse to start. Fix: remove those entries (proxy-config edit)"
+    [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ] || \
+        echo "$warn plain 'codex' is not protected (Codex reads only the shell). Fix: proxy-config set PLAIN_COMMANDS auto - or always use cx"
+}
+
+# Kill switch: show it, or switch it (saved to the conf file).
+proxy-killswitch() {
+    local action="${1:-status}" running=0 f state hosts
+    case "$action" in
+        status) ;;
+        on|off)
+            # Decide before the reload, which re-reads every function and setting.
+            _watchdog_pid >/dev/null 2>&1 && running=1
+            _conf_set CLAUDE_KILLSWITCH "$action"
+            _conf_reload
+            if [ "$action" = on ]; then
+                _killswitch_ensure_pin >/dev/null
+                echo "[OK] Kill switch ON - Claude and Codex cannot go out directly. Saved to $CLAUDE_PROXY_CONF"
+            elif [ "$running" -eq 1 ]; then
+                echo "[OK] Kill switch OFF. A tunnel is running, so Claude keeps the proxy until 'proxy-off' / 'cc-stop'."
+            else
+                _claude_settings_proxy_off >/dev/null
+                echo "[OK] Kill switch OFF - with no tunnel, plain 'claude' now goes out directly (from your own IP)."
+            fi
+            return 0 ;;
+        *) echo 'usage: proxy-killswitch [status|on|off]'; return 2 ;;
+    esac
+
+    if _killswitch_on; then echo "=== Kill switch: ON ==="; else echo "=== Kill switch: OFF (pre-2.9 behaviour) - 'proxy-killswitch on' ==="; fi
+    if [ "${CLAUDE_SYNC_SETTINGS:-0}" != 1 ]; then
+        echo "[!!]  Claude : settings.json is not managed (SYNC_SETTINGS=0) - only cc-launched Claude is protected. Fix: proxy-config set SYNC_SETTINGS 1"
+    elif ! command -v jq >/dev/null 2>&1; then
+        echo "[!!]  Claude : jq is missing, so settings.json cannot be pinned - only cc-launched Claude is protected. Fix: install jq"
+    else
+        while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            if _settings_file_pinned "$f"; then
+                echo "[ON]  Claude : pinned to 127.0.0.1:$CLAUDE_HTTP_PORT ($f) - plain 'claude' and IDEs use the tunnel or fail"
+            elif _killswitch_on; then
+                echo "[!!]  Claude : $f does not point at the tunnel - run 'proxy-killswitch on' to fix it"
+            else
+                echo "[OFF] Claude : not pinned ($f) - plain 'claude' goes direct while no tunnel is up"
+            fi
+        done <<< "$(_settings_targets 2>/dev/null)"
+    fi
+    if [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ]; then
+        echo "[ON]  Codex  : protected when started with cx and as plain 'codex'"
+    else
+        echo "[..]  Codex  : protected when started with cx; plain 'codex' reads only your shell and may go direct (proxy-config set PLAIN_COMMANDS auto)"
+    fi
+    hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ')
+    if [ -z "$hosts" ]; then echo "[OK]  NO_PROXY : no API host is exempted"
+    else echo "[!!]  NO_PROXY : would send $hosts DIRECT - remove those entries (proxy-config edit)"; fi
+    echo "      Not covered: the Claude Desktop app, browsers and other apps (chrome-proxy has its own fail-closed rules)."
 }
 
 # --- Confirm the external IP really is the proxy's (VM's), not the client's ---
-_verify_proxy_ip() {
+_verify_proxy_ip() {  # [http port]
     echo "[Check] Verifying the external IP is the proxy's..."
     local proxied direct
     # THROUGH the proxy (explicit -x, doesn't depend on env vars)...
-    proxied=$(curl -s --max-time 10 -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" https://ipinfo.io/ip 2>/dev/null)
+    proxied=$(curl -s --max-time 10 -x "http://127.0.0.1:${1:-$CLAUDE_HTTP_PORT}" https://ipinfo.io/ip 2>/dev/null)
     # ...vs. straight out (bypassing any proxy).
     direct=$(curl -s --max-time 10 --noproxy '*' https://ipinfo.io/ip 2>/dev/null)
 
@@ -1527,7 +2118,54 @@ _verify_proxy_ip() {
 # (everything 'cc' does EXCEPT launching Claude)
 # ============================================================
 
+# Mandatory authenticated-TLS transport check, even with --no-verify. An idle
+# owner may not have noticed a dropped link yet: wake it and give it the
+# startup grace to heal before refusing.
+_proxy_transport_wait() {  # <provider> <http port> <socks port> [slot dir]
+    local dir="${4:-}" waited=0 woke=0
+    until _recovery_probe "$1" "$2" "$3" | grep -q '^healthy|'; do
+        if [ "$woke" -eq 0 ]; then
+            woke=1
+            [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
+            if [ -n "$dir" ] && _recovery_owner_pid "$dir" >/dev/null; then
+                : > "$dir/wake"; echo "[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect..."
+            else dir=-; fi
+        fi
+        if [ "$dir" = - ] || [ "$waited" -ge "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ]; then
+            echo "[Err] $1 proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1
+        fi
+        sleep 1; waited=$((waited+1))
+    done
+}
+
+# Claude reads its settings.json over the environment, and the kill switch pins
+# that file to the default node - so a per-terminal node must reach Claude
+# through --settings (which wins over settings.json).
+_node_settings_json() {  # <http port>
+    local url="http://127.0.0.1:$1" np
+    if command -v jq >/dev/null 2>&1; then
+        jq -cn --arg u "$url" --arg np "$CLAUDE_NO_PROXY" '{env:{HTTPS_PROXY:$u,HTTP_PROXY:$u,NO_PROXY:$np}}'
+        return
+    fi
+    np=$(printf '%s' "$CLAUDE_NO_PROXY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"env":{"HTTPS_PROXY":"%s","HTTP_PROXY":"%s","NO_PROXY":"%s"}}\n' "$url" "$url" "$np"
+}
+
+# Bring a (non-default) node's tunnel up for this terminal and check it like
+# proxy-up does. All messages on stderr; prints "<http> <socks> <slot dir>".
+_node_up() {  # <node> <provider>
+    local http='' socks='' dir
+    read -r http socks <<< "$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT $CLAUDE_SOCKS_PORT")"
+    [ -n "$http" ] || return 1
+    tunnel-start "$1" >&2 || return 1
+    dir=$(_recovery_identity "$(_node_slot "$1")") || return 1
+    _proxy_transport_wait "$2" "$http" "$socks" "$dir" >&2 || return 1
+    _killswitch_check "$http" "$socks" "$dir" >&2 || return 1
+    echo "$http $socks $dir"
+}
+
 proxy-up() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1538,10 +2176,20 @@ proxy-up() {
         shift
     done
 
-    # Step 0: --node sg  ==  proxy-node sg first (persists, like running it yourself).
-    if [ -n "$node" ]; then
-        proxy-node "$node" || return 1
+    # --node <other node>: this shell only, through that node's own tunnel. The
+    # default node, Claude's pinned settings and other terminals stay as they are.
+    if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
+        local nhttp nsocks ndir url
+        read -r nhttp nsocks ndir <<< "$(_node_up "$node" "$provider")"
+        [ -n "$ndir" ] || return 1
+        url="http://127.0.0.1:$nhttp"
+        export http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY"
+        echo "[OK] Env vars set: HTTPS_PROXY=$url (node $node, this shell only)"
+        [ $no_verify -eq 1 ] || _verify_proxy_ip "$nhttp"
+        echo "[OK]  This shell uses node $node. The default node ($CLAUDE_SSH_HOST) and other terminals are unchanged. To make $node the default: proxy-node $node"
+        return 0
     fi
+    [ -z "$node" ] || _node_slot "$node" >/dev/null || return 1
 
     # Step 1: SSH tunnel (HTTP + SOCKS forwards).
     # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
@@ -1550,11 +2198,8 @@ proxy-up() {
     tunnel-start || return 1
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] || return 1
 
-    # Mandatory authenticated-TLS transport check, even with --no-verify.
-    case "$(_recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT")" in
-        healthy\|*) ;;
-        *) echo "[Err] $provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1;;
-    esac
+    _proxy_transport_wait "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
+    _killswitch_check "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
 
@@ -1570,6 +2215,12 @@ proxy-up() {
 # All-in-one: proxy stack + launch Claude / Codex
 # ============================================================
 
+# Path of the real program, never a shell function of the same name
+# (PLAIN_COMMANDS=auto defines 'claude' / 'codex' functions).
+_bin_path() {
+    if [ -n "${ZSH_VERSION:-}" ]; then whence -p "$1"; else type -P "$1"; fi
+}
+
 # _launch_via_proxy <label> <binary> <install hint> <skip-prompts flag> [args...]
 # Flags the wrapper understands: --safe (keep the app's prompts), --no-verify.
 # EVERYTHING ELSE is passed straight to the app, so 'cc -c', 'cc -r',
@@ -1577,34 +2228,52 @@ proxy-up() {
 _launch_via_proxy() {
     local label="$1" bin="$2" hint="$3" skip_flag="$4"
     shift 4
-    local safe=0
-    local up_args=() app_args=()
+    local safe=0 quiet=0 node='' no_verify=0
+    local up_args=() app_args=() pre_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --safe)      safe=1 ;;
-            --no-verify) up_args+=(--no-verify) ;;
-            --node)      up_args+=(--node "${2:-}"); shift ;;
-            --node=*)    up_args+=("$1") ;;
+            --quiet)     quiet=1 ;;
+            --no-verify) up_args+=(--no-verify); no_verify=1 ;;
+            --node)      node="${2:-}"; shift ;;
+            --node=*)    node="${1#--node=}" ;;
             *)           app_args+=("$1") ;;
         esac
         shift
     done
 
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Locate the app first, so we don't bring the tunnel up only to find it missing.
-    if ! command -v "$bin" >/dev/null 2>&1; then
-        echo "[Err] '$bin' not found - install it first: $hint"
+    if ! _bin_path "$bin" >/dev/null 2>&1; then
+        echo "[Err] '$bin' not found - install it first: $hint" >&2
         return 1
     fi
 
     # Steps 1-3: bring up tunnel + env vars + verify
     local _CLAUDE_LAUNCH_PROVIDER=claude subscriber='' subscriber_stamp='' rc=0 identity saved_int
     [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
-    proxy-up "${up_args[@]}" || return 1
+    # Quiet (plain claude/codex): the profile's own lines go to stderr, so stdout
+    # carries only the app's output ('claude -p ... | jq' keeps working).
+    local nslot=main nhttp='' nsocks='' url=''
+    if [ -n "$node" ]; then nslot=$(_node_slot "$node") || return 1; fi
+    if [ "$nslot" != main ]; then
+        # This terminal only: the node's own tunnel, its proxy in the app's environment
+        # (and in Claude's --settings). The shell, the default node and the pin stay.
+        read -r nhttp nsocks identity <<< "$(_node_up "$node" "$_CLAUDE_LAUNCH_PROVIDER")"
+        [ -n "$identity" ] || return 1
+        if [ "$no_verify" -eq 0 ]; then
+            if [ "$quiet" -eq 1 ]; then _verify_proxy_ip "$nhttp" >&2; else _verify_proxy_ip "$nhttp"; fi
+        fi
+        url="http://127.0.0.1:$nhttp"
+        [ "$bin" != claude ] || pre_args=(--settings "$(_node_settings_json "$nhttp")")
+        echo "[Node] This terminal uses $node. To make $node the default: proxy-node $node" >&2
+    elif [ "$quiet" -eq 1 ]; then proxy-up "${up_args[@]}" >&2 || return 1
+    else proxy-up "${up_args[@]}" || return 1; fi
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
-        identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
+        [ -n "$url" ] || identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
-        echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
+        [ "$quiet" -eq 1 ] || echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
     else
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
@@ -1612,12 +2281,15 @@ _launch_via_proxy() {
     saved_int=$(trap -p INT)
     trap '_recovery_unsubscribe "$subscriber" "$subscriber_stamp"' INT
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
-    echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
-    if [ $safe -eq 1 ]; then
-        if "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
-    else
-        if "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
-    fi
+    [ "$quiet" -eq 1 ] || echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
+    # 'command': the real program, not a plain-command wrapper of the same name.
+    # A per-terminal node sets the proxy for this one process only.
+    [ $safe -eq 1 ] || pre_args+=("$skip_flag")
+    if [ -n "$url" ]; then
+        if env http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" \
+               no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY" \
+               "$(_bin_path "$bin")" "${pre_args[@]}" "${app_args[@]}"; then rc=0; else rc=$?; fi
+    elif command "$bin" "${pre_args[@]}" "${app_args[@]}"; then rc=0; else rc=$?; fi
     [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
     trap - INT
     [ -z "$saved_int" ] || eval "$saved_int"  # restore the caller's own trap
@@ -1629,17 +2301,41 @@ cx() { _launch_via_proxy Codex  codex  "npm install -g @openai/codex"           
 cc-safe() { cc --safe "$@"; }
 cx-safe() { cx --safe "$@"; }
 
+# PLAIN_COMMANDS=auto: plain 'claude' / 'codex' start through the tunnel too, in
+# safe mode (the app's own prompts) and quietly. Version/help need no network.
+_plain_launch() {  # <label> <bin> <install hint> <skip flag> [app args]
+    local bin="$2"
+    case "${5:-}" in --version|-v|--help|-h) shift 4; command "$bin" "$@"; return;; esac
+    _launch_via_proxy "$@" --safe --no-verify --quiet
+}
+if [ "${CLAUDE_PLAIN_COMMANDS:-off}" = auto ]; then
+    claude() { _plain_launch Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
+    codex()  { _plain_launch Codex  codex  "npm install -g @openai/codex" --dangerously-bypass-approvals-and-sandbox "$@"; }
+else
+    # Also undoes 'auto' when the setting changes in a running shell.
+    case "$(type -t claude 2>/dev/null; whence -w claude 2>/dev/null)" in *function*) unset -f claude;; esac
+    case "$(type -t codex 2>/dev/null; whence -w codex 2>/dev/null)" in *function*) unset -f codex;; esac
+fi
+
 cc-stop() {
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
     # result so cc-stop never falsely claims success when a port is still held.
-    local rc=0 force=0 others
+    local rc=0 force=0 others n sessions dir
     case "${1:-}" in --force|-f) force=1 ;; esac
 
     # The tunnel and settings.json are shared by every window. Stopping them
     # while Claude/Codex runs elsewhere is what used to kill the other tabs.
+    # Registered cc/cx sessions count too: ps may not name an npm-installed app.
     others=$(_other_agents)
-    if [ -n "$others" ] && [ $force -eq 0 ]; then
-        echo "[Stop] $(_count "$others") Claude/Codex session(s) still running in other windows (PID $(printf '%s\n' "$others" | tr '\n' ' '| sed 's/ $//'))."
+    n=$(_count "$others") sessions=0
+    # Every slot counts: a 'cc --node sg' session uses the sg tunnel, which cc-stop stops too.
+    for dir in $(ls "$(_recovery_root)" 2>/dev/null); do
+        [ -d "$(_recovery_root)/$dir" ] || continue
+        sessions=$((sessions + $(_recovery_sessions "$(_recovery_root)/$dir")))
+    done
+    [ "$sessions" -le "$n" ] || n=$sessions
+    if [ "$n" -gt 0 ] && [ $force -eq 0 ]; then
+        echo "[Stop] $n Claude/Codex session(s) still running in other windows${others:+ (PID $(printf '%s\n' "$others" | tr '\n' ' '| sed 's/ $//'))}."
         echo "       They use this same tunnel - stopping it would cut them off."
         echo "       Proxy stuck?  proxy-restart     (fresh tunnel for every window, sessions keep running)"
         echo "       Stop anyway?  cc-stop --force"
@@ -1647,7 +2343,8 @@ cc-stop() {
     fi
 
     tunnel-stop || rc=1
-    _node_tunnels_stop      # per-node Chrome tunnels (chrome-proxy <node>) go too
+    _recovery_stop_owners all || rc=1   # every node's tunnel; owners first, or they restart their ssh
+    _node_tunnels_stop      # unsupervised Chrome tunnels left by profiles before 2.10
     proxy-off
     if [ $rc -eq 0 ]; then
         echo "[OK] All proxy services stopped"
@@ -1659,12 +2356,22 @@ cc-stop() {
 
 # Replace a hung tunnel for EVERY window without touching env vars or
 # settings.json, so Claude/Codex running in other tabs just carry on.
-proxy-restart() {
-    echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
-    tunnel-stop >/dev/null || { tunnel-stop; return 1; }
-    tunnel-start || return 1
-    local state rc cc hc
-    read -r state rc cc hc <<< "$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)"
+proxy-restart() {  # [node]
+    local state rc cc hc port="$CLAUDE_HTTP_PORT"
+    if [ -n "${1:-}" ] && [ "$(_node_slot "$1" 2>/dev/null)" != main ]; then
+        _node_slot "$1" >/dev/null || return 1
+        port=$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT") || return 1
+        echo "[Restart] Replacing the $1 tunnel (other nodes keep running)..."
+        tunnel-stop "$1" >/dev/null || return 1
+        tunnel-start "$1" || return 1
+    else
+        _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
+        echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
+        tunnel-stop >/dev/null || { tunnel-stop; return 1; }
+        tunnel-start || return 1
+        port=$CLAUDE_HTTP_PORT
+    fi
+    read -r state rc cc hc <<< "$(_proxy_probe "$port" 10)"
     if [ "$state" = "ok" ]; then
         echo "[OK]  api.anthropic.com answers through the new tunnel - other windows recover on their next request."
     else
@@ -1678,6 +2385,7 @@ proxy-restart() {
 # ============================================================
 
 proxy-status() {
+    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     proxy-notify status
     local identity provider
     identity=$(_recovery_identity)
@@ -1721,10 +2429,22 @@ proxy-status() {
             ;;
     esac
 
+    local sdir swhy=''
+    sdir=$(_recovery_identity 2>/dev/null) || sdir=''
+    if [ -n "$sdir" ]; then swhy=$(cut -d'|' -f1 "$sdir/ssh.status" 2>/dev/null); fi
+    if [ -n "$swhy" ]; then echo "[!!]  Last ssh error : $(_recovery_ssh_hint "$swhy" "$CLAUDE_SSH_HOST")"; fi
     if [ -n "${HTTPS_PROXY:-}" ]; then
         echo "[ON]  Env HTTPS_PROXY: $HTTPS_PROXY"
     else
         echo "[OFF] Env HTTPS_PROXY: not set"
+    fi
+    if ! _killswitch_on; then
+        echo "[OFF] Kill switch   : off - plain claude/codex go direct while the tunnel is down ('proxy-killswitch on')"
+    else
+        case "$(_killswitch_pin_state)" in
+            "pinned $CLAUDE_HTTP_PORT") echo "[ON]  Kill switch   : Claude pinned to 127.0.0.1:$CLAUDE_HTTP_PORT - no direct connections ('proxy-killswitch' for details)" ;;
+            *) echo "[!!]  Kill switch   : on, but Claude's settings are not pinned - run 'proxy-killswitch'" ;;
+        esac
     fi
     local nname
     nname=$(_node_active_name)
@@ -1733,11 +2453,7 @@ proxy-status() {
     else
         echo "[..]  Server        : $CLAUDE_SSH_HOST  (settings: $CLAUDE_PROXY_CONF)"
     fi
-    local nport npid
-    while IFS='|' read -r nname nport npid; do
-        [ -n "$npid" ] || continue
-        echo "[ON]  Chrome tunnel : $nname -> 127.0.0.1:$nport (PID $npid)"
-    done <<< "$(_node_tunnels_running)"
+    _node_status_lines
 
     echo ""
     echo "Current external IP:"
@@ -1794,10 +2510,22 @@ proxy-doctor() {
     fi
 
     # --- tools ---
+    if command -v ssh >/dev/null 2>&1; then
+        echo "$ok  ssh installed ($(ssh -V 2>&1 | head -1))"
+    else
+        echo "$bad ssh NOT installed - the tunnel cannot be built at all. Fix: sudo apt install openssh-client"
+    fi
+    if command -v ss >/dev/null 2>&1; then
+        echo "$ok  ss installed - ports held by OTHER users are detected (fallback works)"
+    else
+        echo "$warn ss NOT installed - port checks fall back to lsof, which cannot see other users' sockets, so a port held by root may look free and collide at bind time. Fix: sudo apt install iproute2"
+    fi
     if command -v lsof >/dev/null 2>&1; then
         echo "$ok  lsof installed"
+    elif command -v ss >/dev/null 2>&1; then
+        echo "$ok  lsof not installed - using ss to see which program holds a port"
     else
-        echo "$bad lsof NOT installed - status/teardown can't see ports. Fix: sudo apt install lsof"
+        echo "$bad lsof and ss NOT installed - status/teardown can't see ports. Fix: sudo apt install lsof"
     fi
     if command -v jq >/dev/null 2>&1; then
         echo "$ok  jq installed ($(jq --version)) - settings.json sync available"
@@ -1891,7 +2619,24 @@ proxy-doctor() {
         fi
     fi
 
-    # --- end-to-end: can we actually reach the API through the proxy? ---
+    # --- kill switch ---
+    _killswitch_report "$ok" "$warn" "$bad"
+
+    # --- node tunnels: each one must answer through its own port ---
+    local nd nslot nhttp nhost
+    for nslot in $(ls "$(_recovery_root)" 2>/dev/null); do
+        case "$nslot" in node-*) ;; *) continue;; esac
+        nd="$(_recovery_root)/$nslot"
+        _recovery_owner_pid "$nd" >/dev/null || continue
+        nhttp=$(_recovery_record_get "$nd" http); nhost=$(_recovery_record_get "$nd" host)
+        case "$(_proxy_probe "$nhttp" 8)" in
+            ok*)    echo "$ok  Node tunnel ${nslot#node-} ($nhost, :$nhttp) answers" ;;
+            proxy*) echo "$bad Node tunnel ${nslot#node-} ($nhost): the VM's proxy answers but the request fails - check webproxy-status on $nhost" ;;
+            *)      echo "$bad Node tunnel ${nslot#node-} ($nhost, :$nhttp) does not answer. Fix: proxy-restart ${nslot#node-}" ;;
+        esac
+    done
+
+    # --- recovery owner ---
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" != "1" ]; then
         echo "$warn Tunnel watchdog disabled (CLAUDE_TUNNEL_WATCHDOG=0) - a dropped link freezes every window until 'proxy-restart'"
     elif _watchdog_pid >/dev/null; then
@@ -2210,20 +2955,15 @@ chrome-proxy() {
     esac
     [ -n "$profile" ] && pargs=(--profile-directory="$profile")
 
-    if [ -n "$node" ]; then
+    if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
+        # Another node: its own self-healing tunnel (the same one 'cc --node' uses).
         IFS='|' read -r idx name alias host rest <<< "$line"
-        if [ "$alias" = "$CLAUDE_SSH_HOST" ] && [ "$(_tunnel_health | awk '{print $1}')" = "ok" ]; then
-            port="$CLAUDE_SOCKS_PORT"; label="$name (main tunnel)"
-            echo "[OK]  $name is the active node and its tunnel is up - reusing it"
-        else
-            _node_ensure_alias "$line" || return 1
-            port=$(_node_socks_port "$idx")
-            _node_tunnel_start "$name" "$alias" "$port" || {
-                echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
-                return 1
-            }
-            label="$name (own tunnel)"
-        fi
+        tunnel-start "$node" || {
+            echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
+            return 1
+        }
+        port=$(_node_socks_port "$idx")
+        label="$name (own tunnel)"
     else
         # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
         if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then
@@ -2493,7 +3233,7 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
     local label="$1" bin="$2" pkg="$3" hint="$4" latest cur
     latest=$(npm view "$pkg" version 2>/dev/null)
     if command -v "$bin" >/dev/null 2>&1; then
-        cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+        cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
         if [ -z "$latest" ]; then
             echo "[OK]  $label ${cur:-(version unknown)} installed (npm registry not reachable - can't check for updates)"
             return 0
@@ -2520,7 +3260,7 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
     echo "[Tools] npm install -g $pkg@latest"
     npm install -g "$pkg@latest" || { echo "[Err] npm install failed (see above)."; return 1; }
     hash -r 2>/dev/null
-    cur=$(_tools_semver "$("$bin" --version 2>/dev/null)")
+    cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
     if [ -n "$cur" ]; then
         echo "[OK]  $label $cur ready - run it through the proxy with '${5:-$bin}'"
     else
@@ -2595,7 +3335,7 @@ cc-help() {
     echo ""
     echo "  -- nodes (jp / sg / us ...) --"
     echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
-    echo "  proxy-node sg   - Make 'sg' the node cc / cx use (also: cc --node sg, cx --node sg)"
+    echo "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)"
     echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
     echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
     echo "  proxy-nodes --from jpvpn - get the node list privately from a VM over SSH (--domain <d>: public DNS)"
@@ -2608,13 +3348,18 @@ cc-help() {
     echo "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)"
     echo "  tunnel-stop     - Stop the SSH tunnel"
     echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
-    echo "  proxy-off       - Clear proxy env vars + unsync Claude settings.json"
+    echo "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)"
+    echo "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly"
     echo ""
     echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
     echo "                    chrome-proxy [node] [--profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com"
     echo "  cc-help         - Show this list again"
     echo ""
 }
+
+# Kill switch: make sure Claude's settings point at the tunnel (also protects IDE
+# launches that never run cc). Writes only when missing or wrong; silent otherwise.
+{ _killswitch_ensure_pin 2>/dev/null; } >&2
 
 # One line when a new shell loads this file. Silence it with
 # CLAUDE_PROXY_BANNER=0 in ~/.claude-proxy.conf.

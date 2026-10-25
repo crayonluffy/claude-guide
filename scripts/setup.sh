@@ -112,6 +112,28 @@ conf_set() {
     fi
 }
 
+# Kill switch (profile 2.9+): stays on unless the user turned it off. Plain
+# 'claude' / 'codex' through the proxy: asked on a full run (the saved answer is
+# the default); a quick update only mentions it when it was never chosen.
+killswitch_step() {  # killswitch_step <quick 0|1>
+    local plain def=Y
+    [ -n "$(conf_get CLAUDE_KILLSWITCH)" ] || conf_set CLAUDE_KILLSWITCH on
+    plain=$(conf_get CLAUDE_PLAIN_COMMANDS)
+    if [ "$1" = 1 ]; then
+        [ -n "$plain" ] || echo "[Info] New: plain 'claude' / 'codex' can start through the proxy too - proxy-config set PLAIN_COMMANDS auto"
+        return 0
+    fi
+    [ "$plain" != off ] || def=N
+    echo ""
+    echo "Kill switch: Claude and Codex never go out directly - without the tunnel they cannot connect."
+    if confirm "Make plain 'claude' and 'codex' start through the proxy too (recommended)?" "$def"; then
+        conf_set CLAUDE_PLAIN_COMMANDS auto
+    else
+        conf_set CLAUDE_PLAIN_COMMANDS off
+        echo "[Info] Use cc / cx to start them through the proxy. Plain 'claude' still cannot go direct; plain 'codex' can."
+    fi
+}
+
 alias_in_ssh_config() {
     grep -qiE "^Host[[:space:]]+$1([[:space:]]|$)" "$HOME/.ssh/config" 2>/dev/null
 }
@@ -359,6 +381,7 @@ conf_set CLAUDE_SSH_PORT          "$SSH_PORT"
 conf_set CLAUDE_REMOTE_PROXY_PORT "$PROXY_PORT"
 conf_set CLAUDE_PROXY_DOMAIN      "$DOMAIN"
 [ -n "$DOMAIN" ] && conf_set CLAUDE_NODES_FROM ""     # one node-list source at a time
+killswitch_step "$QUICK"
 echo "[OK] Settings saved: $CONF"
 
 # --- 7. Install / update the cc profile --------------------------------------
@@ -438,4 +461,5 @@ echo "    source ${RC:-~/.zshrc}"
 echo "    cc"
 echo ""
 echo "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)."
+echo "       'proxy-killswitch' shows how Claude and Codex are kept from going out directly."
 echo ""

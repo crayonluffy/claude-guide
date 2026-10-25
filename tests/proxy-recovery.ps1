@@ -57,6 +57,7 @@ $script:CONF_KEYS=@('HTTP_PORT','SOCKS_PORT','WATCHDOG_INTERVAL','WATCHDOG_FAILS
 Write-RecoveryStatus $ownerDir descriptor @{HTTP_PORT=8080;SOCKS_PORT=1080;WATCHDOG_INTERVAL=0;WATCHDOG_FAILS=2;WATCHDOG_NOTICE_AFTER=60;WATCHDOG_MAX_BACKOFF=30}
 function Test-RecoveryPortConflict {return $false}
 $script:DESKTOP_NOTIFICATIONS='off'
+$script:WATCHDOG_IDLE_INTERVAL=0   # an idle owner would otherwise wait 60s per healthy pass
 $script:SshStarts=0; $script:ProbeCalls=0
 function Start-RecoverySsh {
  $script:SshStarts++
@@ -77,7 +78,7 @@ try {
 Write-Host 'PASS: PowerShell worker preserves fixed ports during proxy outage and honors stop'
 if (-not (Get-Command Start-RecoverySubscriber -ErrorAction SilentlyContinue)) {throw 'live recovery subscriber is missing'}
 foreach ($f in $ast.FindAll({param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false)) {
- if ($f.Name -in @('proxy-up','cc','cx','_split-launch-args')) { Invoke-Expression $f.Extent.Text }
+ if ($f.Name -in @('proxy-up','cc','cx','_split-launch-args','Wait-ProxyTransport','Set-ProxyEnv','Show-ProxyIp')) { Invoke-Expression $f.Extent.Text }
 }
 function tunnel-start {}
 function Get-TunnelHealth {return @{Status='ok'}}
@@ -85,6 +86,9 @@ function proxy-on {$env:HTTPS_PROXY='http://127.0.0.1:8080'}
 $script:AppCalls=0; $script:TestKind='proxy'; $script:TUNNEL_WATCHDOG=0
 function Test-RecoveryTransport {return @{kind=$script:TestKind}}
 function claude {$script:AppCalls++;$script:AppArgs=@($args);$global:LASTEXITCODE=17}
+# cc runs the program Get-AppCommand finds (never a plain-command function); here: the mock.
+function Get-AppCommand {param($Name) Get-Command $Name -CommandType Function}
+function Test-KillswitchLaunch {param($HttpPort,$SocksPort) $true}   # covered by tests/proxy-killswitch.ps1
 cc --no-verify --safe 'hello world'
 Assert ($script:AppCalls -eq 0) 'NoVerify bypassed mandatory preflight'
 $script:TestKind='healthy'

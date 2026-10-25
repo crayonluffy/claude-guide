@@ -20,6 +20,7 @@ assert test "$(field "$s" 9)" = restored
 s=$(_recovery_step "$s" 'healthy|0|200|500|ok' 1 60)
 assert test "$(field "$s" 3)" = 75
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+export XDG_STATE_HOME="$scratch/state"   # never the real recovery state
 curl() {
  printf '%s\n' "$*" >> "$scratch/args"
  case "$*" in *--socks5-hostname*) printf '000 200'; return 0;; esac
@@ -63,6 +64,7 @@ ssh() {
 }
 _recovery_probe() { echo 'proxy|0|407|000|proxy'; }
 _listeners() { :; }
+_port_bound() { return 1; }
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
 CLAUDE_DESKTOP_NOTIFICATIONS=off
 CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
@@ -86,12 +88,18 @@ echo 'PASS: real Bash worker preserves ports/settings during proxy failure and s
 assert declare -F _recovery_subscribe
 echo 'PASS: Bash subscriber interface'
 # Load real launch integration without profile initialization.
+eval "$(sed -n '/^_proxy_transport_wait() {/,/^}/p' "$repo/scripts/claude-proxy.sh")"
 eval "$(sed -n '/^proxy-up() {/,/^cc-stop() {/p' "$repo/scripts/claude-proxy.sh" | sed '$d')"
+_killswitch_check() { :; }   # covered by tests/proxy-killswitch.sh
 tunnel-start() { :; }
 _tunnel_health() { echo 'ok 123 ssh 8080'; }
 proxy-on() { export HTTPS_PROXY=http://127.0.0.1:8080; }
 _verify_proxy_ip() { echo unexpected-ip-probe >> "$scratch/unexpected"; }
-claude() { printf '%s\n' "$@" > "$scratch/app.args"; return 17; }
+# The launcher calls the real binary via 'command' (so plain-command wrappers can't
+# recurse); intercept that for 'claude' and leave every other command alone.
+_fake_claude() { printf '%s\n' "$@" > "$scratch/app.args"; return 17; }
+command() { if [ "$1" = claude ]; then shift; _fake_claude "$@"; else builtin command "$@"; fi; }
+_bin_path() { echo "/fake/$1"; }
 CLAUDE_TUNNEL_WATCHDOG=0
 if _launch_via_proxy Claude claude hint skip --no-verify --safe 'hello world'; then echo 'FAIL: dead proxy allowed launch';exit 1;fi
 assert test ! -e "$scratch/app.args"

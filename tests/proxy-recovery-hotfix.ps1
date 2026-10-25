@@ -58,6 +58,7 @@ Write-Host 'PASS: probe arguments accepted by real curl, explicit proxy wins ove
 # --- worker loop: fake SSH, fake clock, no real processes or network ---------
 $script:CONF_KEYS=@('HTTP_PORT','SOCKS_PORT','WATCHDOG_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE')
 $script:DESKTOP_NOTIFICATIONS='off'
+$script:WATCHDOG_IDLE_INTERVAL=0   # an idle owner would otherwise wait 60s per healthy pass
 function Test-RecoveryPortConflict {return $false}
 function New-FakeSsh {[pscustomobject]@{Id=99999999;HasExited=$false;StartTime=[datetime]::UtcNow}|Add-Member ScriptMethod Dispose {} -PassThru|Add-Member ScriptMethod WaitForExit {param($ms)$true} -PassThru}
 function Start-RecoverySsh {$script:SshStarts++;return (New-FakeSsh)}
