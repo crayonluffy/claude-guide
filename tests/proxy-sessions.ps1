@@ -5,7 +5,7 @@ $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../scripts/claude-proxy.ps1'),[ref]$tokens,[ref]$errors)
 if($errors.Count){throw ($errors|Out-String)}
 foreach($f in $ast.FindAll({param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst]},$false)){
- if($f.Name -like '*-Recovery*' -or $f.Name -in @('proxy-up','cc-stop','_split-launch-args')){Invoke-Expression $f.Extent.Text}
+ if($f.Name -like '*-Recovery*' -or $f.Name -in @('proxy-up','cc-stop','_split-launch-args','Wait-ProxyTransport','Set-ProxyEnv','Show-ProxyIp')){Invoke-Expression $f.Extent.Text}
 }
 function Assert($Condition,$Message){if(-not $Condition){throw "FAIL: $Message"}}
 $scratch=Join-Path ([IO.Path]::GetTempPath()) ('sessions-'+[guid]::NewGuid()); $null=New-Item -ItemType Directory $scratch

@@ -6,7 +6,7 @@ $source = $ProfilePath
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'chrome-proxy')
+$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'chrome-proxy')
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($f.Name -in $wanted) { Invoke-Expression $f.Extent.Text }
 }
@@ -20,13 +20,14 @@ function Get-ChromeProfileDir { param($Base, $Name) return "$Base-$Name" }
 function Get-TunnelHealth { return @{ Status = 'ok' } }
 function Test-Port { param($Port) return $true }
 function Confirm-NodeAlias { param($Node) return $true }
-function Start-NodeTunnel { param($Node, $Port) $script:TunnelPorts += $Port; return $true }
+# A node's Chrome uses that node's self-healing tunnel (2.10), not a bare ssh.
+function Start-NodeTunnelOwner { param($Node) $script:TunnelPorts += $Node; return $true }
 function Reset-Launch { $script:ChromeArgs = @(); $script:TunnelPorts = @() }
 $script:CHROME_EXE = 'chrome-proxy-test-browser'
 $script:CHROME_BASE = 'C:\ChromeVPNProfile'
 $script:SSH_HOST = 'jpvpn'; $script:SOCKS_PORT = 1080; $script:NODE_SOCKS_BASE = 1180
 $script:NODES_CACHE = [System.IO.Path]::GetTempFileName()
-$catalogue = '{"nodes":[{"name":"jp","alias":"jpvpn","slot":0},{"name":"sg","alias":"sgvpn","slot":1}]}'
+$catalogue = '{"nodes":[{"name":"jp","alias":"jpvpn","host":"jp.example.com","slot":0},{"name":"sg","alias":"sgvpn","host":"sg.example.com","slot":1}]}'
 try {
     [System.IO.File]::WriteAllText($script:NODES_CACHE, $catalogue)
     Reset-Launch
