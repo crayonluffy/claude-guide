@@ -55,6 +55,7 @@ echo 'PASS: proxy-off clears the shell but keeps Claude pinned to the tunnel'
 
 tunnel-stop() { :; }; _node_tunnels_stop() { :; }; _other_agents() { :; }
 _recovery_identity() { echo "$scratch/none"; }; _recovery_sessions() { echo 0; }
+_recovery_root() { echo "$scratch/none"; }; _recovery_stop_owners() { :; }   # node owners: tests/proxy-nodes-parallel.sh
 cc-stop >/dev/null
 assert test "$(pin HTTPS_PROXY)" = http://127.0.0.1:8080
 echo 'PASS: cc-stop keeps the pin'

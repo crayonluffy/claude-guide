@@ -1428,36 +1428,28 @@ _node_ensure_alias() {  # <catalogue line>
     _known_hosts_add "$host" "$sport" "$hostkey"
 }
 
-# --- per-node Chrome tunnels (SOCKS only; the main tunnel is untouched) ------
-_node_tunnel_start() {  # <name> <alias> <port>
-    local name="$1" alias="$2" port="$3" pid pname attempts=0
-    if _port_in_use "$port"; then
-        pid=$(_ssh_listeners "$port" | head -1)
-        if [ -n "$pid" ]; then
-            echo "[OK]  $name tunnel already running (PID $pid, SOCKS 127.0.0.1:$port)"
-            return 0
-        fi
-        pid=$(_listeners "$port" | head -1); pname=$(_proc_name "$pid")
-        echo "[Err] Port $port (reserved for the $name tunnel) is used by '${pname:-unknown}' (PID $pid). Move the node ports: proxy-config set NODE_SOCKS_BASE 1280"
-        return 1
-    fi
-    _is_wsl && _ensure_ssh_agent
-    echo "[SSH] Starting $name tunnel to $alias (SOCKS 127.0.0.1:$port)..."
-    ssh -N -f -C -D "$port" \
-        -o ServerAliveInterval=60 -o ServerAliveCountMax=3 \
-        -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
-        "$alias" 2>"$CLAUDE_TUNNEL_LOG.$name"
-    while ! _port_in_use "$port" && [ $attempts -lt 10 ]; do
-        sleep 0.5; attempts=$((attempts+1))
+# --- node tunnels (2.10: one self-healing owner per node, see _recovery_owner_start) ---
+
+# proxy-status: one line per node tunnel (2.10 owners), then any unsupervised
+# Chrome tunnel a profile before 2.10 left behind.
+_node_status_lines() {
+    local d slot host http socks why n nname nport npid header=0 owned=''
+    for slot in $(ls "$(_recovery_root)" 2>/dev/null); do
+        case "$slot" in node-*) ;; *) continue;; esac
+        d="$(_recovery_root)/$slot"
+        _recovery_owner_pid "$d" >/dev/null || continue
+        [ "$header" -eq 1 ] || { echo "=== Node tunnels (cc --node / chrome-proxy <node>) ==="; header=1; }
+        host=$(_recovery_record_get "$d" host); http=$(_recovery_record_get "$d" http); socks=$(_recovery_record_get "$d" socks)
+        n=$(_recovery_sessions "$d"); owned="$owned $socks"
+        echo "[ON]  ${slot#node-}  $host  HTTP 127.0.0.1:$http  SOCKS 127.0.0.1:$socks  sessions: $n  (tunnel-stop ${slot#node-} stops it)"
+        why=$(cut -d'|' -f1 "$d/ssh.status" 2>/dev/null)
+        [ -z "$why" ] || echo "[!!]    last ssh error: $(_recovery_ssh_hint "$why" "$host")"
     done
-    if _port_in_use "$port"; then
-        echo "[OK]  $name tunnel up: SOCKS 127.0.0.1:$port -> $alias"
-    else
-        echo "[Err] $name tunnel failed to start within 5s. ssh said:"
-        sed 's/^/       /' "$CLAUDE_TUNNEL_LOG.$name" 2>/dev/null | head -5
-        echo "       (first time? run 'ssh $alias' once to accept the host key)"
-        return 1
-    fi
+    while IFS='|' read -r nname nport npid; do
+        [ -n "$npid" ] || continue
+        case " $owned " in *" $nport "*) continue;; esac
+        echo "[ON]  Chrome tunnel : $nname -> 127.0.0.1:$nport (PID $npid, from an older profile - not self-healing; 'cc-stop' ends it)"
+    done <<< "$(_node_tunnels_running)"
 }
 
 # Running per-node tunnels: "name|port|pid" per line.
@@ -2336,7 +2328,11 @@ cc-stop() {
     # Registered cc/cx sessions count too: ps may not name an npm-installed app.
     others=$(_other_agents)
     n=$(_count "$others") sessions=0
-    if dir=$(_recovery_identity 2>/dev/null); then sessions=$(_recovery_sessions "$dir"); fi
+    # Every slot counts: a 'cc --node sg' session uses the sg tunnel, which cc-stop stops too.
+    for dir in $(ls "$(_recovery_root)" 2>/dev/null); do
+        [ -d "$(_recovery_root)/$dir" ] || continue
+        sessions=$((sessions + $(_recovery_sessions "$(_recovery_root)/$dir")))
+    done
     [ "$sessions" -le "$n" ] || n=$sessions
     if [ "$n" -gt 0 ] && [ $force -eq 0 ]; then
         echo "[Stop] $n Claude/Codex session(s) still running in other windows${others:+ (PID $(printf '%s\n' "$others" | tr '\n' ' '| sed 's/ $//'))}."
@@ -2347,7 +2343,8 @@ cc-stop() {
     fi
 
     tunnel-stop || rc=1
-    _node_tunnels_stop      # per-node Chrome tunnels (chrome-proxy <node>) go too
+    _recovery_stop_owners all || rc=1   # every node's tunnel; owners first, or they restart their ssh
+    _node_tunnels_stop      # unsupervised Chrome tunnels left by profiles before 2.10
     proxy-off
     if [ $rc -eq 0 ]; then
         echo "[OK] All proxy services stopped"
@@ -2456,11 +2453,7 @@ proxy-status() {
     else
         echo "[..]  Server        : $CLAUDE_SSH_HOST  (settings: $CLAUDE_PROXY_CONF)"
     fi
-    local nport npid
-    while IFS='|' read -r nname nport npid; do
-        [ -n "$npid" ] || continue
-        echo "[ON]  Chrome tunnel : $nname -> 127.0.0.1:$nport (PID $npid)"
-    done <<< "$(_node_tunnels_running)"
+    _node_status_lines
 
     echo ""
     echo "Current external IP:"
@@ -2628,6 +2621,20 @@ proxy-doctor() {
 
     # --- kill switch ---
     _killswitch_report "$ok" "$warn" "$bad"
+
+    # --- node tunnels: each one must answer through its own port ---
+    local nd nslot nhttp nhost
+    for nslot in $(ls "$(_recovery_root)" 2>/dev/null); do
+        case "$nslot" in node-*) ;; *) continue;; esac
+        nd="$(_recovery_root)/$nslot"
+        _recovery_owner_pid "$nd" >/dev/null || continue
+        nhttp=$(_recovery_record_get "$nd" http); nhost=$(_recovery_record_get "$nd" host)
+        case "$(_proxy_probe "$nhttp" 8)" in
+            ok*)    echo "$ok  Node tunnel ${nslot#node-} ($nhost, :$nhttp) answers" ;;
+            proxy*) echo "$bad Node tunnel ${nslot#node-} ($nhost): the VM's proxy answers but the request fails - check webproxy-status on $nhost" ;;
+            *)      echo "$bad Node tunnel ${nslot#node-} ($nhost, :$nhttp) does not answer. Fix: proxy-restart ${nslot#node-}" ;;
+        esac
+    done
 
     # --- recovery owner ---
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" != "1" ]; then
@@ -2948,20 +2955,15 @@ chrome-proxy() {
     esac
     [ -n "$profile" ] && pargs=(--profile-directory="$profile")
 
-    if [ -n "$node" ]; then
+    if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
+        # Another node: its own self-healing tunnel (the same one 'cc --node' uses).
         IFS='|' read -r idx name alias host rest <<< "$line"
-        if [ "$alias" = "$CLAUDE_SSH_HOST" ] && [ "$(_tunnel_health | awk '{print $1}')" = "ok" ]; then
-            port="$CLAUDE_SOCKS_PORT"; label="$name (main tunnel)"
-            echo "[OK]  $name is the active node and its tunnel is up - reusing it"
-        else
-            _node_ensure_alias "$line" || return 1
-            port=$(_node_socks_port "$idx")
-            _node_tunnel_start "$name" "$alias" "$port" || {
-                echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
-                return 1
-            }
-            label="$name (own tunnel)"
-        fi
+        tunnel-start "$node" || {
+            echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
+            return 1
+        }
+        port=$(_node_socks_port "$idx")
+        label="$name (own tunnel)"
     else
         # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
         if ! _port_in_use "$CLAUDE_SOCKS_PORT"; then

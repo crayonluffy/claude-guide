@@ -120,6 +120,7 @@ eval "$(sed -n '/^cc-stop() {/,/^}/p' "$src")"
 _other_agents() { :; }
 tunnel-stop() { echo stopped >> "$scratch/stops"; }
 _node_tunnels_stop() { :; }
+_recovery_stop_owners() { :; }   # node owners: tests/proxy-nodes-parallel.sh
 proxy-off() { :; }
 _recovery_process_identity "$$" > "$dir/sessions/$$"
 if cc-stop > "$scratch/stop.out"; then echo 'FAIL: cc-stop ignored a registered session' >&2; exit 1; fi

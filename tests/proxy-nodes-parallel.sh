@@ -212,8 +212,46 @@ out=$(run '' '_tunnel_health() { echo down; }; _recovery_sessions() { echo 0; };
 case "$out" in *'rc=0'*) ;; *) echo "FAIL: proxy-node with no sessions: $out" >&2; exit 1;; esac
 echo 'PASS: proxy-node refuses to move running sessions unless --force'
 
+# 9) cc-stop and proxy-status cover every node tunnel.
+out=$(run '' '
+    d=$(_recovery_identity node-sg)
+    mkdir -p "$d/sessions"; _recovery_process_identity $$ > "$d/sessions/$$"
+    _other_agents() { :; }
+    cc-stop; echo "rc=$?"' 2>&1)
+case "$out" in *'1 Claude/Codex session(s)'*'rc=1'*) ;; *) echo "FAIL: cc-stop ignored a node session: $out" >&2; exit 1;; esac
+out=$(run '' '
+    _other_agents() { :; }; proxy-off() { :; }; _node_tunnels_stop() { echo legacy-sweep >> "'"$scratch"'/order9"; }
+    _recovery_owned_dirs() { [ "${1:-}" = all ] && printf "%s\n" "$XDG_STATE_HOME/claude-proxy/recovery/main" "$XDG_STATE_HOME/claude-proxy/recovery/node-sg"; :; }
+    _recovery_owner_stop() { echo "stop ${1##*/}" >> "'"$scratch"'/order9"; }
+    rm -rf "$XDG_STATE_HOME/claude-proxy/recovery/node-sg/sessions"
+    cc-stop >/dev/null; echo "rc=$?"' 2>&1)
+case "$out" in *'rc=0'*) ;; *) echo "FAIL: cc-stop: $out" >&2; exit 1;; esac
+assert grep -qx 'stop node-sg' "$scratch/order9"
+assert test "$(tail -1 "$scratch/order9")" = legacy-sweep
+echo 'PASS: cc-stop counts sessions on every node and stops node owners before the old-tunnel sweep'
+
+out=$(run '' '
+    d=$(_recovery_identity node-sg)
+    printf "host=sgvpn\nhttp=8181\nsocks=1181\n" > "$d/tunnel.rec"
+    printf "auth|5|Permission denied\n" > "$d/ssh.status"
+    _recovery_owner_pid() { case "$1" in */node-sg) echo 4242;; *) return 1;; esac; }
+    _tunnel_health() { echo down; }; proxy-notify() { :; }; curl() { :; }
+    proxy-status' 2>&1)
+case "$out" in *'Node tunnels'*'sg'*'8181'*'1181'*'SSH login to sgvpn was refused'*) ;; *) echo "FAIL: proxy-status node line: $out" >&2; exit 1;; esac
+echo 'PASS: proxy-status shows each node tunnel with its ports and last error'
+
 # No owner may outlive the test.
 for d in "$root"/*; do
     if _recovery_owner_pid "$d" >/dev/null; then echo "FAIL: owner left running in ${d##*/}" >&2; exit 1; fi
 done
 echo 'PASS: no owner left running'
+
+# 10) proxy-doctor probes each node tunnel through its own port.
+out=$(run '' '
+    d=$(_recovery_identity node-sg); printf "host=sgvpn\nhttp=8181\nsocks=1181\n" > "$d/tunnel.rec"
+    _recovery_owner_pid() { case "$1" in */node-sg) echo 4242;; *) return 1;; esac; }
+    _proxy_probe() { [ "$1" = 8181 ] && echo "dead 7 000 000" || echo "ok 0 200 404"; }
+    _doctor_vm_check() { :; }; curl() { :; }
+    proxy-doctor' 2>&1)
+case "$out" in *'Node tunnel sg (sgvpn, :8181) does not answer'*'proxy-restart sg'*) ;; *) echo "FAIL: doctor node line: $(printf '%s' "$out" | grep -i node)" >&2; exit 1;; esac
+echo 'PASS: proxy-doctor probes each node tunnel'
