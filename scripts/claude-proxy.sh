@@ -64,6 +64,9 @@ CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
 # SOCKS-only tunnel per node so several regions can be open at once; node i
 # (0-based, catalogue order) listens on NODE_SOCKS_BASE + i.
 CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
+# A plain ssh alias that is not in the node list can be a node too ('cc --node
+# devbox'). It gets a fixed slot from 100 up, saved here as "alias slot" lines.
+CLAUDE_PROXY_LOCAL_NODES="${CLAUDE_PROXY_LOCAL_NODES:-$HOME/.claude-proxy.local-nodes}"
 CLAUDE_NODE_SOCKS_BASE=1180
 # 2.10: every node can have its own tunnel at the same time ('cc --node sg' in
 # one terminal, the default node in another). Node i (its catalogue slot) uses
@@ -1315,13 +1318,37 @@ _node_socks_port() {  # <idx>
     echo $((CLAUDE_NODE_SOCKS_BASE + $1))
 }
 
+# The fixed slot of a plain ssh alias (not in the node list): the saved one, or
+# the lowest free slot from 100 up, saved. Slots below 100 belong to the node list.
+_node_local_slot() {  # <alias>
+    local a n used='' slot=100 i=0 lock="$CLAUDE_PROXY_LOCAL_NODES.lock"
+    while read -r a n; do
+        case "$n" in ''|*[!0-9]*) continue;; esac
+        if [ "$a" = "$1" ]; then echo "$n"; return 0; fi
+        used="$used $n "
+    done 2>/dev/null < "$CLAUDE_PROXY_LOCAL_NODES"
+    # Two terminals must not hand out the same slot: a short lock around the write.
+    while ! mkdir "$lock" 2>/dev/null && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    while read -r a n; do
+        [ "$a" = "$1" ] && { rmdir "$lock" 2>/dev/null; echo "$n"; return 0; }
+        used="$used $n "
+    done 2>/dev/null < "$CLAUDE_PROXY_LOCAL_NODES"
+    used="$used $(_nodes_tsv 2>/dev/null | cut -d'|' -f1 | tr '\n' ' ') "
+    while case "$used" in *" $slot "*) true;; *) false;; esac; do slot=$((slot+1)); done
+    printf '%s %s\n' "$1" "$slot" >> "$CLAUDE_PROXY_LOCAL_NODES"
+    rmdir "$lock" 2>/dev/null
+    echo "$slot"
+}
+
 # The recovery slot of a node: 'main' for the default node (main ports), else
 # node-<name>. Fails, with the reason on stderr, for an unknown or unprovisioned node.
 _node_slot() {  # <node name or alias>
     local line idx name alias host
     if ! line=$(_node_lookup "$1"); then
         [ "$1" != "$CLAUDE_SSH_HOST" ] || { echo main; return 0; }
-        echo "[Err] Unknown node '$1'. 'proxy-nodes' lists them ('proxy-nodes --refresh' fetches the latest)." >&2
+        # Not in the node list, but a plain ssh alias: a node of its own.
+        if _ssh_config_has_alias "$1"; then echo "node-$1"; return 0; fi
+        echo "[Err] Unknown node '$1'. It is not in the node list ('proxy-nodes') and not an alias in ~/.ssh/config." >&2
         return 1
     fi
     IFS='|' read -r idx name alias host _ <<< "$line"
@@ -1339,8 +1366,15 @@ _node_slot() {  # <node name or alias>
 _node_ctx() {  # <node name or alias>
     local line idx name alias host user sport pport http socks
     [ "$(_node_slot "$1")" != main ] || return 0
-    line=$(_node_lookup "$1") || return 1
-    IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    if line=$(_node_lookup "$1"); then
+        IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    else
+        # A plain ssh alias: its local slot; the alias carries user, key and port,
+        # and its VM is assumed to run tinyproxy on the same port as the default node.
+        _node_slot "$1" >/dev/null || return 1
+        idx=$(_node_local_slot "$1") || return 1
+        name=$1 alias=$1 sport='' pport=$CLAUDE_REMOTE_PROXY_PORT
+    fi
     http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
     if [ "$http" = "$CLAUDE_HTTP_PORT" ] || [ "$http" = "$CLAUDE_SOCKS_PORT" ]; then
         echo "[Err] Node '$name' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $((CLAUDE_HTTP_PORT + 100))" >&2
@@ -2932,7 +2966,7 @@ chrome-proxy() {
             -p|--profile) want_profile=1; continue ;;
             --profile=*)  profile="${a#--profile=}"; continue ;;
         esac
-        if [ -z "$node" ] && line=$(_node_lookup "$a"); then
+        if [ -z "$node" ] && { line=$(_node_lookup "$a") || { _ssh_config_has_alias "$a" && line="|$a|$a|"; }; }; then
             node="$a"
         else
             if [ -z "$node" ] && printf '%s\n' "$a" | LC_ALL=C grep -Eq '^[A-Za-z][A-Za-z0-9]*$'; then
@@ -2958,11 +2992,11 @@ chrome-proxy() {
     if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
         # Another node: its own self-healing tunnel (the same one 'cc --node' uses).
         IFS='|' read -r idx name alias host rest <<< "$line"
+        port=$(_node_ctx "$node" && echo "$CLAUDE_SOCKS_PORT") || return 1
         tunnel-start "$node" || {
             echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
             return 1
         }
-        port=$(_node_socks_port "$idx")
         label="$name (own tunnel)"
     else
         # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
