@@ -37,6 +37,14 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.11.0 (Windows, macOS, Linux, WSL): stop one node; plain ssh aliases as nodes
+
+- **New: `cc-stop sg` / `cx-stop sg`.** Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). `cc-stop` without a node still stops all tunnels.
+- **Fixed: plain ssh aliases work with `--node` again.** In 2.10.0, `cc --node devbox` worked only for a node in the node list. Now an alias in `~/.ssh/config` also works. It gets fixed ports from slot 100 up (`8280` / `1280` …), saved in `~/.claude-proxy.local-nodes`.
+- **Changed: `cc-help`** shows how to use more nodes at the same time.
+
+Type `proxy-update` and open a new terminal window. Release tag: `v2.11.0`. The release notes are on the GitHub release of the same name.
+
 ### 2.10.0 (Windows, macOS, Linux, WSL): more nodes at the same time
 
 Each node can have its own tunnel. You can use different nodes in different terminals at the same time.

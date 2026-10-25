@@ -17,6 +17,8 @@ The commands are the same for all sources:
 | See the nodes, and the node that you use | `proxy-nodes` |
 | Send **Claude or Codex in this terminal** through a different VM | `cc --node sg` / `cx --node sg` (other terminals do not change) |
 | Make a different VM the **default** for all new terminals | `proxy-node sg` |
+| Stop the tunnel of **one node** (the other nodes continue) | `cc-stop sg` or `cx-stop sg` |
+| Use a VM that is **only an alias** in `~/.ssh/config` (not in the node list) | `cc --node devbox` (any command above works with the alias) |
 | Open a **Chrome window** through a specific VM, without a change to `cc`, and with more VMs open at the same time | `chrome-proxy sg` |
 | Open a **different Chrome profile** (different logins) through the **same** VM | `chrome-proxy jp --profile work` (Windows: `-Profile work`) |
 | See the Chrome profiles | `chrome-profiles` |
@@ -59,6 +61,8 @@ proxy-node                         # show the active node
 proxy-node jp2                     # make jp2 the default (saved; restarts the tunnel; refuses while sessions use it - --force)
 cc --node jp2                      # Claude through jp2 in THIS terminal only   (also cx --node, proxy-up --node)
 tunnel-start jp2                   # start only the tunnel of jp2; tunnel-stop jp2 / proxy-restart jp2 work the same way
+cc-stop jp2                        # stop only the tunnel of jp2 (cx-stop jp2: the same); refuses while a session uses it - --force
+cc --node devbox                   # a plain ssh alias, not in the node list, works too (its own fixed ports)
 
 chrome-proxy                       # Chrome through the ACTIVE node (main tunnel; the profile starts it if necessary)
 chrome-proxy jp2                   # Chrome through the tunnel of jp2, with its own data folder (no change to the main tunnel)
@@ -93,7 +97,9 @@ The output of `chrome-profiles` looks like this:
 
 `<not provisioned>` means that the admin added the node to the list, but did not give it an address. You cannot use the node until the admin adds the address. If you have an `ssh` alias for that node, the list shows its address, with `(your alias)`.
 
-**Use more nodes at the same time:** type `cc --node sg` in one terminal and `cc` in a different terminal. Each node has its own tunnel. If one tunnel stops, the other tunnels continue.
+**Use more nodes at the same time:** type `cc --node sg` in one terminal and `cc` in a different terminal. Each node has its own tunnel. If one tunnel stops, the other tunnels continue. To stop one node, type `cc-stop sg`. `cc-stop` without a node stops all tunnels.
+
+**Plain ssh aliases (2.11+):** a VM that is only an alias in `~/.ssh/config` (for example `devbox`) can also be a node. Type `cc --node devbox`. The profile gives the alias a fixed slot from 100 up (ports `8280` / `1280`, then `8281` / `1281` …). It saves the slot in `~/.claude-proxy.local-nodes`, so the ports stay the same. The profile assumes that the VM runs tinyproxy on the same port as the default node. If the node list contains the same name, the node list wins.
 
 **Change the default node:** `proxy-node sg` restarts the main tunnel on the *same* local port. It refuses while a `cc` or `cx` session uses the default node. (`--force` changes it anyway. Then a `claude` that runs sees a short interruption and continues on the new node.) Other terminals use the old node until they load the profile again (`source ~/.claude-proxy.sh`, or a new window).
 

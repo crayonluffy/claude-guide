@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.10.0'
+$script:PROFILE_VERSION = '2.11.0'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -63,6 +63,9 @@ $script:SOCKS_PORT        = 1080       # local SOCKS5 port (Chrome / other apps)
 # per node so several regions can be open at once; node i (0-based, catalogue
 # order) listens on NODE_SOCKS_BASE + i.
 $script:NODES_CACHE       = Join-Path $HOME '.claude-proxy.nodes.json'
+# A plain ssh alias that is not in the node list can be a node too ('cc --node
+# devbox'). It gets a fixed slot from 100 up, saved here as "alias slot" lines.
+$script:LOCAL_NODES       = Join-Path $HOME '.claude-proxy.local-nodes'
 $script:NODE_SOCKS_BASE   = 1180
 # 2.10: every node can have its own tunnel at the same time ('cc --node sg' in
 # one window, the default node in another). Node i (its catalogue slot) uses
@@ -1300,13 +1303,32 @@ function Test-NodeProvisioned { param([string]$NodeHost) return ($NodeHost -and 
 
 function Get-NodeSocksPort { param([int]$Idx) return ($script:NODE_SOCKS_BASE + $Idx) }
 
+# The fixed slot of a plain ssh alias (not in the node list): the saved one, or
+# the lowest free slot from 100 up, saved. Slots below 100 belong to the node list.
+function Get-NodeLocalSlot { param([string]$Alias)
+    $used = @{}
+    foreach ($line in @(Get-Content -LiteralPath $script:LOCAL_NODES -ErrorAction SilentlyContinue)) {
+        $a, $n = "$line".Trim() -split '\s+', 2
+        if ("$n" -notmatch '^\d+$') { continue }
+        if ($a -eq $Alias) { return [int]$n }
+        $used[[int]$n] = $true
+    }
+    foreach ($node in Get-ProxyNodes) { $used[[int]$node.Idx] = $true }
+    $slot = 100
+    while ($used.ContainsKey($slot)) { $slot++ }
+    Add-Content -LiteralPath $script:LOCAL_NODES -Value "$Alias $slot" -Encoding ascii
+    return $slot
+}
+
 # The recovery slot of a node: 'main' for the default node (main ports), else
 # node-<name>. $null, with the reason, for an unknown or unprovisioned node.
 function Get-NodeSlot { param([string]$Name)
     $n = Find-ProxyNode $Name
     if (-not $n) {
         if ($Name -eq $script:SSH_HOST) { return 'main' }
-        Write-Host "[Err] Unknown node '$Name'. 'proxy-nodes' lists them ('proxy-nodes -Refresh' fetches the latest)." -ForegroundColor Red
+        # Not in the node list, but a plain ssh alias: a node of its own.
+        if (Test-SshAlias $Name) { return "node-$Name" }
+        Write-Host "[Err] Unknown node '$Name'. It is not in the node list ('proxy-nodes') and not an alias in ~\.ssh\config." -ForegroundColor Red
         return $null
     }
     if ($n.Alias -eq $script:SSH_HOST) { return 'main' }
@@ -1321,7 +1343,12 @@ function Get-NodeSlot { param([string]$Name)
 # key and port) and its fixed ports. $null, with the fix, when a port collides.
 function Get-NodeContext { param([string]$Name)
     $n = Find-ProxyNode $Name
-    if (-not $n) { return $null }
+    if (-not $n) {
+        # A plain ssh alias: its local slot; the alias carries user, key and port, and
+        # its VM is assumed to run tinyproxy on the same port as the default node.
+        if (-not (Test-SshAlias $Name)) { return $null }
+        $n = [pscustomobject]@{ Name=$Name; Alias=$Name; Idx=(Get-NodeLocalSlot $Name); SshPort=22; ProxyPort=$script:REMOTE_PROXY_PORT }
+    }
     $http = $script:NODE_HTTP_BASE + $n.Idx; $socks = $script:NODE_SOCKS_BASE + $n.Idx
     if ($http -in @($script:HTTP_PORT, $script:SOCKS_PORT)) {
         Write-Host "[Err] Node '$($n.Name)' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $($script:HTTP_PORT + 100)" -ForegroundColor Red
@@ -2067,6 +2094,7 @@ function cc {
 }
 
 function cc-safe { cc -Safe @args }
+function cx-stop { cc-stop @args }   # Claude and Codex share each tunnel: the same stop
 
 # ============================================================
 # All-in-one: proxy stack + launch Codex (same tunnel as cc)
@@ -2199,8 +2227,35 @@ function tunnel-stop {
     }
 }
 
+# cc-stop <node> / cx-stop <node>: stop the tunnel of one node only. The other
+# nodes keep running. Refuses while a cc/cx session uses that node (-Force).
+function Stop-OneNode { param([string]$Node, [bool]$Force)
+    $slot = Get-NodeSlot $Node
+    if (-not $slot) { return }
+    $dir = Join-Path (Get-RecoveryRoot) $slot
+    $n = if (Test-Path -LiteralPath $dir) { Get-RecoverySessionCount $dir } else { 0 }
+    if ($n -gt 0 -and -not $Force) {
+        Write-Host "[Stop] $n Claude/Codex session(s) use node $Node. Stopping its tunnel would cut them off." -ForegroundColor Yellow
+        Write-Host "       Proxy stuck?  proxy-restart -Node $Node     Stop anyway?  cc-stop $Node -Force" -ForegroundColor Yellow
+        return
+    }
+    if ($slot -eq 'main') { $null = tunnel-stop; proxy-off; return }
+    $null = tunnel-stop -Node $Node
+    # This window went through that node ('proxy-up -Node'): clear it too.
+    $ctx = Get-NodeContext $Node
+    if ($ctx -and $env:HTTPS_PROXY -eq "http://127.0.0.1:$($ctx.HTTP_PORT)") {
+        foreach ($v in @('http_proxy','HTTP_PROXY','https_proxy','HTTPS_PROXY','no_proxy','NO_PROXY')) { [Environment]::SetEnvironmentVariable($v, $null) }
+        Write-Host "[OK] Env vars cleared (this window used node $Node)" -ForegroundColor Green
+    }
+}
+
 function cc-stop {
-    param([switch]$Force)
+    param([string]$Node, [switch]$Force)
+    # bash spellings too: cc-stop sg --force / cc-stop --force sg
+    $rest = @($args)
+    if ($Node -in @('--force','-f')) { $Force = $true; $Node = "$($rest | Where-Object { "$_" -notin @('--force','-f') } | Select-Object -First 1)" }
+    if ($rest | Where-Object { "$_" -in @('--force','-f') }) { $Force = $true }
+    if ($Node) { Stop-OneNode $Node ([bool]$Force); return }
     # Registered cc/cx sessions count too: npm-installed Claude runs as node.exe.
     # Other users' processes are not ours to protect (-IncludeUserName needs admin).
     $sid=(Get-Process -Id $PID).SessionId
@@ -2732,6 +2787,7 @@ function chrome-proxy {
         }
         if ($a -match '^-{1,2}profile[=:](.+)$') { $profileName = $Matches[1]; continue }
         $n = if ($null -eq $node) { Find-ProxyNode $a } else { $null }
+        if (-not $n -and $null -eq $node -and $a -match '^[A-Za-z][A-Za-z0-9._-]*$' -and (Test-SshAlias $a)) { $n = [pscustomobject]@{ Name=$a; Alias=$a } }
         if ($n) { $node = $n }
         elseif ($null -eq $node -and $a -match '^[A-Za-z][A-Za-z0-9]*$') {
             Write-Host "[Err] Unknown proxy node '$a' - Chrome not launched. Run 'proxy-nodes -Refresh' in this window and check the list. For a website, use an explicit URL such as https://$a/ ." -ForegroundColor Red
@@ -2752,7 +2808,7 @@ function chrome-proxy {
             Write-Host "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $($node.Alias)' by hand to see why." -ForegroundColor Red
             return
         }
-        $port = Get-NodeSocksPort $node.Idx
+        $port = (Get-NodeContext $name).SOCKS_PORT
         $label = "$name (own tunnel)"
     } else {
         # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
@@ -3057,9 +3113,13 @@ function cc-help {
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host "  cc-install      - Check / install / update Node.js, Claude Code and Codex (-Check: report only)" -ForegroundColor DarkGray
     Write-Host ""
-    Write-Host "  -- nodes (jp / sg / us ...) --" -ForegroundColor DarkGray
-    Write-Host "  proxy-nodes     - List the nodes (-Refresh: download the latest catalogue + create ssh aliases)" -ForegroundColor DarkGray
-    Write-Host "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)" -ForegroundColor DarkGray
+    Write-Host "  -- nodes (jp / sg / us ...): several at the same time, one tunnel each --" -ForegroundColor DarkGray
+    Write-Host "  proxy-nodes     - List the nodes; a node must be listed here first (-Refresh: get the latest list)" -ForegroundColor DarkGray
+    Write-Host "  cc --node sg    - Claude through 'sg' in THIS window only (also: cx --node sg, proxy-up -Node sg)" -ForegroundColor DarkGray
+    Write-Host "                    e.g. window 1: cc (default node)   window 2: cc --node sg   - both run at the same time" -ForegroundColor DarkGray
+    Write-Host "  proxy-node sg   - Make 'sg' the default node for new cc / cx (refuses while a session uses it; -Force)" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start -Node sg - Start only the tunnel of 'sg' (tunnel-stop -Node sg / proxy-restart -Node sg)" -ForegroundColor DarkGray
+    Write-Host "  cc-stop sg      - Stop only the tunnel of node 'sg' (cx-stop sg: the same); other nodes keep running" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)" -ForegroundColor DarkGray
     Write-Host "  chrome-proxy jp -Profile work - another Chrome profile through jp ('chrome-profiles' lists them)" -ForegroundColor DarkGray
     Write-Host "  proxy-nodes -From jpvpn - get the node list privately from a VM over SSH (-Domain <d>: public DNS)" -ForegroundColor DarkGray
@@ -3070,8 +3130,8 @@ function cc-help {
     Write-Host "  proxy-shortcut  - Desktop shortcut that opens a window with cc/cx ready (no `$PROFILE needed)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  -- advanced: manage one piece at a time --" -ForegroundColor DarkGray
-    Write-Host "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)" -ForegroundColor DarkGray
-    Write-Host "  tunnel-stop     - Stop the SSH tunnel" -ForegroundColor DarkGray
+    Write-Host "  tunnel-start    - Start the SSH tunnel of the default node (tunnel-start -Node sg: node sg only)" -ForegroundColor DarkGray
+    Write-Host "  tunnel-stop     - Stop the SSH tunnel of the default node (tunnel-stop -Node sg: node sg only)" -ForegroundColor DarkGray
     Write-Host "  proxy-on        - Set proxy env vars + sync Claude settings.json" -ForegroundColor DarkGray
     Write-Host "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)" -ForegroundColor DarkGray
     Write-Host "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly" -ForegroundColor DarkGray

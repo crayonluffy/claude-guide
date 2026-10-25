@@ -8,6 +8,8 @@ trap 'rm -rf "$test_dir"' EXIT
 eval "$(sed -n '/^chrome-proxy() {$/,/^}$/p' "$repo_dir/scripts/claude-proxy.sh")"
 _node_lookup() { case "$1" in sg) printf '1|sg|sgvpn|192.0.2.1\n';; jp) printf '0|jp|jpvpn|192.0.2.0\n';; *) return 1;; esac; }
 _node_slot() { case "$1" in sg) echo node-sg;; *) echo main;; esac; }
+_ssh_config_has_alias() { return 1; }
+_node_ctx() { case "$1" in sg) CLAUDE_SOCKS_PORT=1181;; esac; }
 _node_ensure_alias() { return 0; }
 _node_socks_port() { echo "$((1180 + $1))"; }
 # A node's Chrome uses that node's self-healing tunnel (2.10), not a bare ssh -f.

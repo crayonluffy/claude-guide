@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.10.0"
+CLAUDE_PROXY_VERSION="2.11.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -64,6 +64,9 @@ CLAUDE_SOCKS_PORT=1080           # local SOCKS5 port (Chrome / other apps)
 # SOCKS-only tunnel per node so several regions can be open at once; node i
 # (0-based, catalogue order) listens on NODE_SOCKS_BASE + i.
 CLAUDE_PROXY_NODES="${CLAUDE_PROXY_NODES:-$HOME/.claude-proxy.nodes.json}"
+# A plain ssh alias that is not in the node list can be a node too ('cc --node
+# devbox'). It gets a fixed slot from 100 up, saved here as "alias slot" lines.
+CLAUDE_PROXY_LOCAL_NODES="${CLAUDE_PROXY_LOCAL_NODES:-$HOME/.claude-proxy.local-nodes}"
 CLAUDE_NODE_SOCKS_BASE=1180
 # 2.10: every node can have its own tunnel at the same time ('cc --node sg' in
 # one terminal, the default node in another). Node i (its catalogue slot) uses
@@ -1315,13 +1318,37 @@ _node_socks_port() {  # <idx>
     echo $((CLAUDE_NODE_SOCKS_BASE + $1))
 }
 
+# The fixed slot of a plain ssh alias (not in the node list): the saved one, or
+# the lowest free slot from 100 up, saved. Slots below 100 belong to the node list.
+_node_local_slot() {  # <alias>
+    local a n used='' slot=100 i=0 lock="$CLAUDE_PROXY_LOCAL_NODES.lock"
+    while read -r a n; do
+        case "$n" in ''|*[!0-9]*) continue;; esac
+        if [ "$a" = "$1" ]; then echo "$n"; return 0; fi
+        used="$used $n "
+    done 2>/dev/null < "$CLAUDE_PROXY_LOCAL_NODES"
+    # Two terminals must not hand out the same slot: a short lock around the write.
+    while ! mkdir "$lock" 2>/dev/null && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    while read -r a n; do
+        [ "$a" = "$1" ] && { rmdir "$lock" 2>/dev/null; echo "$n"; return 0; }
+        used="$used $n "
+    done 2>/dev/null < "$CLAUDE_PROXY_LOCAL_NODES"
+    used="$used $(_nodes_tsv 2>/dev/null | cut -d'|' -f1 | tr '\n' ' ') "
+    while case "$used" in *" $slot "*) true;; *) false;; esac; do slot=$((slot+1)); done
+    printf '%s %s\n' "$1" "$slot" >> "$CLAUDE_PROXY_LOCAL_NODES"
+    rmdir "$lock" 2>/dev/null
+    echo "$slot"
+}
+
 # The recovery slot of a node: 'main' for the default node (main ports), else
 # node-<name>. Fails, with the reason on stderr, for an unknown or unprovisioned node.
 _node_slot() {  # <node name or alias>
     local line idx name alias host
     if ! line=$(_node_lookup "$1"); then
         [ "$1" != "$CLAUDE_SSH_HOST" ] || { echo main; return 0; }
-        echo "[Err] Unknown node '$1'. 'proxy-nodes' lists them ('proxy-nodes --refresh' fetches the latest)." >&2
+        # Not in the node list, but a plain ssh alias: a node of its own.
+        if _ssh_config_has_alias "$1"; then echo "node-$1"; return 0; fi
+        echo "[Err] Unknown node '$1'. It is not in the node list ('proxy-nodes') and not an alias in ~/.ssh/config." >&2
         return 1
     fi
     IFS='|' read -r idx name alias host _ <<< "$line"
@@ -1339,8 +1366,15 @@ _node_slot() {  # <node name or alias>
 _node_ctx() {  # <node name or alias>
     local line idx name alias host user sport pport http socks
     [ "$(_node_slot "$1")" != main ] || return 0
-    line=$(_node_lookup "$1") || return 1
-    IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    if line=$(_node_lookup "$1"); then
+        IFS='|' read -r idx name alias host user sport pport _ <<< "$line"
+    else
+        # A plain ssh alias: its local slot; the alias carries user, key and port,
+        # and its VM is assumed to run tinyproxy on the same port as the default node.
+        _node_slot "$1" >/dev/null || return 1
+        idx=$(_node_local_slot "$1") || return 1
+        name=$1 alias=$1 sport='' pport=$CLAUDE_REMOTE_PROXY_PORT
+    fi
     http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
     if [ "$http" = "$CLAUDE_HTTP_PORT" ] || [ "$http" = "$CLAUDE_SOCKS_PORT" ]; then
         echo "[Err] Node '$name' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $((CLAUDE_HTTP_PORT + 100))" >&2
@@ -2296,6 +2330,7 @@ _launch_via_proxy() {
     return "$rc"
 }
 
+cx-stop() { cc-stop "$@"; }   # Claude and Codex share each tunnel: the same stop
 cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
 cx() { _launch_via_proxy Codex  codex  "npm install -g @openai/codex"            --dangerously-bypass-approvals-and-sandbox "$@"; }
 cc-safe() { cc --safe "$@"; }
@@ -2317,11 +2352,40 @@ else
     case "$(type -t codex 2>/dev/null; whence -w codex 2>/dev/null)" in *function*) unset -f codex;; esac
 fi
 
-cc-stop() {
+# cc-stop <node> / cx-stop <node>: stop the tunnel of one node only. The other
+# nodes keep running. Refuses while a cc/cx session uses that node (--force).
+_node_stop() {  # <node> <force 0|1>
+    local slot dir n url
+    slot=$(_node_slot "$1") || return 1
+    dir="$(_recovery_root)/$slot"
+    n=$(_recovery_sessions "$dir" 2>/dev/null || echo 0)
+    if [ "${n:-0}" -gt 0 ] && [ "$2" -eq 0 ]; then
+        echo "[Stop] $n Claude/Codex session(s) use node $1. Stopping its tunnel would cut them off."
+        echo "       Proxy stuck?  proxy-restart $1     Stop anyway?  cc-stop $1 --force"
+        return 1
+    fi
+    if [ "$slot" = main ]; then
+        tunnel-stop || return 1
+        proxy-off
+        return 0
+    fi
+    tunnel-stop "$1" || return 1
+    # This shell went through that node ('proxy-up --node'): clear it too.
+    url="http://127.0.0.1:$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT")"
+    if [ "${HTTPS_PROXY:-}" = "$url" ]; then
+        unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY no_proxy NO_PROXY
+        echo "[OK] Env vars cleared (this shell used node $1)"
+    fi
+}
+
+cc-stop() {  # [--force] [node]
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
     # result so cc-stop never falsely claims success when a port is still held.
-    local rc=0 force=0 others n sessions dir
-    case "${1:-}" in --force|-f) force=1 ;; esac
+    local rc=0 force=0 others n sessions dir node='' a
+    for a in "$@"; do
+        case "$a" in --force|-f) force=1 ;; *) node=$a ;; esac
+    done
+    if [ -n "$node" ]; then _node_stop "$node" "$force"; return; fi
 
     # The tunnel and settings.json are shared by every window. Stopping them
     # while Claude/Codex runs elsewhere is what used to kill the other tabs.
@@ -2932,7 +2996,7 @@ chrome-proxy() {
             -p|--profile) want_profile=1; continue ;;
             --profile=*)  profile="${a#--profile=}"; continue ;;
         esac
-        if [ -z "$node" ] && line=$(_node_lookup "$a"); then
+        if [ -z "$node" ] && { line=$(_node_lookup "$a") || { _ssh_config_has_alias "$a" && line="|$a|$a|"; }; }; then
             node="$a"
         else
             if [ -z "$node" ] && printf '%s\n' "$a" | LC_ALL=C grep -Eq '^[A-Za-z][A-Za-z0-9]*$'; then
@@ -2958,11 +3022,11 @@ chrome-proxy() {
     if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
         # Another node: its own self-healing tunnel (the same one 'cc --node' uses).
         IFS='|' read -r idx name alias host rest <<< "$line"
+        port=$(_node_ctx "$node" && echo "$CLAUDE_SOCKS_PORT") || return 1
         tunnel-start "$node" || {
             echo "[Err] $name tunnel could not be started - Chrome not launched. Try 'ssh $alias' by hand to see why."
             return 1
         }
-        port=$(_node_socks_port "$idx")
         label="$name (own tunnel)"
     else
         # Main tunnel (the node cc/cx use). Ensure it's up; bail if it won't start.
@@ -3327,15 +3391,19 @@ cc-help() {
     echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
     echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
     echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
+    echo "  cc-stop sg      - Stop only the tunnel of node 'sg' (cx-stop sg: the same); other nodes keep running"
     echo "  proxy-notify test - show a real desktop test alert (no proxy/session changes)"
     echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
     echo "  proxy-status    - Show what's running + your external IP"
     echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
     echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"
     echo ""
-    echo "  -- nodes (jp / sg / us ...) --"
-    echo "  proxy-nodes     - List the nodes (--refresh: download the latest catalogue + create ssh aliases)"
-    echo "  proxy-node sg   - Make 'sg' the default node for cc / cx (one terminal only: cc --node sg, cx --node sg)"
+    echo "  -- nodes (jp / sg / us ...): several at the same time, one tunnel each --"
+    echo "  proxy-nodes     - List the nodes; a node must be listed here first (--refresh: get the latest list)"
+    echo "  cc --node sg    - Claude through 'sg' in THIS terminal only (also: cx --node sg, proxy-up --node sg)"
+    echo "                    e.g. tab 1: cc (default node)   tab 2: cc --node sg   - both run at the same time"
+    echo "  proxy-node sg   - Make 'sg' the default node for new cc / cx (refuses while a session uses it; --force)"
+    echo "  tunnel-start sg - Start only the tunnel of 'sg' (tunnel-stop sg / proxy-restart sg: the same, one node)"
     echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
     echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
     echo "  proxy-nodes --from jpvpn - get the node list privately from a VM over SSH (--domain <d>: public DNS)"
@@ -3345,8 +3413,8 @@ cc-help() {
     echo "  proxy-update    - Fetch the latest version of this profile; your settings are kept"
     echo ""
     echo "  -- advanced: manage one piece at a time --"
-    echo "  tunnel-start    - Start the SSH tunnel (HTTP forward for Claude + SOCKS5 for Chrome)"
-    echo "  tunnel-stop     - Stop the SSH tunnel"
+    echo "  tunnel-start    - Start the SSH tunnel of the default node (tunnel-start sg: node sg only)"
+    echo "  tunnel-stop     - Stop the SSH tunnel of the default node (tunnel-stop sg: node sg only)"
     echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
     echo "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)"
     echo "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly"

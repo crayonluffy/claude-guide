@@ -186,6 +186,7 @@ The automated tests examine the alert sequence, the command arguments, failed al
 | `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
 | `proxy-restart` | Replaces the tunnel for **all** terminal windows if it does not work. It does not change the proxy settings or `settings.json`, so Claude and Codex in other tabs continue. |
 | `cc-stop` | Proxy OFF for `cc` and `cx`, for all nodes. It stops each tunnel (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. |
+| `cc-stop sg` / `cx-stop sg` | Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). |
 | `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
 | `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
 | `proxy-status` | Shows what runs, and your current external IP address. |

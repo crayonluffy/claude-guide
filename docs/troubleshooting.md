@@ -134,7 +134,7 @@ The background recovery cannot ask for a passphrase. Refer to [recovery settings
 | Symptom | Fix |
 |---------|-----|
 | `proxy-nodes` shows *No node catalogue yet* | Type `proxy-nodes --refresh` (`-Refresh` on Windows). It downloads from the same GitHub URL as `proxy-update`. If GitHub is blocked, type `proxy-up` first and try again. |
-| `Unknown node 'sg'` | The catalogue does not contain this node. To get the latest catalogue, type `proxy-nodes --refresh`. An alias in `~/.ssh/config` is also accepted. |
+| `Unknown node 'sg'` | The node list does not contain this name, and `~/.ssh/config` has no alias with this name. To get the latest node list, type `proxy-nodes --refresh`. Or add a `Host sg` alias to `~/.ssh/config`: from 2.11, a plain alias works as a node. |
 | A node shows `<not provisioned>` | The admin added the node but not its address. You do not have to do anything. |
 | `sg tunnel failed to start`, or *Permission denied (publickey)* | Your key is not on that VM. Ask the admin. To examine it, type `ssh sgvpn`. The `Host sgvpn` block in `~/.ssh/config` uses the same `IdentityFile` as `jpvpn`. |
 | `[Err] <program> (PID n) is on port 8181, which this node's tunnel uses` | A different program uses a port of the node tunnel. Close that program, or move the node ports with the `proxy-config set NODE_…_BASE` command in the message. |

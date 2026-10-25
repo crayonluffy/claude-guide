@@ -172,6 +172,41 @@ try {
  $out=(Write-NodeStatusLines 6>&1) -join "`n"
  Assert ($out -match 'Node tunnels' -and $out -match 'sg' -and $out -match '8181' -and $out -match '1181' -and $out -match 'SSH login to sgvpn was refused') "status: $out"
  'PASS: proxy-status shows each node tunnel with its ports and last error'
+ 
+ # 10) Plain ssh aliases (not in the node list): fixed local slots from 100.
+ $script:LOCAL_NODES=Join-Path $scratch 'local-nodes'
+ $script:REMOTE_PROXY_PORT=8888   # proxy-node sg -Force (section 6) switched it to sg's port
+ function Test-SshAlias { param([string]$Alias) $Alias -in @('devbox','lab2') }
+ Assert ((Get-NodeSlot devbox) -eq 'node-devbox') 'alias slot'
+ $c=Get-NodeContext devbox
+ Assert ($c.SSH_HOST -eq 'devbox' -and $c.HTTP_PORT -eq 8280 -and $c.SOCKS_PORT -eq 1280 -and $c.REMOTE_PROXY_PORT -eq 8888) "alias context: $($c|ConvertTo-Json -Compress)"
+ Assert ((Get-NodeContext lab2).HTTP_PORT -eq 8281) 'second alias slot'
+ Assert ((Get-NodeContext devbox).HTTP_PORT -eq 8280) 'alias slot not stable'
+ Assert ((Get-Content $script:LOCAL_NODES) -contains 'devbox 100') 'slot not saved'
+ Assert ((Get-NodeSlot sg) -eq 'node-sg') 'catalogue node must still win'
+ Assert ($null -eq (Get-NodeSlot nowhere 6>$null)) 'unknown name accepted'
+ 'PASS: plain ssh aliases are nodes with fixed local slots (from 100); the node list wins'
+
+ # 11) cc-stop / cx-stop <node>: one node only, guarded by its sessions.
+ function tunnel-stop { param([string]$Node) $script:Stops+=$(if($Node){$Node}else{'default'}); $true }
+ function proxy-off { $script:Stops+='proxy-off' }
+ $nsd=Join-Path (Get-RecoveryIdentity -Slot node-sg) 'sessions'; $null=New-Item -ItemType Directory $nsd -Force
+ [IO.File]::WriteAllText((Join-Path $nsd "$PID-c"),"$PID|$((Microsoft.PowerShell.Management\Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)")
+ $script:Stops=@()
+ $out=(cc-stop sg 6>&1) -join ' '
+ Assert ($script:Stops.Count -eq 0 -and $out -match '1 Claude/Codex session' -and $out -match 'cc-stop sg -Force') "guard: $out / $($script:Stops)"
+ cc-stop sg --force 6>$null
+ Assert (($script:Stops -join ',') -eq 'sg') "forced (bash spelling): $($script:Stops -join ',')"
+ Remove-Item $nsd -Recurse -Force
+ $script:Stops=@(); cx-stop sg 6>$null
+ Assert (($script:Stops -join ',') -eq 'sg') "cx-stop: $($script:Stops -join ',')"
+ $env:HTTPS_PROXY='http://127.0.0.1:8181'; cc-stop sg 6>$null
+ Assert (-not $env:HTTPS_PROXY) 'window env of sg not cleared'
+ $env:HTTPS_PROXY='http://127.0.0.1:8080'; cc-stop sg 6>$null
+ Assert ($env:HTTPS_PROXY -eq 'http://127.0.0.1:8080') 'other window env cleared'
+ $script:Stops=@(); cc-stop jp 6>$null
+ Assert (($script:Stops -join ',') -eq 'default,proxy-off') "cc-stop <default>: $($script:Stops -join ',')"
+ 'PASS: cc-stop / cx-stop <node> stop one node only, guarded by its sessions'
 } finally {
  $env:PATH=$oldPath; $env:HTTPS_PROXY=$null; $env:HTTP_PROXY=$null; $env:NO_PROXY=$null; $env:https_proxy=$null; $env:http_proxy=$null; $env:no_proxy=$null
  Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
