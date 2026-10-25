@@ -106,7 +106,7 @@ The output of `chrome-profiles` looks like this:
 | `CLAUDE_CHROME_BIN` | `CHROME_EXE` | *(auto)* | Set it only if Chrome is not in the usual location (Windows also looks in `%LOCALAPPDATA%`). |
 | `CLAUDE_PROXY_NODES` *(environment only)* | — | `~/.claude-proxy.nodes.json` | The location of the saved catalogue. |
 
-Chrome data folders: `~/.chrome-proxy-profile-<node>` (macOS), `~/.config/google-chrome-vpn-<node>` (Linux), `C:\ChromeVPNProfile-<node>` (Windows), `C:\wsl-proxy-profile-<node>` (WSL). When you use `chrome-proxy` for the first time after an upgrade from 2.0, the profile renames the old folder to the folder of the active node. Thus your logins stay.
+Chrome data folders: `~/.chrome-proxy-profile-<node>` (macOS), `~/.config/google-chrome-vpn-<node>` (Linux), `C:\ChromeVPNProfile-<node>` (Windows), `C:\wsl-proxy-profile-<node>` (WSL). After an upgrade from 2.0, the first `chrome-proxy` renames the old folder to the folder of the active node. Thus your logins stay.
 
 ### Chrome opens `http://sg/` or reports `ERR_SOCKS_CONNECTION_FAILED`
 
@@ -250,7 +250,7 @@ proxy-update; . "$HOME\.claude-proxy.ps1"; proxy-nodes -Domain example.com
 
 **How the computers find the list:** `dig` or `host` (macOS / Linux / WSL), or `Resolve-DnsName` (Windows), through the normal resolver. Thus split-horizon and internal DNS work. If the resolver finds nothing, the profile uses DNS-over-HTTPS through Cloudflare or Google. The profile saves the result in `~/.claude-proxy.nodes.json`. Thus `cc` does not look up anything.
 
-> **Why a TXT list, and not a guess of the names?** A guess of `jpvpn.example.com`, `jpvpn2…`, `jpvpn3…`, `sgvpn…` finds only the names that somebody thought of. Each guess costs a lookup (and a timeout). A guess cannot tell a VM from a different host, it has no slot, region, port or host key, and it does not see a removed VM. The TXT list is one lookup that shows all nodes. The `A` records still use the same names (`jpvpn2.example.com`).
+> **Why a TXT list, and not a guess of the names?** A guess of `jpvpn.example.com`, `jpvpn2…`, `jpvpn3…`, `sgvpn…` finds only the names that somebody thought of. Each guess costs a lookup (and a timeout). A guess cannot tell a VM from a different host. It has no slot, region, port or host key. It does not see a removed VM. The TXT list is one lookup that shows all nodes. The `A` records still use the same names (`jpvpn2.example.com`).
 >
 > **Security:** DNS answers are not signed unless your zone uses **DNSSEC** (Cloudflare: one click; the DNS-over-HTTPS fallback validates it). Set it on, and publish `hostkey` so that the computers connect to the correct VM. A false node never sees your private key or your HTTPS content. But it can see which websites you connect to.
 

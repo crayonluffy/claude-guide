@@ -40,7 +40,7 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 Claude and Codex do not connect directly any more. When the tunnel is down, they cannot connect.
 
 - **Claude keeps the proxy.** The profile keeps the proxy in Claude's `settings.json`. `proxy-off` and `cc-stop` do not remove it. Plain `claude` and the IDE extensions use the tunnel. If the tunnel is down, they show "connection refused". To start the tunnel, type `cc` or `proxy-up`.
-- **`cc` and `cx` examine the setup before they start.** They stop and tell you the fix if `NO_PROXY` sends an API host directly, or if another program uses the proxy port.
+- **`cc` and `cx` examine the setup before they start.** They stop and tell you the fix if `NO_PROXY` sends an API host directly. They also stop if another program uses the proxy port.
 - **The tunnel does not move to a different port.** If another program uses the proxy port, `tunnel-start` stops and tells you the fix.
 - **Optional: plain `claude` and `codex` through the tunnel.** Type `proxy-config set PLAIN_COMMANDS auto`. The setup wizard asks new users.
 - **New command:** `proxy-killswitch` shows the status.
@@ -54,8 +54,8 @@ Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2
 - **One recovery owner for each user.** All terminals use the same tunnel. This is also true for a terminal with old settings. `tunnel-start` and `tunnel-stop` work from each terminal. After `tunnel-stop`, the tunnel stays stopped.
 - **The upgrade is automatic.** The next `cc`, `cx` or `tunnel-start` replaces a tunnel from an older profile. It uses the same ports. Open sessions connect again in a few seconds. You do not have to type `proxy-restart`.
 - **SSH errors have an explanation.** `tunnel-start`, `proxy-status` and each open session show the cause and the fix: a refused login, a changed host key, a port in use, or a server that does not answer. After a refused login, the profile tries again only each 30 seconds.
-- **Fewer checks when you do not use the tunnel.** When no `cc` or `cx` is open, the profile examines the tunnel one time each minute (`WATCHDOG_IDLE_INTERVAL`). When you start `cc` or `cx`, it examines the tunnel at once.
-- **Port takeover alert.** If another program starts to use the proxy port while the tunnel is down, each session and the desktop show one alert with the name of the program. Stop the session. The profile does not stop any program.
+- **Fewer checks when you do not use the tunnel.** With no `cc` or `cx` open, the profile examines the tunnel each minute (`WATCHDOG_IDLE_INTERVAL`). When you start `cc` or `cx`, it examines the tunnel at once.
+- **Port takeover alert.** Another program can start to use the proxy port while the tunnel is down. Then each session and the desktop show one alert with the name of the program. Stop the session. The profile does not stop any program.
 - `cc-stop` also counts open `cc` and `cx` sessions. (On Windows, Claude from npm runs as `node.exe`. Older profiles did not see it.)
 - Windows: `proxy-status` is easier to read. The background owner runs in PowerShell, not in the ISE. `tunnel-start` tells you if `ssh` is not installed.
 - macOS, Linux, WSL: the profile works without `lsof` when `ss` is installed. A stopped `ssh` cannot stop the recovery any more.
@@ -163,7 +163,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/mai
 irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex           # Windows
 ```
 
-To do this by hand, replace the profile and make the settings file (the host alias, and `CLAUDE_REMOTE_PROXY_PORT` if tinyproxy on the VM does not use port 8888). Refer to [Set up by hand](proxy-profile.md#set-up-by-hand--macos--linux):
+To do this by hand, replace the profile and make the settings file. Write the host alias in it. If tinyproxy on the VM does not use port 8888, also write `CLAUDE_REMOTE_PROXY_PORT`. Refer to [Set up by hand](proxy-profile.md#set-up-by-hand--macos--linux):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/claude-proxy.sh -o ~/.claude-proxy.sh

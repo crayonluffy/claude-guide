@@ -23,7 +23,7 @@ Claude Code uses only the **HTTP proxy protocol**. `HTTPS_PROXY=socks5://…` do
 
 The setup uses A **or** B, not the two. With tinyproxy, there is **no npx bridge**. `ssh -L 8080:127.0.0.1:8888` makes tinyproxy on the VM available at `127.0.0.1:8080` on your computer. Claude and Codex send their HTTP proxy requests directly to it.
 
-This guide used design B before. It [changed to A](upgrading.md), because the bridge on the computer was the weak part (node processes that stayed after a stop, and `npx` start failures on Windows). The `-D 1080` forward is only for `chrome-proxy`. Claude and Codex do not use it.
+This guide used design B before. It [changed to A](upgrading.md), because the bridge on the computer was the weak part. Node processes stayed after a stop, and `npx` did not start on Windows. The `-D 1080` forward is only for `chrome-proxy`. Claude and Codex do not use it.
 
 ## 🔐 Security: how the login works
 
@@ -41,7 +41,7 @@ The proxy has no username or password. **Your SSH key is the login.** Nothing is
 The kill switch (on by default) keeps Claude and Codex from connecting directly from your computer:
 
 - The profile keeps the proxy in Claude's `~/.claude/settings.json`. Claude reads this file before the settings of your terminal. When the tunnel is down, Claude cannot connect. It does not connect directly.
-- Before each `cc` or `cx`, the profile makes sure that `NO_PROXY` does not exempt an API host, and that only the tunnel uses the proxy port.
+- Before each `cc` or `cx`, the profile makes sure that `NO_PROXY` does not exempt an API host. It also makes sure that only the tunnel uses the proxy port.
 - The profile does not move the tunnel to a different port.
 
 The kill switch protects Claude Code (the CLI and the IDE extensions) and Codex that you start with `cx`. It does not protect the Claude Desktop app, browsers or other applications. Refer to [Kill switch](proxy-profile.md#kill-switch-290).

@@ -57,7 +57,7 @@ proxy-test prolonged --fast
 
 PowerShell also accepts `-Fast`. Each line shows `[SIMULATION]`. 60 simulated seconds take six real seconds. The demonstration uses only data in memory. It does not touch the real SSH, an application, the settings, or the files of the owner. `Ctrl+C` stops it without an effect on real sessions. Without `--fast`, the demonstration uses the normal times.
 
-`proxy-status` shows the status of each provider, the duration of an outage, the number of tries, the ports, the sessions, and the locations of the logs. Bash also writes events to `CLAUDE_TUNNEL_LOG`. PowerShell writes `events.log` in its recovery folder, and the SSH errors in `ssh.err`. These records stay available if the application covers a warning on the screen. The recovery state is private. It is in `${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery/main` (Bash) and `$HOME/.claude-proxy/recovery/main` (PowerShell). The folder contains the tunnel record, the last SSH errors (`ssh.err`) and one entry for each open session.
+`proxy-status` shows the status of each provider, the duration of an outage, and the number of tries. It also shows the ports, the sessions, and the locations of the logs. Bash also writes events to `CLAUDE_TUNNEL_LOG`. PowerShell writes `events.log` in its recovery folder, and the SSH errors in `ssh.err`. These records stay available if the application covers a warning on the screen. The recovery state is private. It is in `${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery/main` (Bash) and `$HOME/.claude-proxy/recovery/main` (PowerShell). The folder contains the tunnel record, the last SSH errors (`ssh.err`) and one entry for each open session.
 
 | Setting (PowerShell) | Bash setting | Default |
 |---|---|---|
@@ -120,7 +120,7 @@ From PowerShell 2.6.0 and Bash 2.7.0, the profile shows desktop alerts. Thus a C
 | The tunnel is still down after the limit (default 60 seconds) | **Proxy still unavailable**: the owner continues to try | Wait, or stop the application in the usual way. |
 | All affected providers work again | **Proxy connection restored**: send a failed request again if necessary | Continue your work. |
 
-The owner collects the Claude and Codex failures into one desktop outage. If only one provider works again, there is no "restored" alert, the outage timer does not start again, and the long-outage warning does not show again. The progress of the tries shows only in the terminal and the log. It does not make a desktop alert at each check. An alert does not take the focus, does not open a dialog, does not send keys, and does not stop a session.
+The owner collects the Claude and Codex failures into one desktop outage. If only one provider works again, there is no "restored" alert. The outage timer does not start again, and the long-outage warning does not show again. The progress of the tries shows only in the terminal and the log. It does not make a desktop alert at each check. An alert does not take the focus, does not open a dialog, does not send keys, and does not stop a session.
 
 | Platform | Desktop alert | Availability |
 |---|---|---|
@@ -178,7 +178,7 @@ The automated tests examine the alert sequence, the command arguments, failed al
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | Proxy ON, then starts **Claude** (`--dangerously-skip-permissions`). It repairs the tunnel: it stops an old `ssh` and starts a new one. If a different program uses the port, `cc` stops and tells you the fix (kill switch on), or uses the next free port (kill switch off). |
+| `cc` | Proxy ON, then starts **Claude** (`--dangerously-skip-permissions`). It repairs the tunnel: it stops an old `ssh` and starts a new one. If a different program uses the port, `cc` stops and tells you the fix (kill switch on). With the kill switch off, it uses the next free port. |
 | `cc -c` / `cc -r` | The same, but **continues** the last Claude session, or **shows a list** of sessions. All arguments after `cc` go to `claude` (`cc --resume <id>`, `cc "fix the tests"`, …). |
 | `cc-safe` | The same as `cc`, but Claude asks for permission (it accepts the same arguments). |
 | `cx` | Proxy ON, then starts **Codex** (no approval prompts). Arguments go to Codex: `cx resume`. |
@@ -577,7 +577,7 @@ To use a *different* alias, or to change a port, change the settings file: `prox
 
 ## 🌐 (Optional) Browse through the proxy
 
-With the profile installed, type **`chrome-proxy`**. It opens a **separate** Chrome through the **SOCKS5** proxy on `127.0.0.1:1080`. Your normal browser does not change. `chrome-proxy` starts the tunnel if necessary, uses a separate `--user-data-dir` (separate logins, cookies and history), and sends the DNS lookups through the tunnel (no DNS leaks). In WSL, it starts **Windows** Chrome.
+With the profile installed, type **`chrome-proxy`**. It opens a **separate** Chrome through the **SOCKS5** proxy on `127.0.0.1:1080`. Your normal browser does not change. `chrome-proxy` starts the tunnel if necessary. It uses a separate `--user-data-dir` (separate logins, cookies and history). It sends the DNS lookups through the tunnel (no DNS leaks). In WSL, it starts **Windows** Chrome.
 
 - **More regions at the same time:** `chrome-proxy jp`, `chrome-proxy sg`, … each open a Chrome through that node, on its own tunnel and data folder.
 - **More accounts on the same node:** `chrome-proxy jp --profile work`. Refer to **[Nodes](proxy-nodes.md)**.
