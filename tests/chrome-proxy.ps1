@@ -6,7 +6,7 @@ $source = $ProfilePath
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'chrome-proxy')
+$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy')
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($f.Name -in $wanted) { Invoke-Expression $f.Extent.Text }
 }
