@@ -1,64 +1,65 @@
 # Install Claude Code
 
-Claude Code is Anthropic's coding agent that runs in your terminal. Installing it takes two steps: **Node.js** first, then the **CLI itself**. Follow your OS section top to bottom — every step ends with a check so you know it worked.
+Claude Code is the coding agent of Anthropic. It runs in your terminal. The installation has two steps: first **Node.js**, then the **CLI**. Do the section for your operating system from the top to the bottom. Each step ends with a check.
 
-> **🟢 Easiest: you probably don't need this page.** The [installer on the Home page](https://claude-guide.vercel.app/) installs Node.js, Claude Code and Codex for you at the end. Already set up? Just type **`cc-install`** — it checks all three and installs or updates what's missing or old (it asks first). This page is the manual way.
+> **🟢 You possibly do not need this page.** The [installer on the Home page](https://claude-guide.vercel.app/) installs Node.js, Claude Code and Codex as its last step. If you already did the setup, type **`cc-install`**. It examines the three tools, and installs or updates the missing or old ones. It asks before it changes anything. This page shows the manual procedure.
 >
-> **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, signing in (Step 3) only works through the proxy — and if `npm install` times out for you, it needs the proxy too. This page assumes `cc` / `proxy-up` already exist.
+> **Do the [proxy setup](proxy-profile.md) first.** On a blocked network, the sign-in (step 3) works only through the proxy. If `npm install` stops with a timeout, it also needs the proxy. This page uses the `cc` and `proxy-up` commands from the proxy setup.
 >
-> Already have `claude` working? Skip ahead to **[Install Codex](install-codex.md)**.
+> If `claude` already works, go to **[Install Codex](install-codex.md)**.
 
 ---
 
-## Step 1 — Install Node.js
+## Step 1: Install Node.js
 
-Node.js ships with `npm`, which installs the CLI. Pick **your OS** below.
+Node.js includes `npm`. `npm` installs the CLI. Use the section for **your operating system**.
 
 ### 🪟 Windows
 
-Install with `winget` from a PowerShell window:
+In a PowerShell window, install Node.js with `winget`:
 
 ```powershell
 winget install OpenJS.NodeJS.LTS
 ```
 
-Or download the installer from [nodejs.org](https://nodejs.org/) and click through it.
+Or download the installer from [nodejs.org](https://nodejs.org/) and do its steps.
 
-**✅ Check it worked** — open a **new** PowerShell window (the old one doesn't see new programs):
+**✅ Check:**
 
-```powershell
-node --version
-npm --version
-```
+1. Open a **new** PowerShell window. (An old window does not see new programs.)
+2. Type these commands:
 
-You should see version numbers like `v22.x.x` or newer (Claude Code needs **Node.js 22+**) — not an error.
+   ```powershell
+   node --version
+   npm --version
+   ```
+
+3. Make sure that you see version numbers, for example `v22.x.x` or newer. Claude Code needs **Node.js 22 or newer**.
 
 ### 🍎 macOS
 
-If you don't have [Homebrew](https://brew.sh/) yet, install it first:
+1. If you do not have [Homebrew](https://brew.sh/), install it:
 
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+   ```
 
-Then install Node.js:
+2. Install Node.js:
 
-```bash
-brew install node
-```
+   ```bash
+   brew install node
+   ```
 
-**✅ Check it worked:**
+**✅ Check:** type these commands. Make sure that you see version numbers (for example `v22.x.x`), not `command not found`.
 
 ```bash
 node --version
 npm --version
 ```
 
-You should see version numbers like `v22.x.x` — not `command not found`.
-
 ### 🐧 Linux
 
-NodeSource publishes up-to-date packages (replace `lts` with e.g. `22.x` for a specific release — see [github.com/nodesource/distributions](https://github.com/nodesource/distributions)):
+NodeSource publishes current packages. For a specific release, replace `lts` with the release (for example `22.x`). Refer to [github.com/nodesource/distributions](https://github.com/nodesource/distributions).
 
 ```bash
 # Debian / Ubuntu
@@ -72,7 +73,7 @@ curl -fsSL https://rpm.nodesource.com/setup_lts.x | sudo bash -
 sudo dnf install -y nodejs
 ```
 
-**✅ Check it worked:**
+**✅ Check:**
 
 ```bash
 node --version
@@ -81,43 +82,43 @@ npm --version
 
 ---
 
-## Step 2 — Install the Claude Code CLI
+## Step 2: Install the Claude Code CLI
 
-Same command on every OS:
+Use this command on all operating systems:
 
 ```bash
 npm install -g @anthropic-ai/claude-code
 ```
 
-> **`npm install` hangs or times out?** Your network blocks the npm registry too. Run `proxy-up` in this terminal first (from the [proxy setup](proxy-profile.md)) — npm respects the proxy env vars it sets — then retry.
+> **`npm install` stops, or shows a timeout?** Your network also blocks the npm registry. In this terminal, type `proxy-up` first (from the [proxy setup](proxy-profile.md)). npm uses the proxy settings that `proxy-up` sets. Then try again.
 
-**✅ Check it worked:**
+**✅ Check:**
 
 ```bash
 claude --version
 ```
 
-You should see a version number like `2.x.x`. If you get `command not found`, open a new terminal window and try again.
+Make sure that you see a version number, for example `2.x.x`. If you see `command not found`, open a new terminal window and try again.
 
 ---
 
-## Step 3 — Sign in (through the proxy)
+## Step 3: Sign in (through the proxy)
 
-Launch Claude through the proxy — on a blocked network a plain `claude` can't reach Anthropic to sign in:
+Start Claude through the proxy. On a blocked network, plain `claude` cannot connect to Anthropic for the sign-in.
 
 ```bash
 cc
 ```
 
-On first run it walks you through signing in with your Anthropic account (a browser window opens). After that, you're in.
+At the first start, Claude shows the sign-in steps for your Anthropic account. A browser window opens. After the sign-in, Claude is ready.
 
-> **Browser page won't load either?** The sign-in happens in your browser, which doesn't use the tunnel automatically. Open the sign-in URL in a proxied browser instead: run `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there — or use the copy-paste Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
+> **The browser page does not open?** The sign-in occurs in your browser. The browser does not use the tunnel automatically. Open the sign-in URL in a browser that uses the proxy: type `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there. Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
 
-> On an unrestricted network you can simply run `claude` directly instead.
+> **Note:** With the kill switch on (the default), plain `claude` always uses the tunnel. On a network that does not block Anthropic, you can type `proxy-killswitch off`. Then plain `claude` connects directly.
 
 ---
 
-## Next →
+## Next
 
-- **[Install Codex](install-codex.md)** — OpenAI's CLI, if you want both.
-- **[Tips & commands](tips.md)** — daily usage: `cc`, `cx`, `cc-stop`, `proxy-doctor`.
+- **[Install Codex](install-codex.md)**: the CLI of OpenAI, if you want the two tools.
+- **[Tips & commands](tips.md)**: daily use of `cc`, `cx`, `cc-stop` and `proxy-doctor`.
