@@ -14,11 +14,15 @@
 # that exempts the API refuses to launch; with the tunnel down the REAL Claude
 # CLI tries only the pinned port and opens no direct connection; a program on
 # the port makes tunnel-start refuse instead of moving the port.
+# Parallel nodes (2.10): a second node 'sg' (same sshd, its own proxy) gets its
+# own self-healing tunnel next to jp; killing or stopping it leaves jp alone;
+# the real Claude CLI started with 'cc --node sg' goes through sg only, while
+# Claude's pinned settings stay on jp; proxy-node refuses to move a session.
 set -eu
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 SSHD=${SSHD:-/usr/sbin/sshd}
-SSHD_PORT=22022 HTTP=28080 SOCKS=21080 REMOTE=28888
-for p in $SSHD_PORT $HTTP $SOCKS $REMOTE; do
+SSHD_PORT=22022 HTTP=28080 SOCKS=21080 REMOTE=28888 REMOTE_SG=28889 SG_HTTP=28181 SG_SOCKS=21181
+for p in $SSHD_PORT $HTTP $SOCKS $REMOTE $REMOTE_SG $SG_HTTP $SG_SOCKS; do
     if ss -ltn | awk '{print $4}' | grep -qE "[:.]$p\$"; then echo "SKIP: port $p is busy" >&2; exit 2; fi
 done
 [ -x "$SSHD" ] || { echo "SKIP: no sshd at $SSHD" >&2; exit 2; }
@@ -28,7 +32,7 @@ dir="$E/state/claude-proxy/recovery/main"
 pids=()
 cleanup() {
     # The owner first (it would restart ssh), then our helpers. Only PIDs we started.
-    [ -d "$E/state" ] && prof tunnel-stop >/dev/null 2>&1 || :
+    [ -d "$E/state" ] && prof cc-stop --force >/dev/null 2>&1 || :
     for p in "${pids[@]}"; do kill "$p" 2>/dev/null || :; done
     [ -f "$E/sshd.pid" ] && kill "$(cat "$E/sshd.pid")" 2>/dev/null || :
     wait 2>/dev/null || :
@@ -74,6 +78,9 @@ until_ok 5 test -s "$E/sshd.pid" || { cat "$E/sshd.log" >&2; fail 'sshd did not 
 # --- stand-in for tinyproxy on the "VM" -----------------------------------------
 python3 -I "$repo/tests/e2e/connect_proxy.py" "$REMOTE" & pids+=($!)
 until_ok 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$REMOTE" || fail 'CONNECT proxy did not start'
+# Node sg: the same sshd, its own proxy, which logs what it serves.
+python3 -I "$repo/tests/e2e/connect_proxy.py" "$REMOTE_SG" --log "$E/sg.log" & pids+=($!)
+until_ok 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/$REMOTE_SG" || fail 'sg CONNECT proxy did not start'
 
 # --- isolated client: its own ssh config and known_hosts, never the user's -------
 mkdir -p "$E/bin" "$E/home"
@@ -86,6 +93,22 @@ Host e2e-jp
     IdentitiesOnly yes
     UserKnownHostsFile $E/known_hosts
     GlobalKnownHostsFile /dev/null
+Host e2e-sg
+    HostName 127.0.0.1
+    Port $SSHD_PORT
+    User $(id -un)
+    IdentityFile $E/client
+    IdentitiesOnly yes
+    UserKnownHostsFile $E/known_hosts
+    GlobalKnownHostsFile /dev/null
+EOF
+# The profile looks for node aliases in ~/.ssh/config; ssh itself reads the -F file.
+mkdir -p "$E/home/.ssh"; cp "$E/ssh_config" "$E/home/.ssh/config"
+cat > "$E/home/.claude-proxy.nodes.json" <<EOF
+{ "nodes": [
+{ "name": "jp", "alias": "e2e-jp", "host": "127.0.0.1", "ssh_port": $SSHD_PORT, "proxy_port": $REMOTE, "region": "Test", "slot": 0 },
+{ "name": "sg", "alias": "e2e-sg", "host": "127.0.0.1", "ssh_port": $SSHD_PORT, "proxy_port": $REMOTE_SG, "region": "Test", "slot": 1 }
+] }
 EOF
 printf '#!/bin/sh\nexec %s -F %s "$@"\n' "$(command -v ssh)" "$E/ssh_config" > "$E/bin/ssh"
 chmod +x "$E/bin/ssh"
@@ -102,6 +125,8 @@ CLAUDE_WATCHDOG_IDLE_INTERVAL=2
 CLAUDE_WATCHDOG_FAILS=2
 CLAUDE_WATCHDOG_STARTUP_GRACE=4
 CLAUDE_WATCHDOG_MAX_BACKOFF=4
+CLAUDE_NODE_HTTP_BASE=28180
+CLAUDE_NODE_SOCKS_BASE=21180
 EOF
 export HOME="$E/home" XDG_STATE_HOME="$E/state" CLAUDE_PROXY_CONF="$E/conf" CLAUDE_TUNNEL_LOG="$E/tunnel.log"
 export CLAUDE_SETTINGS="$E/home/.claude/settings.json"
@@ -223,3 +248,50 @@ grep -q "PID $squatter" "$E/squat.out" || fail "refusal does not name the progra
 grep -q 'proxy-config set HTTP_PORT' "$E/squat.out" || fail 'refusal has no fix'
 kill "$squatter"; wait "$squatter" 2>/dev/null || :
 pass 'kill switch: tunnel-start refuses a program on the port instead of moving the tunnel'
+
+# --- Parallel nodes ------------------------------------------------------------
+prof tunnel-start > "$E/jp2.out" 2>&1 || { cat "$E/jp2.out" >&2; fail 'jp tunnel did not start again'; }
+until_ok 20 through_tunnel || fail 'no traffic through jp'
+jp_owner=$(head -1 "$dir/lock/owner"); jp_ssh=$(owner_ssh)
+sgdir="$E/state/claude-proxy/recovery/node-sg"
+prof tunnel-start sg > "$E/sg.out" 2>&1 || { cat "$E/sg.out" >&2; fail 'tunnel-start sg failed'; }
+through_sg() { curl -s -o /dev/null --max-time 8 -x "http://127.0.0.1:$SG_HTTP" https://api.anthropic.com/; }
+until_ok 20 through_sg || fail 'no traffic through the sg tunnel'
+grep -qx "http=$SG_HTTP" "$sgdir/tunnel.rec" || fail "sg tunnel record: $(cat "$sgdir/tunnel.rec" 2>/dev/null)"
+bash -c "exec 3<>/dev/tcp/127.0.0.1/$SG_SOCKS" || fail 'sg SOCKS port not listening'
+n=$(wc -l < "$E/sg.log"); through_tunnel; [ "$(wc -l < "$E/sg.log")" = "$n" ] || fail 'jp traffic reached the sg proxy'
+through_sg; [ "$(wc -l < "$E/sg.log")" -gt "$n" ] || fail 'sg traffic did not reach the sg proxy'
+pass 'node sg runs its own tunnel next to jp; each node reaches its own proxy'
+
+sg_ssh() { ps -o pid=,comm= --ppid "$(head -1 "$sgdir/lock/owner")" | awk '$2 == "ssh" {print $1}'; }
+new_sg_ssh() { local now; now=$(sg_ssh); [ -n "$now" ] && [ "$now" != "$1" ]; }
+old=$(sg_ssh); kill "$old"
+until_ok 20 new_sg_ssh "$old" || fail 'sg ssh not relaunched'
+until_ok 20 through_sg || fail 'sg traffic did not come back'
+[ "$(owner_ssh)" = "$jp_ssh" ] || fail 'killing sg touched the jp tunnel'
+pass 'a killed sg ssh is replaced; the jp tunnel is untouched'
+
+if command -v claude >/dev/null 2>&1; then
+    n=$(wc -l < "$E/sg.log")
+    ( cd "$E" && ANTHROPIC_API_KEY=sk-ant-e2e-not-a-key timeout 40 bash -c '. "$0" >/dev/null 2>&1; cc --node sg --no-verify -p hi' "$repo/scripts/claude-proxy.sh" </dev/null > "$E/cc-sg.out" 2>&1 ) || :
+    tail -n +"$((n+1))" "$E/sg.log" | grep -q '^CONNECT api.anthropic.com:443' || fail "cc --node sg did not go through sg: $(tail -5 "$E/cc-sg.out")"
+    [ "$(pinned_port)" = "http://127.0.0.1:$HTTP" ] || fail "cc --node sg moved the pin: $(pinned_port)"
+    pass 'kill switch + nodes: the real Claude CLI with cc --node sg goes through sg; the pin stays on jp'
+fi
+
+# A session on the default node: proxy-node refuses to move it.
+sleep 300 & sess=$!; pids+=($sess)
+mkdir -p "$dir/sessions"; (sed 's/.*) //' "/proc/$sess/stat" | awk '{print $20}') > "$dir/sessions/$sess"
+if prof proxy-node sg > "$E/pn.out" 2>&1; then fail 'proxy-node moved a running session'; fi
+grep -q '1 session(s)' "$E/pn.out" || fail "proxy-node refusal: $(cat "$E/pn.out")"
+grep -qx 'CLAUDE_SSH_HOST=e2e-jp' "$E/conf" || fail 'the default node changed'
+kill "$sess"; rm -f "$dir/sessions/$sess"
+pass 'proxy-node refuses to move a running session to another node'
+
+sg_owner=$(head -1 "$sgdir/lock/owner")   # before the stop removes the lock
+prof tunnel-stop sg > /dev/null
+until_ok 10 bash -c '! kill -0 "$1" 2>/dev/null' _ "$sg_owner" || fail 'sg owner still running'
+if bash -c "exec 3<>/dev/tcp/127.0.0.1/$SG_HTTP" 2>/dev/null; then fail 'sg port still open after tunnel-stop sg'; fi
+through_tunnel || fail 'tunnel-stop sg cut the jp tunnel'
+[ "$(head -1 "$dir/lock/owner")" = "$jp_owner" ] || fail 'jp owner changed'
+pass 'tunnel-stop sg stops only sg; jp keeps working'

@@ -90,3 +90,18 @@ out=$( PATH="$scratch/pbin:$PATH"; set +eu; print 'CLAUDE_PLAIN_COMMANDS=auto' >
 [[ $out == "claude: function | $scratch/pbin/claude | fake --version" ]] || fail "plain wrapper: $out"
 rm -f "$CLAUDE_PROXY_CONF"
 print 'PASS: zsh - plain claude wrapper, real-binary lookup, version passthrough'
+
+# Parallel nodes: slots, a node context that does not leak, valid --settings JSON.
+cat > "$HOME/.claude-proxy.nodes.json" <<'JSON'
+{ "nodes": [
+{ "name": "jp", "alias": "jpvpn", "host": "jp.example.com", "slot": 0 },
+{ "name": "sg", "alias": "sgvpn", "host": "sg.example.com", "proxy_port": 8899, "slot": 1 }
+] }
+JSON
+CLAUDE_SSH_HOST=jpvpn CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
+[[ $(_node_slot jp) == main && $(_node_slot sg) == node-sg ]] || fail "node slots: $(_node_slot jp) $(_node_slot sg)"
+got=$( _node_ctx sg; print "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT|$CLAUDE_SOCKS_PORT|$CLAUDE_REMOTE_PROXY_PORT" )
+[[ $got == 'sgvpn|8181|1181|8899' ]] || fail "node ctx: $got"
+[[ "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT" == 'jpvpn|8080' ]] || fail 'node ctx leaked into the caller'
+[[ $(_node_settings_json 8181 | jq -r .env.HTTPS_PROXY) == http://127.0.0.1:8181 ]] || fail 'node settings json'
+print 'PASS: zsh - node slots, isolated node context, --settings JSON'
