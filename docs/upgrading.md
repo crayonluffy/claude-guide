@@ -1,121 +1,114 @@
 # 🔄 Updating & upgrading
 
-## Getting the newest profile (any time)
+## How to get the newest profile
 
-### 2.9.0 (Windows, macOS, Linux, WSL) — kill switch
+The profile keeps your settings in a separate file: `~/.claude-proxy.conf` (macOS, Linux, WSL) or `~\.claude-proxy.conf.psd1` (Windows). An update does not change this file.
 
-Claude and Codex do not connect directly any more. When the tunnel is down,
-they cannot connect.
+1. Type this command:
 
-- **Claude keeps the proxy.** The profile keeps the proxy in Claude's
-  `settings.json`. `proxy-off` and `cc-stop` do not remove it. Plain `claude`
-  and the IDE extensions use the tunnel. If the tunnel is down, they show
-  "connection refused". Start the tunnel with `cc` or `proxy-up`.
-- **`cc` and `cx` examine the setup before they start.** They stop and tell you
-  the fix if `NO_PROXY` sends an API host directly, or if another program uses
-  the proxy port.
-- **The tunnel does not move to a different port.** If another program uses
-  the proxy port, `tunnel-start` stops and tells you the fix.
-- **Optional: plain `claude` and `codex` through the tunnel.** Set
-  `proxy-config set PLAIN_COMMANDS auto`. The setup wizard asks new users.
+   ```bash
+   proxy-update            # download and install the newest profile; your settings stay
+   proxy-update --check    # only tell me if a newer profile is available (Windows: proxy-update -Check)
+   ```
+
+2. Open a new terminal window. Or load the profile again: `source ~/.claude-proxy.sh` (Windows: `. $PROFILE`).
+
+You can also run the setup wizard again. It finds your settings and asks *"Keep these settings and only update the cc/cx profile?"*.
+
+**Your profile is older than 2.0** (there is no `proxy-update` command, and the settings are inside the script):
+
+1. Run the wizard one time:
+
+   ```bash
+   bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)   # macOS / Linux / WSL
+   ```
+
+   ```powershell
+   irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex           # Windows
+   ```
+
+2. The wizard reads the settings from the old profile, saves them in the settings file, and installs the new profile. It keeps the old profile as `.bak`.
+
+On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps1`. `$PROFILE` keeps only one loader line. If Documents is locked, the wizard makes a shortcut on the Desktop.
+
+---
+
+## Version history
+
+### 2.9.0 (Windows, macOS, Linux, WSL): kill switch
+
+Claude and Codex do not connect directly any more. When the tunnel is down, they cannot connect.
+
+- **Claude keeps the proxy.** The profile keeps the proxy in Claude's `settings.json`. `proxy-off` and `cc-stop` do not remove it. Plain `claude` and the IDE extensions use the tunnel. If the tunnel is down, they show "connection refused". To start the tunnel, type `cc` or `proxy-up`.
+- **`cc` and `cx` examine the setup before they start.** They stop and tell you the fix if `NO_PROXY` sends an API host directly, or if another program uses the proxy port.
+- **The tunnel does not move to a different port.** If another program uses the proxy port, `tunnel-start` stops and tells you the fix.
+- **Optional: plain `claude` and `codex` through the tunnel.** Type `proxy-config set PLAIN_COMMANDS auto`. The setup wizard asks new users.
 - **New command:** `proxy-killswitch` shows the status.
 
-The kill switch is on after the update. To use the behavior before 2.9.0,
-run `proxy-killswitch off`.
+The kill switch is on after the update. To use the behavior from before 2.9.0, type `proxy-killswitch off`.
 
-Run `proxy-update` and open a new terminal window. Version tags:
-`powershell-v2.9.0` and `bash-v2.9.0`.
+Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.9.0` and `bash-v2.9.0`.
 
-### 2.8.0 (Windows, macOS, Linux, WSL) — one self-healing tunnel, clearer errors
+### 2.8.0 (Windows, macOS, Linux, WSL): one self-healing tunnel, clearer errors
 
-- **One recovery owner per user.** Every terminal joins the same tunnel, even
-  one with older settings or a fallback port; `tunnel-stop` from any terminal
-  stops it, and it stays stopped.
-- **Upgrading is automatic.** A tunnel started by an older profile is replaced
-  by the next `cc`, `cx` or `tunnel-start` on the same ports (open sessions
-  reconnect within seconds) - no `proxy-restart` needed.
-- **SSH errors explained.** A refused login, a changed host key, a busy port
-  or an unreachable server is named with its fix in `tunnel-start`,
-  `proxy-status` and every open session. A refused login is retried only every
-  30 s instead of hammering the server.
-- **Quieter when idle.** With no `cc`/`cx` open, the tunnel is checked once a
-  minute (`WATCHDOG_IDLE_INTERVAL`) and wakes at once when you start one.
-- **Port takeover alert.** If another program grabs the proxy port while the
-  tunnel is down, every session and the desktop say so once, naming it - exit
-  the session. Nothing is killed.
-- `cc-stop` also counts open `cc`/`cx` sessions (Windows: npm-installed Claude
-  runs as `node.exe` and was missed).
-- Windows: readable `proxy-status`; the background owner runs under
-  PowerShell itself, not the ISE; `tunnel-start` explains a missing ssh.
-- macOS/Linux/WSL: works without `lsof` when `ss` is installed; a frozen ssh
-  can no longer stall recovery.
+- **One recovery owner for each user.** All terminals use the same tunnel. This is also true for a terminal with old settings. `tunnel-start` and `tunnel-stop` work from each terminal. After `tunnel-stop`, the tunnel stays stopped.
+- **The upgrade is automatic.** The next `cc`, `cx` or `tunnel-start` replaces a tunnel from an older profile. It uses the same ports. Open sessions connect again in a few seconds. You do not have to type `proxy-restart`.
+- **SSH errors have an explanation.** `tunnel-start`, `proxy-status` and each open session show the cause and the fix: a refused login, a changed host key, a port in use, or a server that does not answer. After a refused login, the profile tries again only each 30 seconds.
+- **Fewer checks when you do not use the tunnel.** When no `cc` or `cx` is open, the profile examines the tunnel one time each minute (`WATCHDOG_IDLE_INTERVAL`). When you start `cc` or `cx`, it examines the tunnel at once.
+- **Port takeover alert.** If another program starts to use the proxy port while the tunnel is down, each session and the desktop show one alert with the name of the program. Stop the session. The profile does not stop any program.
+- `cc-stop` also counts open `cc` and `cx` sessions. (On Windows, Claude from npm runs as `node.exe`. Older profiles did not see it.)
+- Windows: `proxy-status` is easier to read. The background owner runs in PowerShell, not in the ISE. `tunnel-start` tells you if `ssh` is not installed.
+- macOS, Linux, WSL: the profile works without `lsof` when `ss` is installed. A stopped `ssh` cannot stop the recovery any more.
 
-Run `proxy-update` and open a new terminal window. Version tags:
-`powershell-v2.8.0` and `bash-v2.8.0`.
+Type `proxy-update` and open a new terminal window. Version tags: `powershell-v2.8.0` and `bash-v2.8.0`.
 
-### 2.7.1 (Windows, macOS, Linux, WSL) — hotfix: Windows `cc` / `cx` start again
+### 2.7.1 (Windows, macOS, Linux, WSL): `cc` and `cx` start again on Windows
 
-From 2.7.1 on, the Windows and the macOS/Linux/WSL profiles share ONE version
-number: the same number means the same features on every platform.
+From 2.7.1, the Windows profile and the macOS/Linux/WSL profile have ONE version number. The same number means the same features on all platforms.
 
-The Windows profile 2.6.0 never launched Claude or Codex: the new connection check
-passed curl an option it rejects, so every check failed with "transport
-unavailable". The same bug made the background recovery restart a healthy
-tunnel every few seconds and pop "connection lost" alerts. Also fixed:
+The Windows profile 2.6.0 did not start Claude or Codex. The new connection check gave curl an option that curl does not accept. Thus each check failed with "transport unavailable". The same bug made the background recovery restart a good tunnel each few seconds, and show "connection lost" alerts. These problems are also corrected:
 
-- a single error inside the background monitor (for example a file briefly
-  locked by antivirus) no longer stops recovery for good;
-- a tunnel that is still connecting on a slow network is no longer reported
-  as lost, or killed and restarted before it can come up (Windows, macOS,
-  Linux, WSL). This also ends the "connection lost" + "restored" desktop
-  alerts that popped up every time the tunnel started.
-- macOS / Linux / WSL: when the tunnel fails to start, the error shown is
-  the newest lines of the log (it used to show the oldest ones).
+- One error in the background monitor (for example, a file that antivirus locks for a short time) does not stop the recovery permanently.
+- The profile does not report a slow tunnel as lost. It does not stop and restart the tunnel before the tunnel can start (Windows, macOS, Linux, WSL). The "connection lost" and "restored" alerts at each start do not occur any more.
+- macOS, Linux, WSL: when the tunnel does not start, the profile shows the newest lines of the log (before, it showed the oldest lines).
 
-Run `proxy-update`, open a new terminal window, then `proxy-restart` once.
-Version tags: `powershell-v2.7.1` and `bash-v2.7.1`.
+Type `proxy-update`, open a new terminal window, then type `proxy-restart` one time. Version tags: `powershell-v2.7.1` and `bash-v2.7.1`.
 
-### Prepared: PowerShell 2.6.0 / Bash 2.7.0 — desktop alerts
+### PowerShell 2.6.0 / Bash 2.7.0: desktop alerts
 
-Adds native desktop notifications for lost connection, prolonged outage and
-restoration while `cc`/`cx` remains in the foreground. The shared owner groups
-provider failures and avoids duplicate popups across terminal tabs. Windows
-uses a tray notification, macOS Notification Center, and Linux `notify-send`.
+This version adds desktop alerts for a lost connection, a long outage, and a restored connection. The alerts show while `cc` or `cx` stays in the foreground. The shared owner collects the failures of the two providers, so you do not get the same alert in each terminal tab. Windows uses a tray notification, macOS uses Notification Center, and Linux uses `notify-send`.
 
-After this version is published, update/reload your profile, then run
-`proxy-restart` once for the existing owner to adopt the notifier. Keep `cx`
-open and run `proxy-notify test` from another terminal to confirm visibility.
-Use `proxy-test prolonged --fast --desktop` for simulated lost/prolonged/restored
-alerts without changing real proxy/session state. `DESKTOP_NOTIFICATIONS=off`
-disables desktop alerts while preserving terminal/log fallbacks.
+1. Update and load your profile again.
+2. Type `proxy-restart` one time, so that the current owner uses the alerts.
+3. Keep `cx` open. In a different terminal, type `proxy-notify test`. Make sure that you see the alert.
 
-Prepared tag names: `powershell-v2.6.0` and `bash-v2.7.0`. Native Windows/macOS
-visual delivery still needs manual testing; OS settings can suppress popups.
-See [desktop UI, settings and verification](proxy-profile.md#desktop-alerts-while-the-cli-owns-the-terminal).
+To see all alerts without a real outage, type `proxy-test prolonged --fast --desktop`. To stop the desktop alerts, set `DESKTOP_NOTIFICATIONS=off`. The terminal and the log continue to show the events.
 
-### PowerShell 2.5.0 / Bash 2.6.0
+Tags: `powershell-v2.6.0` and `bash-v2.7.0`. The settings of your operating system can hide the alerts. Refer to [desktop alerts, settings and tests](proxy-profile.md#desktop-alerts-while-the-cli-owns-the-terminal).
 
-Adds shared fixed-port SSH recovery, provider-specific live outage warnings,
-a configurable 60-second prolonged warning, mandatory proxy transport checks,
-and safe `proxy-test recover --fast` / `proxy-test prolonged --fast` demos.
-Running sessions remain open and keep their proxy settings while retries continue.
-See [recovery behavior and settings](proxy-profile.md#recovery-while-claude-or-codex-is-running).
+### PowerShell 2.5.0 / Bash 2.6.0: recovery
 
-Run `proxy-update` and reload your profile.
-If a previous profile owns the tunnel, use `proxy-restart` once to replace it.
-Load passphrase-protected keys into the SSH agent before starting the worker.
+This version adds:
 
-Version identifiers: `powershell-v2.5.0` and `bash-v2.6.0`. Profile changes were
-merged in PR #22; version tags are managed separately.
+- SSH recovery on fixed ports.
+- A live outage warning for each provider.
+- A warning after a long outage (60 seconds, configurable).
+- A mandatory check of the proxy connection before each start.
+- Safe demonstrations: `proxy-test recover --fast` and `proxy-test prolonged --fast`.
 
-### Windows 2.4.1 / macOS, Linux and WSL 2.5.2
+Open sessions stay open and keep their proxy settings while the recovery tries again. Refer to [recovery behavior and settings](proxy-profile.md#recovery-while-claude-or-codex-is-running).
 
-`chrome-proxy` now stops with a clear error when a bare node name is missing
-from the loaded catalogue, instead of passing it to Chrome as a website such
-as `http://sg/`. Node names (`sg`) and SSH aliases (`sgvpn`) both work when
-listed in the catalogue. Existing settings and Chrome profiles are kept.
+1. Type `proxy-update` and load your profile again.
+2. If an older profile owns the tunnel, type `proxy-restart` one time.
+3. Load keys that have a passphrase into the SSH agent before the recovery starts.
 
-Update and reload in the affected terminal:
+Version identifiers: `powershell-v2.5.0` and `bash-v2.6.0`.
+
+### Windows 2.4.1 / macOS, Linux and WSL 2.5.2: `chrome-proxy` and unknown nodes
+
+If the loaded catalogue does not contain a node name, `chrome-proxy` now stops with a clear error. Before, it gave the name to Chrome as a website (for example `http://sg/`). Node names (`sg`) and SSH aliases (`sgvpn`) both work when the catalogue contains them. Your settings and Chrome profiles stay.
+
+Update and load the profile again in the terminal that has the problem:
 
 ```powershell
 proxy-update
@@ -131,61 +124,36 @@ proxy-nodes --refresh
 chrome-proxy sg --profile sg https://www.google.com/
 ```
 
-Close the affected proxy Chrome windows before retrying. Refreshing nodes
-updates the catalogue; reloading the profile updates the launcher function.
-See [node troubleshooting](proxy-nodes.md#chrome-opens-httpsg-or-reports-err_socks_connection_failed)
-for SSH and SOCKS checks if the browser still fails.
+Close the proxy Chrome windows that have the problem before you try again. `proxy-nodes --refresh` updates the catalogue. The new load of the profile updates the `chrome-proxy` command. If the browser continues to fail, refer to [node troubleshooting](proxy-nodes.md#chrome-opens-httpsg-or-reports-err_socks_connection_failed) for the SSH and SOCKS checks.
 
-Version tags identify each script independently: `powershell-v2.4.1` for
-`claude-proxy.ps1` and `bash-v2.5.2` for `claude-proxy.sh`. Both tags point to
-the repository commit containing this update; future upgrades use the same
-`powershell-v<version>` and `bash-v<version>` naming convention.
+Each script has its own version tag: `powershell-v2.4.1` for `claude-proxy.ps1` and `bash-v2.5.2` for `claude-proxy.sh`. Later versions use the same names: `powershell-v<version>` and `bash-v<version>`.
 
-> **New in v2.4 — `cc-install`.** One command checks **Node.js**, **Claude Code** and **Codex** and installs or updates what's missing or too old (through the proxy). The setup wizard now ends with it. Update the tools any time with `cc-install`; update this setup with `proxy-update`.
->
-> **New in v2.3 — a private node list.** `proxy-nodes --from <your VM alias>` (`-From` on Windows) fetches the list over SSH from a VM you choose — nothing public. Your admin sets it up with forge `proxynodes-manager`. On Windows, `proxy-update` now also loads the new version into the open window. Details: **[Nodes](proxy-nodes.md)**.
->
-> **New in v2.2 — nodes from your domain, several VMs per region, Chrome profiles.** After `proxy-update`: `proxy-nodes --domain example.com` (`-Domain` on Windows) if your company publishes its nodes in DNS; `chrome-proxy jp --profile work` opens another Chrome profile through `jp`; `jp2`, `jp3` … are extra VMs in the same region. Nothing to change if you use none of it. Details: **[Nodes](proxy-nodes.md)**.
->
-> **New in v2.1 — nodes.** After `proxy-update`, run `proxy-nodes --refresh` (`-Refresh` on Windows) once to download the node catalogue (JP / SG / US …). Then `proxy-node sg` moves Claude/Codex to another region and `chrome-proxy sg` opens a Chrome through it — several regions at once. Your existing `jpvpn` alias, settings and Chrome logins carry over (the Chrome profile folder is renamed to `…-<node>` on first use). Details: **[Nodes](proxy-nodes.md)**.
+### Earlier versions
 
-Since **v2.0** the profile keeps your settings in a separate file (`~/.claude-proxy.conf`, or `~\.claude-proxy.conf.psd1` on Windows), so updating never touches them:
-
-```bash
-proxy-update            # fetch + install the newest profile, settings kept
-proxy-update --check    # only report whether a newer one exists  (Windows: proxy-update -Check)
-```
-
-Open a new terminal afterwards (or `source ~/.claude-proxy.sh` / `. $PROFILE`). Re-running the setup wizard does the same: it finds your settings and asks *"Keep these settings and only update the cc/cx profile?"*.
-
-**Profile older than v2.0 (no `proxy-update` command, settings still inside the script)?** Re-run the wizard once — it reads the settings out of the old profile, saves them to the settings file, and installs the new profile. From then on `proxy-update` exists. The previous profile is kept next to the new one as `.bak`. On Windows the profile code moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps1`, and `$PROFILE` keeps only a one-line loader — if Documents is locked, the wizard makes a Desktop shortcut instead.
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)   # macOS / Linux / WSL
-```
-
-```powershell
-irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex           # Windows
-```
+- **2.4: `cc-install`.** One command examines **Node.js**, **Claude Code** and **Codex**, and installs or updates the missing or old items (through the proxy). The setup wizard runs it as the last step. To update the tools, type `cc-install`. To update this setup, type `proxy-update`.
+- **2.3: a private node list.** `proxy-nodes --from <your VM alias>` (`-From` on Windows) gets the list over SSH from a VM that you select. The list is not public. Your admin installs it with forge `proxynodes-manager`. On Windows, `proxy-update` also loads the new version into the open window. Refer to **[Nodes](proxy-nodes.md)**.
+- **2.2: nodes from your domain, more VMs for each region, Chrome profiles.** If your company publishes its nodes in DNS, type `proxy-nodes --domain example.com` (`-Domain` on Windows). `chrome-proxy jp --profile work` opens a different Chrome profile through `jp`. `jp2`, `jp3` … are more VMs in the same region. If you do not use these features, you do not have to change anything. Refer to **[Nodes](proxy-nodes.md)**.
+- **2.1: nodes.** After `proxy-update`, type `proxy-nodes --refresh` (`-Refresh` on Windows) one time to download the node catalogue (JP / SG / US …). Then `proxy-node sg` moves Claude and Codex to a different region, and `chrome-proxy sg` opens Chrome through it. You can use more regions at the same time. Your `jpvpn` alias, your settings and your Chrome logins stay. (On the first use, the profile renames the Chrome profile folder to `…-<node>`.) Refer to **[Nodes](proxy-nodes.md)**.
+- **2.0: a separate settings file.** An update does not change your settings.
 
 ---
 
-## Upgrading from the old (SOCKS + bridge) setup
+## Upgrade from the old setup (SOCKS + bridge)
 
-Earlier versions ran a SOCKS tunnel (`ssh -D`) **plus** an `http-proxy-to-socks` bridge on the client. The new design moves the HTTP proxy onto the VM and drops the bridge, so migrating has three parts:
+Old versions used a SOCKS tunnel (`ssh -D`) **and** an `http-proxy-to-socks` bridge on your computer. The new design puts the HTTP proxy on the VM and removes the bridge. The upgrade has three parts.
 
-## 1. On the VM — install the HTTP proxy
+### 1. On the VM: install the HTTP proxy
 
-This is new; the old setup had nothing here:
+The old setup did not have this part:
 
 ```bash
 git clone https://github.com/crayonluffy/forge.git    # or: cd forge && git pull
 sudo ./forge/webproxy-manager/install.sh              # tinyproxy on 127.0.0.1:8888
 ```
 
-## 2. On each client — refresh the profile
+### 2. On each computer: install the new profile
 
-Re-running the wizard replaces `~/.claude-proxy.sh` (or `$PROFILE`) with the new version, installs `jq`/`lsof`, and asks for the VM proxy port (your existing answers are pre-filled):
+Run the wizard again. It replaces `~/.claude-proxy.sh` (or `$PROFILE`) with the new version, installs `jq` and `lsof`, and asks for the VM proxy port. Each question shows your current answer:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.sh)   # macOS / Linux / WSL
@@ -195,20 +163,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/mai
 irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex           # Windows
 ```
 
-Prefer to do it by hand? Overwrite the profile and create the settings file (host alias, and `CLAUDE_REMOTE_PROXY_PORT` if your VM's tinyproxy isn't on 8888) — see [Set up by hand](proxy-profile.md#set-up-by-hand--macos--linux):
+To do this by hand, replace the profile and make the settings file (the host alias, and `CLAUDE_REMOTE_PROXY_PORT` if tinyproxy on the VM does not use port 8888). Refer to [Set up by hand](proxy-profile.md#set-up-by-hand--macos--linux):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/claude-proxy.sh -o ~/.claude-proxy.sh
 ```
 
-## 3. Reload and clear any stale processes
+### 3. Load the profile and remove old processes
 
 ```bash
-source ~/.bashrc     # or ~/.zshrc; on Windows just open a new PowerShell window
-cc-stop              # the new hardened teardown frees whatever the old tunnel/bridge left on 8080/1080
+source ~/.bashrc     # or ~/.zshrc; on Windows, open a new PowerShell window
+cc-stop              # stops what the old tunnel or bridge left on ports 8080 and 1080
 cc
 ```
 
-Your SSH key and `~/.ssh/config` alias carry over — nothing to redo there. Leftover old processes are handled automatically: `cc` kills a stale ssh and restarts the tunnel by itself, and if some other app owns the port it just uses the next free one. The `-D 1080` SOCKS forward still exists (now used by `chrome-proxy`).
+Your SSH key and your `~/.ssh/config` alias stay. You do not have to do them again. `cc` stops an old `ssh` and starts the tunnel. The SOCKS forward (`-D 1080`) is still there. `chrome-proxy` uses it.
 
-> **Bonus after upgrading:** the refreshed profile also includes **`cx`** — the same one-command launch for [Codex](install-codex.md).
+> **Note:** The new profile also contains **`cx`**. It starts [Codex](install-codex.md) through the proxy with one command.
