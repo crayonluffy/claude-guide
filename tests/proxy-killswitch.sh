@@ -154,7 +154,7 @@ echo 'PASS: proxy-killswitch on/off saves the setting and pins/unpins safely'
 
 # 4) Pre-launch leak checks and no silent port fallback.
 eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$src")"
-fn _killswitch_check proxy-up tunnel-start
+fn _killswitch_check _proxy_transport_wait proxy-up tunnel-start
 export XDG_STATE_HOME="$scratch/state4"
 dir=$(_recovery_identity)
 CLAUDE_KILLSWITCH=on CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_NO_PROXY='localhost,127.0.0.1'

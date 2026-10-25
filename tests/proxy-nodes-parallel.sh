@@ -128,6 +128,81 @@ tunnel-stop sg > /dev/null
 unset -f command
 echo 'PASS: tunnel-start <node> brings up that node on its own ports'
 
+# 7) Per-terminal node: cc / cx / proxy-up --node <other node> touch only this
+#    terminal (and only the app's environment for cc / cx).
+mkdir -p "$scratch/bin"
+for b in claude codex; do
+    cat > "$scratch/bin/$b" <<BIN
+#!/bin/sh
+printf '%s\n' "\$@" > "$scratch/$b.argv"
+echo "\${HTTPS_PROXY:-unset}" > "$scratch/$b.proxy"
+ls "$scratch/st7/claude-proxy/recovery/node-sg/sessions" 2>/dev/null | wc -l | tr -d ' ' > "$scratch/$b.sessions"
+BIN
+    chmod +x "$scratch/bin/$b"
+done
+run() {  # <conf lines> <commands>: fresh isolated shell with the profile and mocked tunnels
+    local conf="$1"; shift
+    (
+        export HOME="$scratch/h7" XDG_STATE_HOME="$scratch/st7" CLAUDE_PROXY_CONF="$scratch/c7"
+        export CLAUDE_SETTINGS="$scratch/s7.json" CLAUDE_PROXY_NODES="$scratch/nodes.json" PATH="$scratch/bin:$PATH"
+        unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+        mkdir -p "$HOME"; printf 'CLAUDE_SSH_HOST=jpvpn\nCLAUDE_PROXY_BANNER=0\n%s\n' "$conf" > "$CLAUDE_PROXY_CONF"
+        set +eu; . "$src" >/dev/null 2>&1
+        tunnel-start() { echo "tunnel-start $*" >> "$scratch/ts7"; }
+        _tunnel_health() { echo "ok 1 ssh $CLAUDE_HTTP_PORT"; }
+        _recovery_probe() { echo "$2" >> "$scratch/probed7"; echo 'healthy|0|200|404|healthy'; }
+        _recovery_owner_start() { _recovery_identity "$(_node_slot "${2:-$CLAUDE_SSH_HOST}")"; }
+        _listeners() { :; }; _port_bound() { return 1; }
+        eval "$*"
+    )
+}
+rm -f "$scratch"/claude.* "$scratch"/codex.* "$scratch/ts7"
+out=$(run '' 'cc --node sg --no-verify -p hi; echo "shell:${HTTPS_PROXY:-unset}"' 2>&1)
+assert grep -qx 'tunnel-start sg' "$scratch/ts7"
+assert test "$(sed -n 1p "$scratch/claude.argv")" = --settings
+json=$(sed -n 2p "$scratch/claude.argv")
+assert test "$(printf '%s' "$json" | jq -r .env.HTTPS_PROXY)" = http://127.0.0.1:8181
+assert test "$(printf '%s' "$json" | jq -r .env.HTTP_PROXY)" = http://127.0.0.1:8181
+assert test "$(sed -n '3,5p' "$scratch/claude.argv" | tr '\n' ' ')" = '--dangerously-skip-permissions -p hi '
+assert test "$(cat "$scratch/claude.proxy")" = http://127.0.0.1:8181
+assert test "$(cat "$scratch/claude.sessions")" = 1
+case "$out" in *'shell:unset'*) ;; *) echo "FAIL: cc --node changed the shell: $out" >&2; exit 1;; esac
+assert grep -qx 8181 "$scratch/probed7"
+echo 'PASS: cc --node sg runs Claude through sg (--settings + env) and leaves the shell alone'
+
+out=$(run '' 'cx --node sg --no-verify exec ls; echo "shell:${HTTPS_PROXY:-unset}"' 2>&1)
+assert test "$(cat "$scratch/codex.proxy")" = http://127.0.0.1:8181
+assert test "$(head -1 "$scratch/codex.argv")" = --dangerously-bypass-approvals-and-sandbox
+if grep -q -- --settings "$scratch/codex.argv"; then echo 'FAIL: codex got --settings' >&2; exit 1; fi
+case "$out" in *'shell:unset'*) ;; *) echo "FAIL: cx --node changed the shell: $out" >&2; exit 1;; esac
+echo 'PASS: cx --node sg runs Codex through sg (env for the app only)'
+
+out=$(run '' 'proxy-up --node sg --no-verify >/dev/null; echo "shell:$HTTPS_PROXY"; grep CLAUDE_SSH_HOST "$CLAUDE_PROXY_CONF"; jq -r .env.HTTPS_PROXY "$CLAUDE_SETTINGS"' 2>&1)
+case "$out" in *'shell:http://127.0.0.1:8181'*'CLAUDE_SSH_HOST=jpvpn'*'http://127.0.0.1:8080'*) ;; *) echo "FAIL: proxy-up --node: $out" >&2; exit 1;; esac
+echo 'PASS: proxy-up --node sg sets this shell only; the default node and the pin stay'
+
+rm -f "$scratch/claude.argv"
+run '' 'cc --node jp --no-verify -p hi' >/dev/null 2>&1
+if grep -q -- --settings "$scratch/claude.argv"; then echo 'FAIL: default node got --settings' >&2; exit 1; fi
+assert test "$(head -1 "$scratch/claude.argv")" = --dangerously-skip-permissions
+echo 'PASS: cc --node <default node> is plain cc'
+
+rm -f "$scratch/claude.argv"
+run 'CLAUDE_PLAIN_COMMANDS=auto' 'claude --node sg -p hi' >/dev/null 2>&1
+assert test "$(sed -n 1p "$scratch/claude.argv")" = --settings
+assert test "$(sed -n 3p "$scratch/claude.argv")" = -p
+echo 'PASS: plain claude --node sg (PLAIN_COMMANDS=auto) goes through sg'
+
+# The --settings JSON is valid for any NO_PROXY, with or without jq.
+eval "$(sed -n '/^_node_settings_json() {/,/^}/p' "$src")"
+CLAUDE_NO_PROXY='localhost,a"b\c'
+assert test "$(_node_settings_json 8181 | jq -r .env.NO_PROXY)" = 'localhost,a"b\c'
+mkdir -p "$scratch/nojq"; for t in sed printf; do ln -sf "$(command -v $t)" "$scratch/nojq/$t"; done
+nojq=$(PATH="$scratch/nojq"; _node_settings_json 8181)
+assert test "$(printf '%s' "$nojq" | jq -r .env.NO_PROXY)" = 'localhost,a"b\c'
+assert test "$(printf '%s' "$nojq" | jq -r .env.HTTPS_PROXY)" = http://127.0.0.1:8181
+echo 'PASS: the --settings JSON is valid with and without jq'
+
 # No owner may outlive the test.
 for d in "$root"/*; do
     if _recovery_owner_pid "$d" >/dev/null; then echo "FAIL: owner left running in ${d##*/}" >&2; exit 1; fi

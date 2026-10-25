@@ -1974,9 +1974,9 @@ proxy-off() {
 
 # Kill switch: everything that would let Claude/Codex traffic leak, checked right
 # before launch. Prints one reason and one fix and fails; silent when all is well.
-_killswitch_check() {  # <http port> <socks port>
+_killswitch_check() {  # <http port> <socks port> [slot dir]
     _killswitch_on || return 0
-    local http="$1" socks="$2" hosts dir own='' spid sstamp port pid fix state
+    local http="$1" socks="$2" hosts dir="${3:-}" own='' spid sstamp port pid fix state
     hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
     if [ -n "$hosts" ]; then
         echo "[Kill switch] NO_PROXY would send $hosts DIRECT (from your own IP) - not launched."
@@ -1984,7 +1984,8 @@ _killswitch_check() {  # <http port> <socks port>
         return 1
     fi
     # Our ssh is the one the owner published - checked by start identity, so a reused PID is not it.
-    if dir=$(_recovery_identity 2>/dev/null) && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null \
+    [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
+    if [ -n "$dir" ] && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null \
        && [ -n "$sstamp" ] && [ "$(_recovery_process_identity "$spid" 2>/dev/null)" = "$sstamp" ]; then own=$spid; fi
     for port in "$http" "$socks"; do
         if [ "$port" = "$http" ]; then fix="proxy-config set HTTP_PORT $((http+10))"; else fix="proxy-config set SOCKS_PORT $((socks+10))"; fi
@@ -2085,11 +2086,11 @@ proxy-killswitch() {
 }
 
 # --- Confirm the external IP really is the proxy's (VM's), not the client's ---
-_verify_proxy_ip() {
+_verify_proxy_ip() {  # [http port]
     echo "[Check] Verifying the external IP is the proxy's..."
     local proxied direct
     # THROUGH the proxy (explicit -x, doesn't depend on env vars)...
-    proxied=$(curl -s --max-time 10 -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" https://ipinfo.io/ip 2>/dev/null)
+    proxied=$(curl -s --max-time 10 -x "http://127.0.0.1:${1:-$CLAUDE_HTTP_PORT}" https://ipinfo.io/ip 2>/dev/null)
     # ...vs. straight out (bypassing any proxy).
     direct=$(curl -s --max-time 10 --noproxy '*' https://ipinfo.io/ip 2>/dev/null)
 
@@ -2111,6 +2112,52 @@ _verify_proxy_ip() {
 # (everything 'cc' does EXCEPT launching Claude)
 # ============================================================
 
+# Mandatory authenticated-TLS transport check, even with --no-verify. An idle
+# owner may not have noticed a dropped link yet: wake it and give it the
+# startup grace to heal before refusing.
+_proxy_transport_wait() {  # <provider> <http port> <socks port> [slot dir]
+    local dir="${4:-}" waited=0 woke=0
+    until _recovery_probe "$1" "$2" "$3" | grep -q '^healthy|'; do
+        if [ "$woke" -eq 0 ]; then
+            woke=1
+            [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
+            if [ -n "$dir" ] && _recovery_owner_pid "$dir" >/dev/null; then
+                : > "$dir/wake"; echo "[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect..."
+            else dir=-; fi
+        fi
+        if [ "$dir" = - ] || [ "$waited" -ge "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ]; then
+            echo "[Err] $1 proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1
+        fi
+        sleep 1; waited=$((waited+1))
+    done
+}
+
+# Claude reads its settings.json over the environment, and the kill switch pins
+# that file to the default node - so a per-terminal node must reach Claude
+# through --settings (which wins over settings.json).
+_node_settings_json() {  # <http port>
+    local url="http://127.0.0.1:$1" np
+    if command -v jq >/dev/null 2>&1; then
+        jq -cn --arg u "$url" --arg np "$CLAUDE_NO_PROXY" '{env:{HTTPS_PROXY:$u,HTTP_PROXY:$u,NO_PROXY:$np}}'
+        return
+    fi
+    np=$(printf '%s' "$CLAUDE_NO_PROXY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"env":{"HTTPS_PROXY":"%s","HTTP_PROXY":"%s","NO_PROXY":"%s"}}\n' "$url" "$url" "$np"
+}
+
+# Bring a (non-default) node's tunnel up for this terminal and check it like
+# proxy-up does. All messages on stderr; prints "<http> <socks> <slot dir>".
+_node_up() {  # <node> <provider>
+    local http='' socks='' dir
+    read -r http socks <<< "$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT $CLAUDE_SOCKS_PORT")"
+    [ -n "$http" ] || return 1
+    tunnel-start "$1" >&2 || return 1
+    dir=$(_recovery_identity "$(_node_slot "$1")") || return 1
+    _proxy_transport_wait "$2" "$http" "$socks" "$dir" >&2 || return 1
+    _killswitch_check "$http" "$socks" "$dir" >&2 || return 1
+    echo "$http $socks $dir"
+}
+
 proxy-up() {
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
@@ -2123,10 +2170,20 @@ proxy-up() {
         shift
     done
 
-    # Step 0: --node sg  ==  proxy-node sg first (persists, like running it yourself).
-    if [ -n "$node" ]; then
-        proxy-node "$node" || return 1
+    # --node <other node>: this shell only, through that node's own tunnel. The
+    # default node, Claude's pinned settings and other terminals stay as they are.
+    if [ -n "$node" ] && [ "$(_node_slot "$node" 2>/dev/null)" != main ]; then
+        local nhttp nsocks ndir url
+        read -r nhttp nsocks ndir <<< "$(_node_up "$node" "$provider")"
+        [ -n "$ndir" ] || return 1
+        url="http://127.0.0.1:$nhttp"
+        export http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY"
+        echo "[OK] Env vars set: HTTPS_PROXY=$url (node $node, this shell only)"
+        [ $no_verify -eq 1 ] || _verify_proxy_ip "$nhttp"
+        echo "[OK]  This shell uses node $node. The default node ($CLAUDE_SSH_HOST) and other terminals are unchanged. To make $node the default: proxy-node $node"
+        return 0
     fi
+    [ -z "$node" ] || _node_slot "$node" >/dev/null || return 1
 
     # Step 1: SSH tunnel (HTTP + SOCKS forwards).
     # tunnel-start no-ops when the tunnel is healthy, auto-heals a stale one,
@@ -2135,20 +2192,7 @@ proxy-up() {
     tunnel-start || return 1
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] || return 1
 
-    # Mandatory authenticated-TLS transport check, even with --no-verify.
-    # An idle owner may not have noticed a dropped link yet: wake it and give
-    # it the startup grace to heal before refusing.
-    local dir='' waited=0
-    until _recovery_probe "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" | grep -q '^healthy|'; do
-        if [ -z "$dir" ]; then
-            dir=$(_recovery_identity 2>/dev/null) && _recovery_owner_pid "$dir" >/dev/null || dir=-
-            [ "$dir" = - ] || { : > "$dir/wake"; echo "[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect..."; }
-        fi
-        if [ "$dir" = - ] || [ "$waited" -ge "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ]; then
-            echo "[Err] $provider proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1
-        fi
-        sleep 1; waited=$((waited+1))
-    done
+    _proxy_transport_wait "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     _killswitch_check "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -2178,15 +2222,15 @@ _bin_path() {
 _launch_via_proxy() {
     local label="$1" bin="$2" hint="$3" skip_flag="$4"
     shift 4
-    local safe=0 quiet=0
-    local up_args=() app_args=()
+    local safe=0 quiet=0 node='' no_verify=0
+    local up_args=() app_args=() pre_args=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --safe)      safe=1 ;;
             --quiet)     quiet=1 ;;
-            --no-verify) up_args+=(--no-verify) ;;
-            --node)      up_args+=(--node "${2:-}"); shift ;;
-            --node=*)    up_args+=("$1") ;;
+            --no-verify) up_args+=(--no-verify); no_verify=1 ;;
+            --node)      node="${2:-}"; shift ;;
+            --node=*)    node="${1#--node=}" ;;
             *)           app_args+=("$1") ;;
         esac
         shift
@@ -2204,10 +2248,23 @@ _launch_via_proxy() {
     [ "$bin" != codex ] || _CLAUDE_LAUNCH_PROVIDER=codex
     # Quiet (plain claude/codex): the profile's own lines go to stderr, so stdout
     # carries only the app's output ('claude -p ... | jq' keeps working).
-    if [ "$quiet" -eq 1 ]; then proxy-up "${up_args[@]}" >&2 || return 1
+    local nslot=main nhttp='' nsocks='' url=''
+    if [ -n "$node" ]; then nslot=$(_node_slot "$node") || return 1; fi
+    if [ "$nslot" != main ]; then
+        # This terminal only: the node's own tunnel, its proxy in the app's environment
+        # (and in Claude's --settings). The shell, the default node and the pin stay.
+        read -r nhttp nsocks identity <<< "$(_node_up "$node" "$_CLAUDE_LAUNCH_PROVIDER")"
+        [ -n "$identity" ] || return 1
+        if [ "$no_verify" -eq 0 ]; then
+            if [ "$quiet" -eq 1 ]; then _verify_proxy_ip "$nhttp" >&2; else _verify_proxy_ip "$nhttp"; fi
+        fi
+        url="http://127.0.0.1:$nhttp"
+        [ "$bin" != claude ] || pre_args=(--settings "$(_node_settings_json "$nhttp")")
+        echo "[Node] This terminal uses $node. To make $node the default: proxy-node $node" >&2
+    elif [ "$quiet" -eq 1 ]; then proxy-up "${up_args[@]}" >&2 || return 1
     else proxy-up "${up_args[@]}" || return 1; fi
     if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
-        identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
+        [ -n "$url" ] || identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
         [ "$quiet" -eq 1 ] || echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
@@ -2220,11 +2277,13 @@ _launch_via_proxy() {
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
     [ "$quiet" -eq 1 ] || echo "[Launch] Starting $label${app_args:+ (${app_args[*]})}..."
     # 'command': the real program, not a plain-command wrapper of the same name.
-    if [ $safe -eq 1 ]; then
-        if command "$bin" "${app_args[@]}"; then rc=0; else rc=$?; fi
-    else
-        if command "$bin" "$skip_flag" "${app_args[@]}"; then rc=0; else rc=$?; fi
-    fi
+    # A per-terminal node sets the proxy for this one process only.
+    [ $safe -eq 1 ] || pre_args+=("$skip_flag")
+    if [ -n "$url" ]; then
+        if env http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" \
+               no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY" \
+               "$(_bin_path "$bin")" "${pre_args[@]}" "${app_args[@]}"; then rc=0; else rc=$?; fi
+    elif command "$bin" "${pre_args[@]}" "${app_args[@]}"; then rc=0; else rc=$?; fi
     [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
     trap - INT
     [ -z "$saved_int" ] || eval "$saved_int"  # restore the caller's own trap

@@ -91,7 +91,7 @@ wait
 echo 'PASS: an idle owner wakes on demand and when a session starts'
 
 # 5) proxy-up wakes an idle owner and waits for it instead of refusing at once.
-eval "$(sed -n '/^proxy-up() {/,/^}/p' "$src")"
+eval "$(sed -n '/^_proxy_transport_wait() {/,/^}/p;/^proxy-up() {/,/^}/p' "$src")"
 _killswitch_check() { :; }   # covered by tests/proxy-killswitch.sh
 _recovery_owner_pid() { echo 4242; }
 _recovery_adopt() { :; }

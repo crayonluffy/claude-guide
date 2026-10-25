@@ -88,6 +88,7 @@ echo 'PASS: real Bash worker preserves ports/settings during proxy failure and s
 assert declare -F _recovery_subscribe
 echo 'PASS: Bash subscriber interface'
 # Load real launch integration without profile initialization.
+eval "$(sed -n '/^_proxy_transport_wait() {/,/^}/p' "$repo/scripts/claude-proxy.sh")"
 eval "$(sed -n '/^proxy-up() {/,/^cc-stop() {/p' "$repo/scripts/claude-proxy.sh" | sed '$d')"
 _killswitch_check() { :; }   # covered by tests/proxy-killswitch.sh
 tunnel-start() { :; }
