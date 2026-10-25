@@ -538,11 +538,52 @@ _recovery_migrate() {
         return 1
     fi
 }
-_recovery_owner_start() {
+# A tunnel left on a node's ports by 2.9 'chrome-proxy <node>' (an ssh with no
+# owner) is replaced. Anything that is not ssh is refused and never touched.
+_recovery_migrate_node() {
+    local port pid name fix i=0 found=0
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        if [ "$port" = "$CLAUDE_HTTP_PORT" ]; then fix="NODE_HTTP_BASE $((port + 100))"; else fix="NODE_SOCKS_BASE $((port + 100))"; fi
+        for pid in $(_listeners "$port"); do
+            name=$(_proc_name "$pid")
+            case "$name" in ssh|*/ssh) found=1; continue;; esac
+            echo "[Err] ${name:-another program} (PID $pid) is on port $port, which this node's tunnel uses. Close it, or move the node ports: proxy-config set $fix" >&2
+            return 1
+        done
+        if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            echo "[Err] Another user's program is on port $port, which this node's tunnel uses. Move the node ports: proxy-config set $fix" >&2
+            return 1
+        fi
+    done
+    [ "$found" -eq 1 ] || return 0
+    echo "[Upgrade] Replacing the Chrome tunnel to $CLAUDE_SSH_HOST from an older profile with a self-healing one on the same ports." >&2
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        for pid in $(_listeners "$port"); do kill "$pid" 2>/dev/null || :; done
+    done
+    while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
+    if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        echo "[Err] The old tunnel on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not stop - run proxy-doctor." >&2
+        return 1
+    fi
+}
+# Start (or find) the owner of the default node, or of <node> on its own ports.
+# A node's owner runs in a subshell with the node's settings, so this shell keeps its own.
+_recovery_owner_start() {  # [provider] [node]
+    local slot=main
+    if [ -n "${2:-}" ]; then slot=$(_node_slot "$2") || return 1; fi
+    if [ "$slot" != main ]; then
+        ( _node_ctx "$2" || exit 1; _recovery_slot_start "$slot" )
+        return
+    fi
+    _recovery_slot_start main
+}
+_recovery_slot_start() {  # <slot>
     local dir pid i=0
-    dir=$(_recovery_identity) || return 1
+    dir=$(_recovery_identity "$1") || return 1
     if ! _recovery_owner_pid "$dir" >/dev/null; then
-        if _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
+        if [ "$1" != main ]; then
+            _recovery_migrate_node || return 1
+        elif _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
             _recovery_migrate || return 1
         fi
         rm -f "$dir/stopped"
@@ -910,18 +951,21 @@ _legacy_watchdog_stop() {
 }
 _watchdog_pid() { local dir; dir=$(_recovery_identity) && _recovery_owner_pid "$dir"; }
 # Live owners in every state directory (this slot and any left by older versions).
-_recovery_owned_dirs() {
+# Node tunnels (node-*) are included only with 'all': a plain tunnel-stop leaves
+# the terminals that use another node alone.
+_recovery_owned_dirs() {  # [all]
     local d
     find "$(_recovery_root)" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | while IFS= read -r d; do
+        case "${d##*/}:${1:-}" in node-*:all) ;; node-*:*) continue;; esac
         _recovery_owner_pid "$d" >/dev/null && printf '%s\n' "$d"
     done
 }
-_recovery_stop_owners() {
+_recovery_stop_owners() {  # [all]
     local d rc=0
     while IFS= read -r d; do
         [ -n "$d" ] || continue
         _recovery_owner_stop "$d" || rc=1
-    done <<< "$(_recovery_owned_dirs)"
+    done <<< "$(_recovery_owned_dirs "${1:-}")"
     return $rc
 }
 _wd_sleep() { sleep "$1" & wait $!; }
@@ -1651,9 +1695,9 @@ proxy-node() {
 
 # What to tell the user when the tunnel does not come up: the classified reason
 # and its fix first, then the actual ssh output (owner's stderr, else the log).
-_recovery_failure_report() {
-    local dir why=''
-    dir=$(_recovery_identity 2>/dev/null) || dir=''
+_recovery_failure_report() {  # [slot dir]
+    local dir="${1:-}" why=''
+    [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
     if [ -n "$dir" ]; then why=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null); fi
     echo "[Err] SSH tunnel failed to start within 10s."
     if [ -n "$why" ]; then echo "       $(_recovery_ssh_hint "$why" "$CLAUDE_SSH_HOST")"; fi
@@ -1663,7 +1707,31 @@ _recovery_failure_report() {
     echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
 }
 
-tunnel-start() {
+# tunnel-start <node> for a node that is not the default: its own owner and ports.
+_node_tunnel_up() {  # <node>
+    local line dir attempts=0 http='' socks='' alias=''
+    if ! command -v ssh >/dev/null 2>&1; then echo "[Err] 'ssh' not found - no tunnel is possible. Install an OpenSSH client."; return 1; fi
+    if line=$(_node_lookup "$1"); then _node_ensure_alias "$line" || return 1; fi
+    read -r http socks alias <<< "$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT $CLAUDE_SOCKS_PORT $CLAUDE_SSH_HOST")"
+    [ -n "$http" ] || return 1
+    if _is_wsl 2>/dev/null; then _ensure_ssh_agent; fi
+    dir=$(_recovery_owner_start claude "$1") || return 1
+    while ! _port_in_use "$http" && [ $attempts -lt 20 ]; do sleep 0.5; attempts=$((attempts+1)); done
+    if _port_in_use "$http"; then
+        echo "[OK]  $1 tunnel up: HTTP 127.0.0.1:$http  SOCKS 127.0.0.1:$socks  -> $alias  (self-healing; this node only)"
+        return 0
+    fi
+    _recovery_failure_report "$dir"
+    _recovery_owner_stop "$dir" >/dev/null
+    return 1
+}
+
+tunnel-start() {  # [node]
+    if [ -n "${1:-}" ]; then
+        local nslot
+        nslot=$(_node_slot "$1") || return 1
+        if [ "$nslot" != main ]; then _node_tunnel_up "$1"; return; fi
+    fi
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Everything below needs an ssh client, and without this guard the failure
     # is opaque: the backgrounded start swallows "command not found" and you get
@@ -1789,7 +1857,21 @@ tunnel-start() {
     fi
 }
 
-tunnel-stop() {
+tunnel-stop() {  # [node]
+    if [ -n "${1:-}" ]; then
+        local nslot ndir
+        nslot=$(_node_slot "$1") || return 1
+        if [ "$nslot" != main ]; then
+            ndir=$(_recovery_identity "$nslot") || return 1
+            if _recovery_owner_pid "$ndir" >/dev/null; then
+                _recovery_owner_stop "$ndir" || return 1
+                echo "[OK] $1 tunnel stopped (other nodes keep running)"
+            else
+                echo "[Info] No $1 tunnel running"
+            fi
+            return 0
+        fi
+    fi
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
@@ -2204,13 +2286,22 @@ cc-stop() {
 
 # Replace a hung tunnel for EVERY window without touching env vars or
 # settings.json, so Claude/Codex running in other tabs just carry on.
-proxy-restart() {
-    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
-    echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
-    tunnel-stop >/dev/null || { tunnel-stop; return 1; }
-    tunnel-start || return 1
-    local state rc cc hc
-    read -r state rc cc hc <<< "$(_proxy_probe "$CLAUDE_HTTP_PORT" 10)"
+proxy-restart() {  # [node]
+    local state rc cc hc port="$CLAUDE_HTTP_PORT"
+    if [ -n "${1:-}" ] && [ "$(_node_slot "$1" 2>/dev/null)" != main ]; then
+        _node_slot "$1" >/dev/null || return 1
+        port=$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT") || return 1
+        echo "[Restart] Replacing the $1 tunnel (other nodes keep running)..."
+        tunnel-stop "$1" >/dev/null || return 1
+        tunnel-start "$1" || return 1
+    else
+        _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
+        echo "[Restart] Replacing the SSH tunnel (other windows keep their proxy settings)..."
+        tunnel-stop >/dev/null || { tunnel-stop; return 1; }
+        tunnel-start || return 1
+        port=$CLAUDE_HTTP_PORT
+    fi
+    read -r state rc cc hc <<< "$(_proxy_probe "$port" 10)"
     if [ "$state" = "ok" ]; then
         echo "[OK]  api.anthropic.com answers through the new tunnel - other windows recover on their next request."
     else
