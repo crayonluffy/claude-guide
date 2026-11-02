@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.11.2"
+CLAUDE_PROXY_VERSION="2.11.3"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -580,10 +580,25 @@ _recovery_owner_start() {  # [provider] [node]
     fi
     _recovery_slot_start main
 }
+# A dead owner record can hide live loops: under zsh with a trap set, 2.11.1 and
+# older recorded a helper's PID, so their loops are invisible to tunnel-stop and
+# keep restarting ssh. Every loop leaves at its next check of 'stopped'; a session
+# entry for this shell ends their idle sleep so that check comes within seconds.
+_recovery_drain_stale() {  # <dir>
+    local dir="$1"
+    [ -e "$dir/lock/owner" ] || return 0
+    echo '[Upgrade] Stopping tunnel loops left by an older profile (a few seconds) ...' >&2
+    (umask 077; mkdir -p "$dir/sessions") || return 1
+    : > "$dir/stopped"
+    _recovery_process_identity $$ > "$dir/sessions/$$" || :
+    sleep $(( ${CLAUDE_WATCHDOG_INTERVAL:-5} + 2 ))
+    rm -f "$dir/sessions/$$"
+}
 _recovery_slot_start() {  # <slot>
     local dir pid i=0
     dir=$(_recovery_identity "$1") || return 1
     if ! _recovery_owner_pid "$dir" >/dev/null; then
+        _recovery_drain_stale "$dir" || return 1
         if [ "$1" != main ]; then
             _recovery_migrate_node || return 1
         elif _legacy_watchdog_pid >/dev/null 2>&1 || _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
