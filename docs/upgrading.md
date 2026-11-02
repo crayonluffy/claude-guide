@@ -37,6 +37,23 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.11.4 (macOS): tabs share one tunnel; kill switch works without recovery
+
+- **Fixed: on macOS, every new tab started its own tunnel owner, and the owners fought over the same ports.** You saw `[Upgrade] Replacing the tunnel ...` in new tabs, and many `Local port conflict` / `Proxy connection lost` / `restored` messages. The cause: macOS `ps` adds spaces at the end of a start time, so the profile never recognized a running owner. This was wrong since 2.6.0. Linux and WSL were not affected.
+- **Fixed: with `TUNNEL_WATCHDOG=0`, the kill switch refused the tunnel's own ssh** (`ssh (PID ...) is on proxy port 8080, not the tunnel`). It now accepts the ssh that forwards the tunnel ports.
+- **Tip: plain `claude` and `codex` through the tunnel.** Type `proxy-config set PLAIN_COMMANDS auto`. Then plain `claude` starts the tunnel when needed and runs through it, the same as `cc-safe`.
+
+If you turned recovery or the kill switch off as a workaround, turn them on again after the update:
+
+```zsh
+proxy-update
+proxy-config set TUNNEL_WATCHDOG 1
+proxy-killswitch on
+cc-stop --force      # close Claude and Codex first
+```
+
+Then open new terminal windows. Release tag: `v2.11.4`.
+
 ### 2.11.3 (macOS, Linux, WSL): old tunnel loops are stopped on update
 
 - **Fixed: after updating to 2.11.2, tunnel loops started by 2.11.1 kept running in the background and restarting their own ssh.** 2.11.1 wrote down the wrong process ID for them, so `tunnel-stop` could not find them. The first `cc` after the update now stops them. This takes a few seconds and prints `[Upgrade] Stopping tunnel loops left by an older profile`. You no longer need to restart your computer.

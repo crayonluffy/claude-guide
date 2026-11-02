@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
-eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$repo/scripts/claude-proxy.sh")"
+eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}")"
 assert() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 if ! declare -F _recovery_step >/dev/null; then echo 'FAIL: recovery state reducer is missing'; exit 1; fi
 field() { printf '%s\n' "$1" | cut -d '|' -f "$2"; }
@@ -139,3 +139,16 @@ assert test "$(grep -c 'session has not been terminated' "$scratch/demo.prolonge
 assert grep -q 't=75.*retry' "$scratch/demo.prolonged"
 if proxy-test unknown > /dev/null;then echo 'FAIL: invalid demo accepted';exit 1;fi
 echo 'PASS: Bash isolated simulations and retries beyond grace period'
+
+# macOS has no /proc: the start time comes from ps, which pads it with trailing
+# spaces. The record read back by 'read' loses them, so both sides must be trimmed
+# or a live owner never matches its record (every new tab started another owner).
+eval "$(declare -f _recovery_process_identity | sed 's#/proc/#/no-proc/#g')"
+ps() { printf '%s\n' 'Mon Nov  2 20:17:15 2026    '; }
+mac=$(mktemp -d)
+printf '%s\n%s\n' "$$" "$(_recovery_process_identity $$)" > "$mac/owner.tmp"
+mkdir -p "$mac/lock"; mv "$mac/owner.tmp" "$mac/lock/owner"
+assert test "$(sed -n 2p "$mac/lock/owner")" = 'Mon Nov  2 20:17:15 2026'
+assert test "$(_recovery_owner_pid "$mac")" = "$$"
+unset -f ps; rm -rf "$mac"
+echo 'PASS: Bash owner identity matches with macOS-padded ps start times'
