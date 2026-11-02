@@ -105,3 +105,13 @@ got=$( _node_ctx sg; print "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT|$CLAUDE_SOCKS_POR
 [[ "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT" == 'jpvpn|8080' ]] || fail 'node ctx leaked into the caller'
 [[ $(_node_settings_json 8181 | jq -r .env.HTTPS_PROXY) == http://127.0.0.1:8181 ]] || fail 'node settings json'
 print 'PASS: zsh - node slots, isolated node context, --settings JSON'
+
+# Owner PID with a trap set (oh-my-zsh / iTerm / p10k set TRAPWINCH): without
+# exec, zsh returned a short-lived helper's PID and every new tab replaced the tunnel.
+zmodload zsh/system
+TRAPWINCH() { :; }
+got=$( worker() { local me; me=$(exec sh -c 'echo $PPID'); print -n "$me|$sysparams[pid]"; }; worker )
+[[ ${got%%|*} == ${got##*|} ]] || fail "self pid under a trap: $got"
+unfunction TRAPWINCH
+! grep -q "\$(sh -c 'echo \$PPID')" "$repo/scripts/claude-proxy.sh" || fail 'profile captures a PID without exec'
+print 'PASS: zsh - owner PID is the subshell even with a trap set'
