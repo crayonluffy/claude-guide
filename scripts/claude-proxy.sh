@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.11.3"
+CLAUDE_PROXY_VERSION="2.11.4"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -384,7 +384,9 @@ _recovery_process_identity() {
         return 0
     fi
     # ps start time is portable to macOS and includes the date (PID reuse guard).
-    LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//'
+    # macOS pads it with trailing spaces, which 'read' strips from the saved copy:
+    # trim both ends, or no owner ever matches its record and every tab starts another.
+    LC_ALL=C ps -p "$1" -o lstart= 2>/dev/null | sed 's/^ *//; s/ *$//'
 }
 _recovery_owner_pid() {
     local pid stamp actual
@@ -2049,6 +2051,13 @@ _killswitch_check() {  # <http port> <socks port> [slot dir]
         if [ "$port" = "$http" ]; then fix="proxy-config set HTTP_PORT $((http+10))"; else fix="proxy-config set SOCKS_PORT $((socks+10))"; fi
         for pid in $(_listeners "$port"); do
             [ "$pid" = "$own" ] && continue
+            # Without an owner (TUNNEL_WATCHDOG=0) there is no record: our tunnel is
+            # the ssh that forwards this HTTP port and SOCKS port, as tunnel-start runs it.
+            if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" != 1 ] && _is_ssh_name "$(_proc_name "$pid")"; then
+                case " $(ps -p "$pid" -o command= 2>/dev/null) " in
+                    *" -L $http:127.0.0.1:"*" -D $socks "*) continue ;;
+                esac
+            fi
             echo "[Kill switch] $(_proc_name "$pid" || :) (PID $pid) is on proxy port $port, not the tunnel - Claude/Codex traffic could go to it. Not launched."
             echo "              Fix: close that program, or move the tunnel: $fix"
             return 1

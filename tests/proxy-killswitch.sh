@@ -155,7 +155,7 @@ echo 'PASS: proxy-killswitch on/off saves the setting and pins/unpins safely'
 
 # 4) Pre-launch leak checks and no silent port fallback.
 eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$src")"
-fn _killswitch_check _proxy_transport_wait proxy-up tunnel-start
+fn _killswitch_check _proxy_transport_wait proxy-up tunnel-start _is_ssh_name
 export XDG_STATE_HOME="$scratch/state4"
 dir=$(_recovery_identity)
 CLAUDE_KILLSWITCH=on CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_NO_PROXY='localhost,127.0.0.1'
@@ -190,6 +190,21 @@ CLAUDE_KILLSWITCH=off; CLAUDE_NO_PROXY='*'
 assert test -z "$(_killswitch_check 8080 1080)"
 CLAUDE_KILLSWITCH=on; CLAUDE_NO_PROXY='localhost,127.0.0.1'
 echo 'PASS: cc/cx refuse on a leaky NO_PROXY, a foreign port holder, or an unpinnable Claude'
+
+# No owner (TUNNEL_WATCHDOG=0): no ssh.pid record. The ssh that tunnel-start runs is
+# ours by its forwards; another ssh on the port is still refused.
+rm -f "$dir/ssh.pid"
+_listeners() { case "$1" in 8080|1080) echo 4242;; esac; }
+ps() { echo 'ssh -f -N -C -L 8080:127.0.0.1:8888 -D 1080 -o ServerAliveInterval=15 jpvpn'; }
+refuses 'ssh (PID 4242) is on proxy port 8080'                  # owner on: a record is required
+CLAUDE_TUNNEL_WATCHDOG=0
+assert test -z "$(_killswitch_check 8080 1080)"
+ps() { echo 'ssh -N -L 8080:127.0.0.1:3128 somewhere-else'; }
+refuses 'ssh (PID 4242) is on proxy port 8080'
+unset -f ps; CLAUDE_TUNNEL_WATCHDOG=1
+printf '%s|%s\n' "$$" "$(_recovery_process_identity $$)" > "$dir/ssh.pid"
+_listeners() { case "$1" in 8080|1080) echo "$$";; esac; }
+echo 'PASS: with the owner off, the kill switch accepts the tunnel ssh and nothing else'
 
 # proxy-up refuses before setting anything; on success the pin follows the live port.
 _recovery_adopt() { :; }; tunnel-start() { :; }; _tunnel_health() { echo "ok $$ ssh 8080"; }
