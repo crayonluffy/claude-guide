@@ -59,7 +59,7 @@ _node_ensure_alias() { :; }
 _is_wsl() { return 1; }
 # A stand-in worker: records the context it runs in, owns its slot until stopped.
 _recovery_worker() {
-    local me; me=$(sh -c 'echo $PPID')
+    local me; me=$(exec sh -c 'echo $PPID')
     echo "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT|$CLAUDE_SOCKS_PORT|$CLAUDE_REMOTE_PROXY_PORT" > "$1/ctx"
     echo x >> "$scratch/spawns.${1##*/}"
     _recovery_claim "$1" "$me" || return 0

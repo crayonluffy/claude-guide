@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.11.1"
+CLAUDE_PROXY_VERSION="2.11.2"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -618,7 +618,10 @@ _recovery_worker() {
     local takeover cinfo conflict_seen=''
     local classified=1 sshclass='' lastclass=''
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
-    me=$(sh -c 'echo $PPID')
+    # 'exec' is required: with any trap set (TRAPWINCH / trap WINCH from oh-my-zsh,
+    # iTerm, p10k ...) zsh forks inside $( ) instead of exec'ing sh, so $PPID was a
+    # helper that exits at once - the owner looked dead and every new tab replaced it.
+    me=$(exec sh -c 'echo $PPID')
     _recovery_claim "$dir" "$me" || return 0
     _recovery_record_write "$dir"
     trap '' HUP
@@ -753,7 +756,7 @@ _recovery_subscribe() {
     parent=$$; stamp=$(_recovery_process_identity "$parent")
     (
         local me
-        me=$(sh -c 'echo $PPID')
+        me=$(exec sh -c 'echo $PPID')
         trap 'rm -f "$dir/sessions/$me"; exit 0' TERM
         trap '' HUP
         local state gen event phase seen=-1 sshwhy seenssh=''
