@@ -37,6 +37,12 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.11.5 (macOS): kill switch accepts a tunnel started before the update
+
+- **Fixed: right after the update to 2.11.4, `cc` stopped with `[Kill switch] ssh (PID ...) is on proxy port 8080, not the tunnel`.** The tunnel was still run by the owner from 2.11.3, which saved its ssh start time in the old format. The kill switch now reads both formats.
+
+Type `proxy-update` and open a new terminal window. Release tag: `v2.11.5`.
+
 ### 2.11.4 (macOS): tabs share one tunnel; kill switch works without recovery
 
 - **Fixed: on macOS, every new tab started its own tunnel owner, and the owners fought over the same ports.** You saw `[Upgrade] Replacing the tunnel ...` in new tabs, and many `Local port conflict` / `Proxy connection lost` / `restored` messages. The cause: macOS `ps` adds spaces at the end of a start time, so the profile never recognized a running owner. This was wrong since 2.6.0. Linux and WSL were not affected.
