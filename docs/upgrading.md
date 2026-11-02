@@ -37,6 +37,12 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.11.3 (macOS, Linux, WSL): old tunnel loops are stopped on update
+
+- **Fixed: after updating to 2.11.2, tunnel loops started by 2.11.1 kept running in the background and restarting their own ssh.** 2.11.1 wrote down the wrong process ID for them, so `tunnel-stop` could not find them. The first `cc` after the update now stops them. This takes a few seconds and prints `[Upgrade] Stopping tunnel loops left by an older profile`. You no longer need to restart your computer.
+
+Type `proxy-update` and open a new terminal window. Release tag: `v2.11.3`.
+
 ### 2.11.2 (macOS, Linux, WSL): a second tab no longer replaces the tunnel
 
 - **Fixed: on macOS (zsh), every new tab printed `[Upgrade] Replacing the tunnel from an older profile ...` and broke the tunnel of the other tabs.** When zsh has a trap set (oh-my-zsh, iTerm or Powerlevel10k often set one), the tunnel owner wrote down the wrong process ID. Then the next tab thought no owner was running and started a new tunnel on the same ports. Now all tabs share one tunnel again.
