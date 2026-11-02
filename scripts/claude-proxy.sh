@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.11.4"
+CLAUDE_PROXY_VERSION="2.11.5"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -2045,8 +2045,11 @@ _killswitch_check() {  # <http port> <socks port> [slot dir]
     fi
     # Our ssh is the one the owner published - checked by start identity, so a reused PID is not it.
     [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
-    if [ -n "$dir" ] && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null \
-       && [ -n "$sstamp" ] && [ "$(_recovery_process_identity "$spid" 2>/dev/null)" = "$sstamp" ]; then own=$spid; fi
+    if [ -n "$dir" ] && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null; then
+        # An owner started by 2.11.3 or older saved macOS ps padding: compare trimmed.
+        sstamp=${sstamp%"${sstamp##*[! ]}"}
+        if [ -n "$sstamp" ] && [ "$(_recovery_process_identity "$spid" 2>/dev/null)" = "$sstamp" ]; then own=$spid; fi
+    fi
     for port in "$http" "$socks"; do
         if [ "$port" = "$http" ]; then fix="proxy-config set HTTP_PORT $((http+10))"; else fix="proxy-config set SOCKS_PORT $((socks+10))"; fi
         for pid in $(_listeners "$port"); do

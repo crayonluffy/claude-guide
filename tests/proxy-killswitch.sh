@@ -182,6 +182,9 @@ _port_bound() { [ -n "$(_listeners "$1")" ]; }
 _listeners() { case "$1" in 8080|1080) echo "$$";; esac; }
 printf '%s|%s\n' "$$" 'stale-start' > "$dir/ssh.pid"     # a reused PID is not our ssh
 refuses 'is on proxy port 8080'
+# An owner from 2.11.3 or older (still running after the update) saved macOS padding.
+printf '%s|%s    \n' "$$" "$(_recovery_process_identity $$)" > "$dir/ssh.pid"
+assert test -z "$(_killswitch_check 8080 1080)"
 printf '%s|%s\n' "$$" "$(_recovery_process_identity $$)" > "$dir/ssh.pid"
 printf 'not json' > "$CLAUDE_SETTINGS"
 refuses "Claude's settings"
