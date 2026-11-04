@@ -1,6 +1,6 @@
 # 🚑 Troubleshooting
 
-## Check the ports first (macOS / Linux / WSL)
+## Check the ports first (all platforms)
 
 Run `proxy-status`. The saved default ports and active node ports are shown
 separately. For example, saved HTTP 8080 with main HTTP 8081 means the current
@@ -18,6 +18,12 @@ If a different program holds a port, choose another port in `proxy-config edit`
 and run `proxy-restart`. The kill switch refuses a conflicting program rather
 than silently moving the proxy. Use `proxy-doctor` for connection failures and
 `proxy-status --debug` for raw recovery records.
+
+On native Windows PowerShell, these port/editing features are available from
+2.12.1. Use `proxy-status -Debug` and `proxy-restart -Node sg`; reload another
+window with `. "$HOME\.claude-proxy.ps1"`. `proxy-config edit` opens Notepad.
+If it reports that the file changed in another window, reopen the editor;
+the other window's saved changes have been kept.
 
 ## Start with `proxy-doctor`
 

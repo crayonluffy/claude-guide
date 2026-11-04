@@ -21,6 +21,12 @@ def main():
         commands.append(["zsh", "tests/zsh-smoke.zsh"])
     else:
         print("SKIP: zsh smoke test (zsh unavailable)", flush=True)
+    powershell = os.environ.get("PROXY_TEST_PWSH") or shutil.which("pwsh")
+    if powershell:
+        commands += [[powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(test.relative_to(ROOT))]
+                     for test in sorted((ROOT / "tests").glob("*.ps1"))]
+    else:
+        print("SKIP: PowerShell tests (set PROXY_TEST_PWSH or install pwsh)", flush=True)
     for profile in sorted((ROOT / "scripts").glob("*.sh")):
         commands.append(["bash", "-n", str(profile.relative_to(ROOT))])
         if shutil.which("zsh"):

@@ -74,11 +74,15 @@ To continue your last Claude conversation, type `cc -c`.
 
 ## 🆘 Something does not work?
 
-On macOS/Linux/WSL, `proxy-status` shows saved ports and every active node's
+On all platforms, `proxy-status` shows saved ports and every active node's
 ports. `proxy-config edit` includes an editable port section and the same
 overview. Use `proxy-config use-active` to save the main tunnel's running ports,
 or `proxy-restart` to apply saved settings. A restart on the same ports briefly
 reconnects sessions. If you change local ports, relaunch affected applications.
+
+Windows uses the same `proxy-config edit` and `proxy-config use-active`
+commands. Its editor is Notepad; use `proxy-status -Debug` for detailed recovery
+information (`proxy-status --debug` on macOS/Linux/WSL).
 
 1. Type **`proxy-doctor`**. It examines each part and tells you the problem and the fix.
 2. If the problem continues, **run the installer again** (step 1). This is safe. The installer keeps your settings.

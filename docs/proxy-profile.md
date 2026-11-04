@@ -189,13 +189,13 @@ The automated tests examine the alert sequence, the command arguments, failed al
 | `cc-stop sg` / `cx-stop sg` | Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). |
 | `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
 | `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
-| `proxy-status` | Shows what runs and its ports. On macOS/Linux/WSL, `--debug` adds recovery details. |
+| `proxy-status` | Shows what runs and its ports. `--debug` adds recovery details on macOS/Linux/WSL; Windows uses `-Debug`. |
 | `proxy-doctor` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
 | `proxy-killswitch` | Shows the kill switch. `proxy-killswitch on` / `off` changes it. Refer to [Kill switch](#kill-switch-290). |
 | `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
 | `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |
 | `proxy-on` / `proxy-off` | Sets or clears the proxy settings in the terminal. With the kill switch on, `~/.claude/settings.json` keeps the proxy. |
-| `proxy-config` | Shows settings. On macOS/Linux/WSL, `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports. `set SSH_HOST myvm` saves one value. |
+| `proxy-config` | Shows settings. `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports. `set SSH_HOST myvm` saves one value. |
 | `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
 | `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `proxy-nodes --refresh` (`-Refresh` on Windows) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
 | `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel. Other terminals and the default node do not change. |
@@ -575,7 +575,7 @@ Host jpvpn
     UseKeychain yes      # macOS only
 ```
 
-On macOS/Linux/WSL, `proxy-config edit` shows editable HTTP, SOCKS, remote proxy
+On all platforms, `proxy-config edit` shows editable HTTP, SOCKS, remote proxy
 and SSH ports, plus node HTTP/SOCKS base ports. Its header lists every running
 node owner's server and HTTP/SOCKS/remote ports, including nodes opened with
 `cc --node`, `cx --node` or `chrome-proxy`. That table is informational; check
@@ -603,6 +603,17 @@ restarted. Failed editors or invalid ports leave the saved file unchanged.
 To use another alias, save `proxy-config set SSH_HOST other-vm` and run
 `proxy-restart`. If your admin publishes more nodes, `proxy-node sg` changes
 the default for you. Refer to **[Nodes](proxy-nodes.md)**.
+
+On Windows, the equivalent keys are `HTTP_PORT`, `SOCKS_PORT`,
+`REMOTE_PROXY_PORT`, `SSH_PORT`, `NODE_HTTP_BASE` and `NODE_SOCKS_BASE` in
+`~\.claude-proxy.conf.psd1`, without the `CLAUDE_` prefix. The same commands
+`proxy-config edit`, `proxy-config set HTTP_PORT 8090` and
+`proxy-config use-active` work in PowerShell. Restart a specific node with
+`proxy-restart -Node sg`; use `proxy-status -Debug` for recovery details.
+Notepad edits a temporary copy and the profile validates it before replacing
+the saved file. If another window saves first, reopen the editor to include
+that change. Configuration files and their comments remain in the native
+format for each platform.
 
 ---
 

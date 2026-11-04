@@ -34,6 +34,10 @@ The platform-specific files reject an incompatible OS before writing state.
 `tests/run.py` removes inherited proxy configuration variables, runs isolated
 Python regression tests and the existing shell suites, then checks shell syntax
 and generated-file consistency. Run it on both macOS and Linux to cover the
-native adapters. PowerShell has separate `tests/*.ps1`; its behavior is unchanged
-in 2.12.0. The optional `tests/e2e/run.sh` needs a Linux sshd setup and network
+native adapters. If `pwsh` is on PATH, the runner also executes `tests/*.ps1`.
+For a portable runtime, set `PROXY_TEST_PWSH` to its executable path. PowerShell
+configuration tests use real temporary PSD1 files and recovery leases, with
+only editor/transport boundaries replaced. Native Notepad, Windows process
+behavior and Windows PowerShell 5.1 still require testing on Windows.
+The optional `tests/e2e/run.sh` needs a Linux sshd setup and network
 access; it is not part of this local portable suite.

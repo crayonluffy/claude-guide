@@ -37,6 +37,29 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.12.1 (Windows): active-node configuration parity
+
+- **`proxy-config edit` now lists every running node's ports on Windows too.**
+  The Notepad header distinguishes saved main ports, node base ports and the
+  running HTTP/SOCKS/remote/SSH ports. Missing editable port settings are included.
+- **`proxy-config use-active` saves the main tunnel's running ports.** Editing
+  or setting values preserves pending saved settings and live tunnels separately.
+  Unrelated settings, Unicode and comments remain intact.
+- **Safe editing.** Failed editors and invalid PSD1 files or ports do not replace
+  saved settings. Malformed existing files can be repaired in the editor.
+  If another window saves changes while the editor is open, retry rather than
+  overwriting those changes.
+- **Consistent restart behavior.** A new window adopts the running main port
+  before pinning Claude. Running nodes retain their ports after saved base
+  changes. `proxy-restart` applies saved settings; `proxy-restart -Node sg`
+  affects sg only. Conflicting ports are rejected before stopping a tunnel.
+  Changed local ports require affected applications to be relaunched.
+- **Readable Windows status.** `proxy-status` leads with saved and active ports;
+  `proxy-status -Debug` adds recovery details.
+
+Type `proxy-update`, then open a new PowerShell window. Release tag: `v2.12.1`.
+Shell profiles keep their 2.12.0 behavior, with the version marker aligned.
+
 ### 2.12.0 (macOS, Linux, WSL): visible ports and platform profiles
 
 - **New windows keep the live tunnel's port.** Startup reads the running owner's

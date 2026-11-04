@@ -19,6 +19,9 @@ function chrome-proxy-test-browser { $script:ChromeArgs = @($args) }
 function Get-ChromeProfileDir { param($Base, $Name) return "$Base-$Name" }
 function Get-TunnelHealth { return @{ Status = 'ok' } }
 function Test-Port { param($Port) return $true }
+# This launcher test has no recovery owners; live-node adoption is tested in proxy-config.ps1.
+function Get-RecoveryRoot { [IO.Path]::GetTempPath() }
+function Test-RecoveryOwner { param($Identity) return $false }
 function Confirm-NodeAlias { param($Node) return $true }
 # A node's Chrome uses that node's self-healing tunnel (2.10), not a bare ssh.
 function Start-NodeTunnelOwner { param($Node) $script:TunnelPorts += $Node; return $true }

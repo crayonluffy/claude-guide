@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.12.0'
+$script:PROFILE_VERSION = '2.12.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -134,6 +134,11 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
                       'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
+$script:CONFIG_DEFAULTS = @{}
+foreach ($configKey in $script:CONF_KEYS) {
+    $script:CONFIG_DEFAULTS[$configKey] = Get-Variable -Name $configKey -Scope Script -ValueOnly
+}
+$script:BASE_NO_PROXY_LIST = $script:NO_PROXY_LIST
 if (Test-Path $script:PROXY_CONF) {
     try {
         $cfg = Import-PowerShellDataFile $script:PROXY_CONF
@@ -604,18 +609,42 @@ function Invoke-RecoveryWorker {
 }
 function proxy-restart {
     param([string]$Node)
-    if ($Node -and (Get-NodeSlot $Node 6>$null) -notin @('main',$null)) {
+    $null=Use-RecoveryRecord
+    $slot=if ($Node) { Get-NodeSlot $Node } else { 'main' }
+    if (-not $slot) { throw "Unknown or unprovisioned node '$Node'." }
+    $saved=Get-ProxySavedConfig
+    $requested=if ($slot -eq 'main') {
+        @{Slot='main';HTTP_PORT=$saved.HTTP_PORT;SOCKS_PORT=$saved.SOCKS_PORT}
+    } else { Get-NodeContext -Name $Node -Settings $saved }
+    if (-not $requested) { throw "Cannot use the requested ports for $Node. No tunnel was stopped." }
+    Assert-ProxyRestartPorts $requested
+    if ($slot -ne 'main') {
+        $before=Get-NodeContext $Node
         Write-Host "[Restart] Replacing the $Node tunnel (other nodes keep running)..."
-        $null = tunnel-stop -Node $Node
+        if (-not (tunnel-stop -Node $Node)) { throw "The $Node tunnel could not be stopped." }
+        Use-ProxySavedConfig $saved
         if (-not (Start-NodeTunnelOwner $Node)) { throw "The $Node tunnel could not be started." }
-        return
+        $after=Get-NodeContext $Node
+    } else {
+        $before=@{HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT}
+        Write-Host '[Restart] Replacing the main SSH tunnel using saved settings...'
+        if (-not (tunnel-stop)) { throw 'Previous tunnel could not be stopped; restart was not started.' }
+        Use-ProxySavedConfig $saved
+        tunnel-start
+        $null=Use-RecoveryRecord
+        $after=@{HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT}
+        proxy-on
     }
-    $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
-    $identity=Get-RecoveryIdentity
-    if (Test-RecoveryOwner $identity) { Stop-RecoveryOwner $identity }
-    elseif (-not (tunnel-stop)) { throw 'Previous tunnel could not be stopped; restart was not started.' }
-    Start-RecoveryOwner | Out-Null
-    Write-Host '[Recovery] Restart requested on the same ports; proxy settings remain enabled.'
+    $changed="$($before.HTTP_PORT):$($before.SOCKS_PORT)" -ne "$($after.HTTP_PORT):$($after.SOCKS_PORT)"
+    if ($changed) {
+        Write-Host "[Ports changed] ${slot}: HTTP $($before.HTTP_PORT) -> $($after.HTTP_PORT); SOCKS $($before.SOCKS_PORT) -> $($after.SOCKS_PORT)." -ForegroundColor Yellow
+        Write-Host '[Next] Relaunch existing Claude/Codex/Chrome instances using the changed ports.' -ForegroundColor Yellow
+        Write-Host '       Other windows: . "$HOME\.claude-proxy.ps1" before launching again.' -ForegroundColor DarkGray
+    }
+    $identity=Join-Path (Get-RecoveryRoot) $slot
+    if (-not (Wait-ProxyTransport claude $after.HTTP_PORT $after.SOCKS_PORT $identity)) { throw 'Proxy transport is unavailable after restart. Run proxy-doctor.' }
+    if ($changed) { Write-Host "[OK] Proxy transport answers on HTTP :$($after.HTTP_PORT)." -ForegroundColor Green }
+    else { Write-Host '[OK] Restarted on the same ports; other windows can reconnect.' -ForegroundColor Green }
 }
 
 function Get-RecoveryDesktopTransition {
@@ -1016,7 +1045,7 @@ function proxy-killswitch {
     if ($Action -ne 'status') {
         $running = Test-RecoveryOwner (Join-Path (Get-RecoveryRoot) 'main')
         $script:KILLSWITCH = $Action
-        _conf-write-all
+        Save-ProxyConfigValues @{KILLSWITCH=$script:KILLSWITCH} -NoApply
         if ($Action -eq 'on') {
             $null = Confirm-KillswitchPin
             Write-Host "[OK] Kill switch ON - Claude and Codex cannot go out directly. Saved to $($script:PROXY_CONF)" -ForegroundColor Green
@@ -1354,15 +1383,32 @@ function Get-NodeSlot { param([string]$Name)
 
 # The tunnel settings of a (non-default) node: its ssh alias (which carries user,
 # key and port) and its fixed ports. $null, with the fix, when a port collides.
-function Get-NodeContext { param([string]$Name)
+function Get-NodeContext { param([string]$Name,[hashtable]$Settings)
+    $slot=Get-NodeSlot $Name
+    if (-not $slot) { return $null }
+    if ($slot -eq 'main') {
+        return @{Name=$Name;Slot='main';SSH_HOST=$script:SSH_HOST;SSH_USER=$script:SSH_USER;SSH_KEY=$script:SSH_KEY;SSH_PORT=$script:SSH_PORT
+            HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT;REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT}
+    }
+    $identity=Join-Path (Get-RecoveryRoot) $slot
+    if (-not $Settings -and (Test-RecoveryOwner $identity)) {
+        $record=Get-RecoveryStatus $identity descriptor
+        if ($record.HTTP_PORT -and $record.SOCKS_PORT) {
+            return @{Name=($slot -replace '^node-','');Slot=$slot;SSH_HOST=$record.SSH_HOST;SSH_USER=$record.SSH_USER;SSH_KEY=$record.SSH_KEY;SSH_PORT=$record.SSH_PORT
+                HTTP_PORT=$record.HTTP_PORT;SOCKS_PORT=$record.SOCKS_PORT;REMOTE_PROXY_PORT=$record.REMOTE_PROXY_PORT}
+        }
+    }
     $n = Find-ProxyNode $Name
     if (-not $n) {
         # A plain ssh alias: its local slot; the alias carries user, key and port, and
         # its VM is assumed to run tinyproxy on the same port as the default node.
         if (-not (Test-SshAlias $Name)) { return $null }
-        $n = [pscustomobject]@{ Name=$Name; Alias=$Name; Idx=(Get-NodeLocalSlot $Name); SshPort=22; ProxyPort=$script:REMOTE_PROXY_PORT }
+        $remote=if ($Settings) { $Settings.REMOTE_PROXY_PORT } else { $script:REMOTE_PROXY_PORT }
+        $n = [pscustomobject]@{ Name=$Name; Alias=$Name; Idx=(Get-NodeLocalSlot $Name); SshPort=22; ProxyPort=$remote }
     }
-    $http = $script:NODE_HTTP_BASE + $n.Idx; $socks = $script:NODE_SOCKS_BASE + $n.Idx
+    $httpBase=if ($Settings) { $Settings.NODE_HTTP_BASE } else { $script:NODE_HTTP_BASE }
+    $socksBase=if ($Settings) { $Settings.NODE_SOCKS_BASE } else { $script:NODE_SOCKS_BASE }
+    $http = [int]$httpBase + [int]$n.Idx; $socks = [int]$socksBase + [int]$n.Idx
     if ($http -in @($script:HTTP_PORT, $script:SOCKS_PORT)) {
         Write-Host "[Err] Node '$($n.Name)' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $($script:HTTP_PORT + 100)" -ForegroundColor Red
         return $null
@@ -1549,7 +1595,7 @@ function proxy-nodes {
         if (-not $ok) {
             Remove-Item $tmp -Force -ErrorAction SilentlyContinue
             if ($setSrc -and $Force) {
-                _conf-write-all
+                Save-ProxyConfigValues @{NODES_FROM=$script:NODES_FROM;PROXY_DOMAIN=$script:PROXY_DOMAIN} -NoApply
                 Write-Host "[OK] Node list source saved anyway (-Force): $(Get-NodesSourceDesc) - run 'proxy-nodes -Refresh' once it answers." -ForegroundColor Yellow
             } elseif ($setSrc) {
                 $script:PROXY_DOMAIN = $prevDomain; $script:NODES_FROM = $prevFrom
@@ -1558,7 +1604,7 @@ function proxy-nodes {
             return
         }
         if ($setSrc) {
-            _conf-write-all
+            Save-ProxyConfigValues @{NODES_FROM=$script:NODES_FROM;PROXY_DOMAIN=$script:PROXY_DOMAIN} -NoApply
             Write-Host "[OK] Node list now comes from $(Get-NodesSourceDesc) (saved to $($script:PROXY_CONF))" -ForegroundColor Green
         }
         Move-Item $tmp $script:NODES_CACHE -Force
@@ -1689,7 +1735,9 @@ function proxy-node {
     }
     $script:SSH_HOST = $alias
     if ($pport) { $script:REMOTE_PROXY_PORT = $pport }
-    _conf-write-all
+    $values=@{SSH_HOST=$script:SSH_HOST}
+    if ($pport) { $values.REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT }
+    Save-ProxyConfigValues $values -NoApply
     Write-Host "[OK] Active node: $label ($alias) - saved to $($script:PROXY_CONF)" -ForegroundColor Green
     if ($wasUp) {
         tunnel-start
@@ -2299,19 +2347,22 @@ function cc-stop {
 # ============================================================
 
 function proxy-status {
+    param([switch]$Debug)
     $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
-    proxy-notify status
     $identity=Get-RecoveryIdentity
-    $now=Get-RecoveryTime
-    foreach ($provider in @('claude','codex')) {
-        $st=Get-RecoveryStatus $identity $provider
-        $line="[Recovery] $($provider.PadRight(6)): $($st.phase)"
-        if ($st.phase -in @('recovering','prolonged') -and $null -ne $st.outage_start) { $line+=" for $([int]($now-$st.outage_start))s, $($st.retry_count) retries" }
-        if ($st.event -and $st.event -ne 'none') { $line+=" (last notice: $($st.event))" }
-        Write-Host $line
+    if ($Debug) {
+        proxy-notify status
+        $now=Get-RecoveryTime
+        foreach ($provider in @('claude','codex')) {
+            $st=Get-RecoveryStatus $identity $provider
+            $line="[Recovery] $($provider.PadRight(6)): $($st.phase)"
+            if ($st.phase -in @('recovering','prolonged') -and $null -ne $st.outage_start) { $line+=" for $([int]($now-$st.outage_start))s, $($st.retry_count) retries" }
+            if ($st.event -and $st.event -ne 'none') { $line+=" (last notice: $($st.event))" }
+            Write-Host $line
+        }
+        Write-Host "[Recovery] Ports   : HTTP $($script:HTTP_PORT) / SOCKS $($script:SOCKS_PORT)   sessions: $(Get-RecoverySessionCount $identity)"
+        Write-Host "[Recovery] Logs    : $(Join-Path $identity 'events.log')  ssh: $(Join-Path $identity 'ssh.err')"
     }
-    Write-Host "[Recovery] Ports   : HTTP $($script:HTTP_PORT) / SOCKS $($script:SOCKS_PORT)   sessions: $(Get-RecoverySessionCount $identity)"
-    Write-Host "[Recovery] Logs    : $(Join-Path $identity 'events.log')  ssh: $(Join-Path $identity 'ssh.err')"
     $why=(Get-RecoveryStatus $identity ssh).class
     if ($why) { Write-Host "[!!]  Last ssh error : $(Get-RecoverySshHint $why $script:SSH_HOST)" -ForegroundColor Yellow }
     $t=Get-RecoveryStatus $identity takeover
@@ -2320,6 +2371,11 @@ function proxy-status {
     Write-Host ""
     Write-Host "=== Proxy Status (claude-proxy v$($script:PROFILE_VERSION)) ===" -ForegroundColor Cyan
     Write-Host ""
+    try { foreach ($line in @(Get-ProxyConfigSummary (Get-ProxySavedConfig))) { Write-Host $line } }
+    catch {
+        Write-Host "[Err] Saved configuration cannot be read: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host '      Run proxy-config edit to repair it. Running tunnels were kept.' -ForegroundColor Yellow
+    }
 
     $health = Get-TunnelHealth
     switch ($health.Status) {
@@ -2332,13 +2388,15 @@ function proxy-status {
         'down' {
             Write-Host "[OFF] HTTP tunnel   : not running" -ForegroundColor Red
             Write-Host "[OFF] SOCKS tunnel  : not running" -ForegroundColor Red
+            Write-Host '      Run cc to start it; proxy-doctor explains connection failures.' -ForegroundColor Yellow
         }
         'stale' {
-            Write-Host "[!!]  Tunnel BROKEN : stale ssh (PID $($health.OwnerPid)) - run 'cc' to auto-heal (or 'cc-stop')" -ForegroundColor Yellow
+            Write-Host "[!!]  Tunnel BROKEN : stale ssh (PID $($health.OwnerPid)) - run proxy-restart, then retry cc" -ForegroundColor Yellow
         }
         'foreign' {
             Write-Host "[!!]  No tunnel     : port $($script:HTTP_PORT) is used by '$($health.OwnerName)' (PID $($health.OwnerPid))" -ForegroundColor Red
-            Write-Host "      Run 'cc' - it leaves that app alone and uses the next free port automatically." -ForegroundColor Yellow
+            if (Test-KillswitchOn) { Write-Host '      Choose another port: proxy-config edit, then proxy-restart.' -ForegroundColor Yellow }
+            else { Write-Host '      Run cc to use the next free port, or choose one with proxy-config edit.' -ForegroundColor Yellow }
         }
     }
 
@@ -2356,8 +2414,8 @@ function proxy-status {
     Write-NodeStatusLines
 
     Write-Host ""
-    Write-Host "Current external IP:" -ForegroundColor Cyan
-    curl.exe -s --max-time 5 ipinfo.io
+    Write-Host 'Next: proxy-config edit (ports), proxy-restart (reconnect), proxy-doctor (diagnose).'
+    Write-Host 'More detail: proxy-status -Debug'
     Write-Host ""
 }
 
@@ -2523,6 +2581,191 @@ function _conf-write-all {
     Set-Content -Path $script:PROXY_CONF -Value $lines -Encoding ascii
 }
 
+function Test-ProxyConfigPort { param($Value)
+    return ("$Value" -match '^[1-9][0-9]{0,4}$' -and [long]$Value -le 65535)
+}
+function Assert-ProxyRestartPorts { param([hashtable]$Context)
+    $http=$Context.HTTP_PORT; $socks=$Context.SOCKS_PORT
+    if (-not (Test-ProxyConfigPort $http) -or -not (Test-ProxyConfigPort $socks) -or $http -eq $socks) {
+        throw 'Saved HTTP/SOCKS ports must be different valid ports. No tunnel was stopped. Fix: proxy-config edit.'
+    }
+    foreach ($dir in @(Get-RecoveryOwnedDirs -All)) {
+        $slot=Split-Path -Leaf $dir
+        if ($slot -eq $Context.Slot -or ($Context.Slot -eq 'main' -and $slot -notlike 'node-*')) { continue }
+        $record=Get-RecoveryStatus $dir descriptor
+        if ($http -in @($record.HTTP_PORT,$record.SOCKS_PORT) -or $socks -in @($record.HTTP_PORT,$record.SOCKS_PORT)) {
+            throw "Requested HTTP :$http / SOCKS :$socks conflicts with active $slot (HTTP :$($record.HTTP_PORT) / SOCKS :$($record.SOCKS_PORT)). No tunnel was stopped. Fix: proxy-config edit."
+        }
+    }
+}
+function Get-ProxySavedConfig { param([string]$Path=$script:PROXY_CONF,[switch]$SkipPortValidation)
+    $saved = @{}
+    foreach ($k in $script:CONF_KEYS) {
+        if ($script:CONFIG_DEFAULTS -and $script:CONFIG_DEFAULTS.ContainsKey($k)) { $saved[$k]=$script:CONFIG_DEFAULTS[$k] }
+        else { $saved[$k]=Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue }
+    }
+    $ports = @{HTTP_PORT=8080;SOCKS_PORT=1080;REMOTE_PROXY_PORT=8888;SSH_PORT=22;NODE_HTTP_BASE=8180;NODE_SOCKS_BASE=1180}
+    foreach ($k in $ports.Keys) { if (-not $saved.ContainsKey($k) -or $null -eq $saved[$k]) { $saved[$k]=$ports[$k] } }
+    if (Test-Path -LiteralPath $Path) {
+        $data=Import-PowerShellDataFile -LiteralPath $Path -ErrorAction Stop
+        foreach ($k in $data.Keys) { $saved[$k]=$data[$k] }
+    }
+    if (-not $SkipPortValidation) {
+        foreach ($k in $ports.Keys) {
+            if (-not (Test-ProxyConfigPort $saved[$k])) { throw "$k must be a port from 1 to 65535 without leading zeroes. Fix: proxy-config edit." }
+            $saved[$k]=[int]$saved[$k]
+        }
+    }
+    return $saved
+}
+function Get-ProxyActiveSshPort { param($Record)
+    try {
+        $a=@('-G')
+        if ($Record.SSH_KEY) { $a+=@('-i',"$($Record.SSH_KEY)",'-p',"$($Record.SSH_PORT)") }
+        $destination=if ($Record.SSH_USER) { "$($Record.SSH_USER)@$($Record.SSH_HOST)" } else { "$($Record.SSH_HOST)" }
+        $a+=$destination
+        foreach ($line in @(& ssh @a 2>$null)) { if ("$line" -match '^port\s+(\d+)\s*$') { return $Matches[1] } }
+    } catch { }
+    return 'unknown'
+}
+function Get-ProxyConfigSummary { param([hashtable]$Saved)
+    "Saved default ports: HTTP $($Saved.HTTP_PORT) | SOCKS $($Saved.SOCKS_PORT) | remote proxy $($Saved.REMOTE_PROXY_PORT) | SSH $($Saved.SSH_PORT)"
+    "Saved node bases: HTTP $($Saved.NODE_HTTP_BASE) | SOCKS $($Saved.NODE_SOCKS_BASE) (base + node slot)"
+    'Active node ports (running owners; check connection with proxy-status):'
+    '  {0,-16} {1,-22} {2,-7} {3,-7} {4,-7} {5}' -f 'Node','Server','HTTP','SOCKS','Remote','SSH'
+    $found=$false; $different=$false
+    foreach ($dir in @(Get-RecoveryOwnedDirs -All)) {
+        $record=Get-RecoveryStatus $dir descriptor
+        if (-not $record.HTTP_PORT) { continue }
+        $name=(Split-Path -Leaf $dir) -replace '^node-',''
+        '  {0,-16} {1,-22} {2,-7} {3,-7} {4,-7} {5}' -f $name,$record.SSH_HOST,$record.HTTP_PORT,$record.SOCKS_PORT,$record.REMOTE_PROXY_PORT,(Get-ProxyActiveSshPort $record)
+        $found=$true
+        if ((Split-Path -Leaf $dir) -eq 'main' -and
+            "$($record.HTTP_PORT):$($record.SOCKS_PORT):$($record.REMOTE_PROXY_PORT)" -ne "$($Saved.HTTP_PORT):$($Saved.SOCKS_PORT):$($Saved.REMOTE_PROXY_PORT)") {
+            $different=$true
+        }
+    }
+    if (-not $found) { '  None. Run cc to start the default tunnel.' }
+    if ($different) {
+        'Saved defaults differ from the running main tunnel.'
+        '  Keep running ports: proxy-config use-active'
+        '  Apply saved ports:  proxy-restart (relaunch apps afterward if local ports change)'
+    }
+}
+function Update-ProxyConfigText { param([string]$Text,[hashtable]$Values)
+    $body=$Text -replace '(?ms)^# BEGIN CLAUDE PROXY PORT STATUS\r?\n.*?^# END CLAUDE PROXY PORT STATUS\r?\n',''
+    if (-not $body.Trim()) { $body="@{`r`n}`r`n" }
+    $tokens=$null; $errors=$null
+    $ast=[Management.Automation.Language.Parser]::ParseInput($body,[ref]$tokens,[ref]$errors)
+    if ($errors.Count) { throw 'Saved configuration contains invalid PowerShell syntax.' }
+    $table=$ast.Find({param($n) $n -is [Management.Automation.Language.HashtableAst]},$false)
+    if (-not $table) { throw 'Configuration must contain a PowerShell data hashtable.' }
+    $edits=@(); $missing=@()
+    foreach ($key in $Values.Keys) {
+        $value=$Values[$key]
+        $literal=if ($value -is [int] -or $value -is [long]) { "$value" } else { "'$([string]$value -replace "'","''")'" }
+        $pair=@($table.KeyValuePairs | Where-Object { $_.Item1.SafeGetValue() -ieq $key })
+        if ($pair.Count) {
+            $extent=$pair[0].Item2.Extent
+            $edits+=@{Start=$extent.StartOffset;Length=$extent.EndOffset-$extent.StartOffset;Text=$literal}
+        } else { $missing+="    $key = $literal`r`n" }
+    }
+    if ($missing.Count) { $edits+=@{Start=$table.Extent.EndOffset-1;Length=0;Text="`r`n"+($missing -join '')} }
+    foreach ($edit in @($edits | Sort-Object { $_.Start } -Descending)) { $body=$body.Remove($edit.Start,$edit.Length).Insert($edit.Start,$edit.Text) }
+    return $body
+}
+function Write-ProxyConfigCandidate { param([string]$Path,[string]$Body,[hashtable]$Saved)
+    $ErrorActionPreference='Stop'
+    $lines=@('# BEGIN CLAUDE PROXY PORT STATUS',"# Editing settings for: $($script:PROXY_CONF)")
+    $lines+=@(Get-ProxyConfigSummary $Saved | ForEach-Object { "# $_" })
+    $lines+=@('# Running node ports above are a snapshot. Edit the settings below.',
+        '# Main ports: HTTP_PORT / SOCKS_PORT. Node ports: NODE_HTTP_BASE / NODE_SOCKS_BASE + slot.',
+        '# Save and exit, then proxy-restart (or proxy-restart -Node sg) to apply changes.',
+        '# If local ports change, relaunch affected applications after the restart.',
+        '# SSH aliases can override SSH_PORT; edit their Port in ~/.ssh/config when needed.',
+        '# END CLAUDE PROXY PORT STATUS')
+    [IO.File]::WriteAllText($Path,($lines -join "`r`n")+"`r`n"+$Body,[Text.UTF8Encoding]::new($true))
+}
+function Use-ProxySavedConfig { param([hashtable]$Saved)
+    foreach ($key in $script:CONF_KEYS) { if ($Saved.ContainsKey($key)) { Set-Variable -Name $key -Value $Saved[$key] -Scope Script } }
+    if ($script:BASE_NO_PROXY_LIST) { $script:NO_PROXY_LIST=$script:BASE_NO_PROXY_LIST }
+    if ($script:NO_PROXY_EXTRA) { $script:NO_PROXY_LIST="$($script:NO_PROXY_LIST),$($script:NO_PROXY_EXTRA)" }
+    $null=Use-RecoveryRecord
+    $message=Confirm-KillswitchPin
+    if ($message) { Write-Host $message -ForegroundColor Yellow }
+    Set-PlainCommands
+}
+function Complete-ProxyConfigSave { param([string]$Candidate,[string]$OriginalText,[bool]$OriginalExists,[switch]$NoApply)
+    $ErrorActionPreference='Stop'
+    $saved=Get-ProxySavedConfig -Path $Candidate
+    $guard=$null
+    try {
+        try { $guard=[IO.File]::Open("$($script:PROXY_CONF).write.lock",[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+        catch [IO.IOException] { throw 'Another window is saving configuration. Retry after it finishes.' }
+        $exists=[IO.File]::Exists($script:PROXY_CONF)
+        if ($exists -ne $OriginalExists -or ($exists -and [IO.File]::ReadAllText($script:PROXY_CONF) -cne $OriginalText)) {
+            throw 'Configuration changed in another window. Its saved changes were kept; reopen proxy-config edit and retry.'
+        }
+        if ($exists) { [IO.File]::Replace($Candidate,$script:PROXY_CONF,"$($script:PROXY_CONF).bak") }
+        else { [IO.File]::Move($Candidate,$script:PROXY_CONF) }
+    } finally { if ($guard) { $guard.Dispose() } }
+    if ($NoApply) { return }
+    Use-ProxySavedConfig $saved
+    Write-Host "[OK] Saved settings to $($script:PROXY_CONF). Running tunnels were kept." -ForegroundColor Green
+    foreach ($line in @(Get-ProxyConfigSummary $saved)) { Write-Host $line }
+    Write-Host 'If you changed the server or ports: proxy-restart (or proxy-restart -Node sg).' -ForegroundColor Yellow
+    Write-Host 'Changing local ports requires relaunching applications that use the old ports.' -ForegroundColor Yellow
+    Write-Host 'Other windows: . "$HOME\.claude-proxy.ps1" before launching again.' -ForegroundColor DarkGray
+}
+function Invoke-ProxyConfigEditor { param([string]$Path)
+    $process=Start-Process notepad.exe -ArgumentList ('"'+$Path+'"') -Wait -PassThru -ErrorAction Stop
+    return $process.ExitCode
+}
+function Save-ProxyConfigValues { param([hashtable]$Values,[switch]$NoApply)
+    $ErrorActionPreference='Stop'
+    $saved=Get-ProxySavedConfig
+    $parent=Split-Path $script:PROXY_CONF
+    $null=[IO.Directory]::CreateDirectory($parent)
+    $candidate=Join-Path $parent ('.claude-proxy-edit-'+[guid]::NewGuid()+'.psd1')
+    try {
+        $existed=[IO.File]::Exists($script:PROXY_CONF)
+        $text=if ($existed) { [IO.File]::ReadAllText($script:PROXY_CONF) } else { '' }
+        $body=Update-ProxyConfigText -Text $text -Values $Values
+        foreach ($key in $Values.Keys) { $saved[$key]=$Values[$key] }
+        Write-ProxyConfigCandidate $candidate $body $saved
+        Complete-ProxyConfigSave $candidate $text $existed -NoApply:$NoApply
+    } finally { if ([IO.File]::Exists($candidate)) { [IO.File]::Delete($candidate) } }
+}
+function Edit-ProxyConfig {
+    $ErrorActionPreference='Stop'
+    try { $saved=Get-ProxySavedConfig -SkipPortValidation }
+    catch {
+        $saved=Get-ProxySavedConfig -Path (Join-Path ([IO.Path]::GetTempPath()) ([guid]::NewGuid().ToString()+'.psd1')) -SkipPortValidation
+        Write-Host '[Warn] Saved PSD1 is malformed. Repair it in the editor; it is kept until valid changes are saved.' -ForegroundColor Yellow
+    }
+    $parent=Split-Path $script:PROXY_CONF
+    $null=[IO.Directory]::CreateDirectory($parent)
+    $candidate=Join-Path $parent ('.claude-proxy-edit-'+[guid]::NewGuid()+'.psd1')
+    try {
+        $existed=[IO.File]::Exists($script:PROXY_CONF)
+        $text=if ($existed) { [IO.File]::ReadAllText($script:PROXY_CONF) } else { '' }
+        try {
+            $existing=if ($text) { Import-PowerShellDataFile -LiteralPath $script:PROXY_CONF } else { @{} }
+            $missing=@{}
+            foreach ($key in @('HTTP_PORT','SOCKS_PORT','REMOTE_PROXY_PORT','SSH_PORT','NODE_HTTP_BASE','NODE_SOCKS_BASE')) {
+                if (-not $existing.ContainsKey($key)) { $missing[$key]=[int]$saved[$key] }
+            }
+            $body=Update-ProxyConfigText -Text $text -Values $missing
+        } catch {
+            $body=$text -replace '(?ms)^# BEGIN CLAUDE PROXY PORT STATUS\r?\n.*?^# END CLAUDE PROXY PORT STATUS\r?\n',''
+        }
+        Write-ProxyConfigCandidate $candidate $body $saved
+        $exitCode=Invoke-ProxyConfigEditor $candidate
+        if ($exitCode -ne 0) { throw "Editor exited with code $exitCode; settings were not saved." }
+        Complete-ProxyConfigSave $candidate $text $existed
+    } finally { if ([IO.File]::Exists($candidate)) { [IO.File]::Delete($candidate) } }
+}
+
 function proxy-config {
     param([string]$Action = 'show', [string]$Key, [string]$Value)
     switch ($Action.ToLower()) {
@@ -2532,45 +2775,42 @@ function proxy-config {
             if (Test-Path $script:PROXY_CONF) { Write-Host "  file: $($script:PROXY_CONF)" }
             else { Write-Host "  file: $($script:PROXY_CONF)  (not created yet - built-in defaults in use)" -ForegroundColor Yellow }
             Write-Host ""
+            $saved=Get-ProxySavedConfig
+            foreach ($line in @(Get-ProxyConfigSummary $saved)) { Write-Host $line }
+            Write-Host "`nAll saved settings:"
             foreach ($k in $script:CONF_KEYS) {
-                $v = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+                $v = $saved[$k]
                 Write-Host ("  {0,-18} = {1}" -f $k, $v)
             }
             Write-Host ("  {0,-18} = {1}" -f 'NO_PROXY_LIST', $script:NO_PROXY_LIST)
             Write-Host ""
             Write-Host "  proxy-config edit              open the file in Notepad" -ForegroundColor DarkGray
             Write-Host "  proxy-config set KEY VALUE     e.g. proxy-config set SSH_HOST myvm" -ForegroundColor DarkGray
+            Write-Host "  proxy-config use-active        save the main tunnel's running ports" -ForegroundColor DarkGray
             Write-Host "  proxy-config path              print the file path" -ForegroundColor DarkGray
             Write-Host ""
         }
         'path' { $script:PROXY_CONF }
         'edit' {
-            if (-not (Test-Path $script:PROXY_CONF)) { _conf-write-all }
-            Start-Process notepad.exe -ArgumentList "`"$($script:PROXY_CONF)`"" -Wait
-            if (_reload-profile) {
-                Write-Host "[OK] Saved and loaded in this window (server '$($script:SSH_HOST)'). Other open windows: . '$($script:PROFILE_PATH)'" -ForegroundColor Green
-            } else {
-                Write-Host "[OK] Saved. Load the new settings with:  . '$($script:PROFILE_PATH)'   (new windows pick them up automatically)" -ForegroundColor Green
-            }
+            Edit-ProxyConfig
+        }
+        'use-active' {
+            if (-not (Use-RecoveryRecord)) { throw 'No active main tunnel. Run cc first, or choose ports with proxy-config edit.' }
+            Save-ProxyConfigValues @{HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT;REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT;SSH_PORT=$script:SSH_PORT}
         }
         'set' {
-            if (-not $Key -or $null -eq $Value) {
-                Write-Host "usage: proxy-config set KEY VALUE   (KEY = one of: $($script:CONF_KEYS -join ', '))" -ForegroundColor Yellow
-                return
-            }
+            if (-not $Key -or -not $PSBoundParameters.ContainsKey('Value')) { throw 'usage: proxy-config set KEY VALUE' }
             $k = $script:CONF_KEYS | Where-Object { $_ -ieq $Key } | Select-Object -First 1
             if (-not $k) {
                 Write-Host "[Err] Unknown key '$Key'. Valid: $($script:CONF_KEYS -join ', ')" -ForegroundColor Red
                 return
             }
-            $v = if ($Value -match '^\d+$') { [int]$Value } else { $Value }
-            Set-Variable -Name $k -Value $v -Scope Script
-            _conf-write-all
-            if ($k -in @('HTTP_PORT','KILLSWITCH','SYNC_SETTINGS')) { $m = Confirm-KillswitchPin; if ($m) { Write-Host $m -ForegroundColor Yellow } }
-            if ($k -eq 'PLAIN_COMMANDS') { Set-PlainCommands }
-            Write-Host "[OK] $k = $v saved to $($script:PROXY_CONF) and applied in this window." -ForegroundColor Green
+            $portKeys=@('HTTP_PORT','SOCKS_PORT','REMOTE_PROXY_PORT','SSH_PORT','NODE_HTTP_BASE','NODE_SOCKS_BASE')
+            if ($k -in $portKeys -and -not (Test-ProxyConfigPort $Value)) { throw "$k must be a port from 1 to 65535 without leading zeroes." }
+            $v=if ($k -in $portKeys -or $Value -match '^\d{1,9}$') { [int]$Value } else { $Value }
+            Save-ProxyConfigValues @{$k=$v}
         }
-        default { Write-Host "usage: proxy-config [show|edit|set KEY VALUE|path]" -ForegroundColor Yellow }
+        default { Write-Host "usage: proxy-config [show|edit|set KEY VALUE|use-active|path]" -ForegroundColor Yellow }
     }
 }
 
@@ -3123,7 +3363,7 @@ function cc-help {
     Write-Host "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx)" -ForegroundColor DarkGray
     Write-Host "  proxy-notify test - show a real desktop test alert (no proxy/session changes)" -ForegroundColor DarkGray
     Write-Host "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)" -ForegroundColor DarkGray
-    Write-Host "  proxy-status    - Show what's running + your external IP" -ForegroundColor DarkGray
+    Write-Host "  proxy-status    - Show saved/active node ports and tunnel status (-Debug for recovery detail)" -ForegroundColor DarkGray
     Write-Host "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix" -ForegroundColor DarkGray
     Write-Host "  cc-install      - Check / install / update Node.js, Claude Code and Codex (-Check: report only)" -ForegroundColor DarkGray
     Write-Host ""
@@ -3139,7 +3379,7 @@ function cc-help {
     Write-Host "  proxy-nodes -From jpvpn - get the node list privately from a VM over SSH (-Domain <d>: public DNS)" -ForegroundColor DarkGray
     Write-Host "" -ForegroundColor DarkGray
     Write-Host "  -- settings & updates --" -ForegroundColor DarkGray
-    Write-Host "  proxy-config    - Show your settings (edit / set KEY VALUE) - stored in ~\.claude-proxy.conf.psd1" -ForegroundColor DarkGray
+    Write-Host "  proxy-config    - Show saved settings and active ports (edit / set KEY VALUE / use-active)" -ForegroundColor DarkGray
     Write-Host "  proxy-update    - Fetch the latest version of this profile; your settings are kept" -ForegroundColor DarkGray
     Write-Host "  proxy-shortcut  - Desktop shortcut that opens a window with cc/cx ready (no `$PROFILE needed)" -ForegroundColor DarkGray
     Write-Host ""
@@ -3165,6 +3405,7 @@ if ($RecoveryWorker) {
 
 # Kill switch: make sure Claude's settings point at the tunnel (also protects IDE
 # launches that never run cc); silent when nothing changes. Then plain commands.
+$null=Use-RecoveryRecord
 try { $ksMsg = Confirm-KillswitchPin; if ($ksMsg) { Write-Host $ksMsg -ForegroundColor Yellow } } catch { }
 Set-PlainCommands
 
