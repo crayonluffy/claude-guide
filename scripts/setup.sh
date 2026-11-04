@@ -182,7 +182,12 @@ ensure_deps
 # --- 0b. Fetch the profile now: the node lookup below reuses its functions ---
 tmp_profile=$(mktemp)
 PROFILE_OK=0
-if curl -fsSL "$REPO_RAW/claude-proxy.sh" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
+case "$(uname -s)" in
+    Darwin) PROFILE_DOWNLOAD=claude-proxy-macos.sh;;
+    Linux) PROFILE_DOWNLOAD=claude-proxy-linux.sh;;
+    *) echo '[Err] Supported platforms: macOS, Linux and WSL.'; exit 1;;
+esac
+if curl -fsSL "$REPO_RAW/$PROFILE_DOWNLOAD" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
    && grep -q '^CLAUDE_PROXY_VERSION=' "$tmp_profile"; then
     PROFILE_OK=1
 fi

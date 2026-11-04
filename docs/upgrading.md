@@ -37,6 +37,35 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.12.0 (macOS, Linux, WSL): visible ports and platform profiles
+
+- **New windows keep the live tunnel's port.** Startup reads the running owner's
+  port before writing Claude's shared settings. A live tunnel on 8081 is no
+  longer overwritten with the default 8080 when another window opens.
+- **`proxy-config edit` includes ports in existing config files.** It shows saved
+  defaults, node base ports and HTTP/SOCKS/remote ports for every running node
+  owner. The running-node table is a snapshot; edit the settings below it.
+- **Choose how to handle saved/running differences.** `proxy-config use-active`
+  saves the main tunnel's running ports. `proxy-restart` now reads saved settings
+  after stopping the old tunnel. Use `proxy-restart sg` for a specific node.
+  Configuration edits keep tunnels running until you explicitly restart them.
+  Saved node base changes also keep existing node ports until their restart.
+  When local ports change, relaunch affected applications; they retain old URLs.
+  A restart rejects conflicts with another active node before stopping anything.
+- **Safer editing.** Failed editors, invalid shell syntax and invalid ports do
+  not replace the saved file. Ports must be 1–65535 without leading zeroes.
+  `$VISUAL` or `$EDITOR` can include flags or an executable path with spaces.
+- **Readable status.** `proxy-status` shows saved/active ports and useful next
+  commands. `proxy-status --debug` adds raw recovery details.
+- **Platform downloads.** Separate standalone macOS and Linux/WSL profiles are
+  built from a shared core and OS adapters. Existing commands and installation
+  paths stay the same. macOS diagnostics avoid Linux package-manager advice.
+  The active SSH column resolves alias settings with `ssh -G`.
+- **Bash 3.2:** empty SSH/launcher argument arrays work with `set -u` enabled.
+
+PowerShell retains its existing behavior; its version marker is aligned.
+Type `proxy-update`, then open a new terminal window. Release tag: `v2.12.0`.
+
 ### 2.11.5 (macOS): kill switch accepts a tunnel started before the update
 
 - **Fixed: right after the update to 2.11.4, `cc` stopped with `[Kill switch] ssh (PID ...) is on proxy port 8080, not the tunnel`.** The tunnel was still run by the owner from 2.11.3, which saved its ssh start time in the old format. The kill switch now reads both formats.

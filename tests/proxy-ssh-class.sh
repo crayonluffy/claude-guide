@@ -116,6 +116,7 @@ CLAUDE_PROXY_VERSION=test CLAUDE_PROXY_CONF="$scratch/none.conf"   # set by the 
 _tunnel_health() { echo down; }
 _node_active_name() { :; }
 proxy-notify() { :; }
+_conf_port_summary() { :; }  # Config summary is covered by test_config.py.
 curl() { :; }
 out=$(proxy-status 2>&1)
 case "$out" in *'Last ssh error'*'SSH login to jp was refused'*) ;; *) echo "FAIL: proxy-status hides the reason" >&2; exit 1;; esac

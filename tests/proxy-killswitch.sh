@@ -5,7 +5,7 @@
 set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
 src="${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}"
-fn() { local f; for f in "$@"; do eval "$(sed -n "/^$f() {/,/^}/p" "$src")"; done; }
+fn() { local f; for f in "$@"; do eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$src")"; done; }
 eval "$(grep '^_CLAUDE_API_HOSTS=' "$src")"
 fn _noproxy_exempts
 assert() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
@@ -71,10 +71,11 @@ CLAUDE_KILLSWITCH=on
 out=$(_killswitch_ensure_pin)
 assert test "$(pin HTTPS_PROXY)" = http://127.0.0.1:8080
 case "$out" in *'[Kill switch]'*) ;; *) echo "FAIL: no notice when pinning: $out" >&2; exit 1;; esac
-rm -f "$CLAUDE_SETTINGS.bak"; before=$(stat -c %Y.%s "$CLAUDE_SETTINGS"); sleep 1
+file_stamp() { python3 -c 'import os,sys; s=os.stat(sys.argv[1]); print(s.st_mtime_ns,s.st_size)' "$1"; }
+rm -f "$CLAUDE_SETTINGS.bak"; before=$(file_stamp "$CLAUDE_SETTINGS"); sleep 1
 out=$(_killswitch_ensure_pin)
 assert test -z "$out"
-assert test "$(stat -c %Y.%s "$CLAUDE_SETTINGS")" = "$before"
+assert test "$(file_stamp "$CLAUDE_SETTINGS")" = "$before"
 assert test ! -e "$CLAUDE_SETTINGS.bak"
 CLAUDE_HTTP_PORT=8081
 _killswitch_ensure_pin >/dev/null

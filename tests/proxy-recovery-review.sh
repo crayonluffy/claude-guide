@@ -57,7 +57,7 @@ echo 'PASS: owned and foreign port classification'
 mkdir -p "$scratch/contest"
 for ((n=0;n<12;n++));do
  (
-  self=$BASHPID
+  self=$(exec sh -c 'echo $PPID')
   if _recovery_claim "$scratch/contest" "$self";then
    printf '%s\n' "$self" > "$scratch/contest/winner.$self"
    sleep 2

@@ -1,5 +1,24 @@
 # 🚑 Troubleshooting
 
+## Check the ports first (macOS / Linux / WSL)
+
+Run `proxy-status`. The saved default ports and active node ports are shown
+separately. For example, saved HTTP 8080 with main HTTP 8081 means the current
+tunnel uses 8081. A new window keeps using that live tunnel.
+
+`proxy-config edit` shows editable defaults and a snapshot of every running
+node's ports. Use `proxy-config use-active` to save the running main ports,
+or edit them and run `proxy-restart` to apply the saved values. A restart on
+unchanged ports briefly reconnects sessions; `proxy-restart sg` affects sg only.
+If local ports change, relaunch affected applications and source
+`~/.claude-proxy.sh` in other shells before relaunching. A failed editor or
+invalid port does not replace your saved settings.
+
+If a different program holds a port, choose another port in `proxy-config edit`
+and run `proxy-restart`. The kill switch refuses a conflicting program rather
+than silently moving the proxy. Use `proxy-doctor` for connection failures and
+`proxy-status --debug` for raw recovery records.
+
 ## Start with `proxy-doctor`
 
 Type `proxy-doctor`. It examines each part of the setup and shows one line for each part:

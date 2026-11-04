@@ -189,13 +189,13 @@ The automated tests examine the alert sequence, the command arguments, failed al
 | `cc-stop sg` / `cx-stop sg` | Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). |
 | `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
 | `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
-| `proxy-status` | Shows what runs, and your current external IP address. |
+| `proxy-status` | Shows what runs and its ports. On macOS/Linux/WSL, `--debug` adds recovery details. |
 | `proxy-doctor` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
 | `proxy-killswitch` | Shows the kill switch. `proxy-killswitch on` / `off` changes it. Refer to [Kill switch](#kill-switch-290). |
 | `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
 | `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |
 | `proxy-on` / `proxy-off` | Sets or clears the proxy settings in the terminal. With the kill switch on, `~/.claude/settings.json` keeps the proxy. |
-| `proxy-config` | Shows your settings. `proxy-config edit` opens the settings file. `proxy-config set SSH_HOST myvm` changes one value. |
+| `proxy-config` | Shows settings. On macOS/Linux/WSL, `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports. `set SSH_HOST myvm` saves one value. |
 | `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
 | `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `proxy-nodes --refresh` (`-Refresh` on Windows) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
 | `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel. Other terminals and the default node do not change. |
@@ -575,7 +575,34 @@ Host jpvpn
     UseKeychain yes      # macOS only
 ```
 
-To use a *different* alias, or to change a port, change the settings file: `proxy-config set SSH_HOST other-vm`, `proxy-config set REMOTE_PROXY_PORT 8899`, … If your admin publishes more nodes (JP / SG / US), `proxy-node sg` does this for you. Refer to **[Nodes](proxy-nodes.md)**.
+On macOS/Linux/WSL, `proxy-config edit` shows editable HTTP, SOCKS, remote proxy
+and SSH ports, plus node HTTP/SOCKS base ports. Its header lists every running
+node owner's server and HTTP/SOCKS/remote ports, including nodes opened with
+`cc --node`, `cx --node` or `chrome-proxy`. That table is informational; check
+connection health with `proxy-status`.
+
+Edit `CLAUDE_HTTP_PORT` / `CLAUDE_SOCKS_PORT` for the main tunnel. Other nodes
+use `CLAUDE_NODE_HTTP_BASE` / `CLAUDE_NODE_SOCKS_BASE` plus their catalogue slot.
+Changing a node base affects subsequent starts of all non-default nodes;
+restart each affected node explicitly with `proxy-restart <node>` when ready.
+
+```bash
+proxy-config use-active          # save the main tunnel's running ports
+proxy-config set HTTP_PORT 8090  # save another port
+proxy-restart                   # reconnect main tunnel using saved settings
+```
+
+`edit` and `set` save without restarting tunnels. A restart on unchanged ports
+briefly reconnects sessions; `proxy-restart sg` affects only sg. If local ports
+change, relaunch affected Claude/Codex/Chrome instances because they retain the
+old proxy URLs. In other shells, source `~/.claude-proxy.sh` before relaunching.
+Conflicts with another active node are rejected before any tunnel is stopped.
+A new terminal keeps adopting a running owner's ports until that owner is
+restarted. Failed editors or invalid ports leave the saved file unchanged.
+
+To use another alias, save `proxy-config set SSH_HOST other-vm` and run
+`proxy-restart`. If your admin publishes more nodes, `proxy-node sg` changes
+the default for you. Refer to **[Nodes](proxy-nodes.md)**.
 
 ---
 

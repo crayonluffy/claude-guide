@@ -74,6 +74,12 @@ To continue your last Claude conversation, type `cc -c`.
 
 ## 🆘 Something does not work?
 
+On macOS/Linux/WSL, `proxy-status` shows saved ports and every active node's
+ports. `proxy-config edit` includes an editable port section and the same
+overview. Use `proxy-config use-active` to save the main tunnel's running ports,
+or `proxy-restart` to apply saved settings. A restart on the same ports briefly
+reconnects sessions. If you change local ports, relaunch affected applications.
+
 1. Type **`proxy-doctor`**. It examines each part and tells you the problem and the fix.
 2. If the problem continues, **run the installer again** (step 1). This is safe. The installer keeps your settings.
 3. Send the output of `proxy-doctor` to your admin.
@@ -84,6 +90,10 @@ To continue your last Claude conversation, type `cc -c`.
 |---|---|
 | `proxy-update` | This setup |
 | `cc-install` | Node.js, Claude Code and Codex |
+
+The installer and updater automatically choose a standalone macOS or Linux/WSL
+profile. Both share the same tunnel code. See
+[maintaining the shell profiles](docs/building-shell-profiles.md).
 
 ---
 

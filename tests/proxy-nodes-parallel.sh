@@ -4,9 +4,11 @@
 set -eu
 repo=$(cd "$(dirname "$0")/.." && pwd)
 src="${PROXY_RECOVERY_SOURCE:-$repo/scripts/claude-proxy.sh}"
-fn() { local f; for f in "$@"; do eval "$(sed -n "/^$f() {/,/^}/p" "$src")"; done; }
+fn() { local f; for f in "$@"; do eval "$(sed -n '/^'"$f"'() {/,/^}/p' "$src")"; done; }
 assert() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
+export XDG_STATE_HOME="$scratch/state"
+eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$src")"
 fn _nodes_tsv _node_lookup _node_provisioned _node_slot _node_ctx
 cat > "$scratch/nodes.json" <<'EOF'
 { "nodes": [
@@ -50,7 +52,6 @@ CLAUDE_NODE_SOCKS_BASE=1180
 echo 'PASS: node ports that collide with the main ports are refused with the fix'
 
 # 4) One owner per node: started in the node's context, found again, stopped alone.
-eval "$(sed -n '/^# BEGIN PROXY RECOVERY$/,/^# END PROXY RECOVERY$/p' "$src")"
 eval "$(sed -n '/^# Compatibility entry points/,/^# PIDs of Claude/p' "$src" | sed '$d')"
 fn tunnel-stop _node_tunnel_up tunnel-start _recovery_failure_report _node_ensure_alias _ssh_config_has_alias
 export XDG_STATE_HOME="$scratch/state" CLAUDE_TUNNEL_LOG="$scratch/tunnel.log"

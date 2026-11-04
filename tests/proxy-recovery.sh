@@ -143,7 +143,7 @@ echo 'PASS: Bash isolated simulations and retries beyond grace period'
 # macOS has no /proc: the start time comes from ps, which pads it with trailing
 # spaces. The record read back by 'read' loses them, so both sides must be trimmed
 # or a live owner never matches its record (every new tab started another owner).
-eval "$(declare -f _recovery_process_identity | sed 's#/proc/#/no-proc/#g')"
+_platform_process_start() { _macos_process_start "$@"; }
 ps() { printf '%s\n' 'Mon Nov  2 20:17:15 2026    '; }
 mac=$(mktemp -d)
 printf '%s\n%s\n' "$$" "$(_recovery_process_identity $$)" > "$mac/owner.tmp"
