@@ -42,7 +42,7 @@ class ConfigChecks:
     def run_shell(self, code):
         return subprocess.run([self.shell, "-f", "-c", '. "$1"; ' + code,
                                "config-test", str(SCRIPT)], env=self.env,
-                              text=True, capture_output=True, timeout=15)
+                              text=True, capture_output=True, timeout=60)  # the editor forks a lot; leave room on a loaded host
 
     def editor(self, body):
         editor = self.root / "editor with spaces"

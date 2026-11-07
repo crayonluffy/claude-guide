@@ -45,7 +45,7 @@ Use the Mac line in your terminal.
 |---|---|
 | Server IP or hostname | The server address from your admin. |
 | SSH username | Your username from your admin. |
-| Use this key? | Push **Enter**. The installer found the key in Downloads. |
+| Use this key? | Push **Enter**. The installer found the key in Downloads. If `~/.ssh` already has a different key with the same name, the installer keeps it and installs yours as `<name>-claude-proxy`. |
 | A question with `[…]` in it | Push **Enter**. The text in `[…]` is the recommended answer. |
 | Make plain 'claude' and 'codex' start through the proxy too? | Push **Enter** (recommended). |
 | Check / install Node.js, Claude Code and Codex now? | Push **Enter**. The installer installs the missing items. Windows can ask for permission. A Mac can ask for your password. |
@@ -74,19 +74,21 @@ To continue your last Claude conversation, type `cc -c`.
 
 ## 🆘 Something does not work?
 
-On all platforms, `proxy-status` shows saved ports and every active node's
-ports. `proxy-config edit` includes an editable port section and the same
-overview. Use `proxy-config use-active` to save the main tunnel's running ports,
-or `proxy-restart` to apply saved settings. A restart on the same ports briefly
-reconnects sessions. If you change local ports, relaunch affected applications.
-
-Windows uses the same `proxy-config edit` and `proxy-config use-active`
-commands. Its editor is Notepad; use `proxy-status -Debug` for detailed recovery
-information (`proxy-status --debug` on macOS/Linux/WSL).
-
 1. Type **`proxy-status --fix`**. It examines each part and tells you the problem and the fix.
 2. If the problem continues, **run the installer again** (step 1). This is safe. The installer keeps your settings.
 3. Send the output of `proxy-status --fix` to your admin.
+
+More help in the terminal:
+
+| Type | To see |
+|---|---|
+| `cc-help` | Your current node, ports and tunnel, and the commands you need. |
+| `proxy-status` | What runs, on which ports (saved ports and each active node). |
+| `cc-manual` | The plain `ssh`, `claude` and `codex` commands, to run everything by hand if the profile misbehaves. It runs nothing. |
+
+Ports and servers are in `proxy-config edit` (Windows opens Notepad). After you
+change them, type `proxy-restart`; if a local port changed, start Claude, Codex
+and Chrome again. Details: [Troubleshooting](docs/troubleshooting.md).
 
 ## 🔄 Keeping up to date
 

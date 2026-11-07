@@ -103,13 +103,16 @@ conf_set() {
             echo "# Lines you leave out keep the script's built-in default."
         } > "$CONF"
     fi
-    if grep -q "^${key}=" "$CONF"; then
-        esc=$(printf '%s' "$val" | sed 's/[\/&|]/\\&/g')
-        tmp=$(mktemp)
-        sed "s|^${key}=.*|${key}=\"${esc}\"|" "$CONF" > "$tmp" && mv "$tmp" "$CONF"
-    else
-        printf '%s="%s"\n' "$key" "$val" >> "$CONF"
-    fi
+    # The file is sourced as shell code: double-quote the value with \ " $ `
+    # escaped (the profile's proxy-config writes the same format).
+    case "$val" in *"
+"*) echo "[Err] $key cannot contain a line break." >&2; return 1;; esac
+    esc="$key=\"$(printf '%s' "$val" | sed 's/[\\"$`]/\\&/g')\""
+    tmp=$(mktemp "$CONF.XXXXXX") || return 1
+    K="$key=" L="$esc" awk '
+        index($0, ENVIRON["K"]) == 1 { if (!done) print ENVIRON["L"]; done = 1; next }
+        { print }
+        END { if (!done) print ENVIRON["L"] }' "$CONF" > "$tmp" && mv -f "$tmp" "$CONF"
 }
 
 # Kill switch (profile 2.9+): stays on unless the user turned it off. Plain
@@ -330,7 +333,17 @@ if [ $QUICK -eq 0 ]; then
     # --- 4. Install + lock the key -------------------------------------------
     DEST="$HOME/.ssh/$(basename "$KEY")"
     if [ "$(cd "$(dirname "$KEY")" && pwd)/$(basename "$KEY")" != "$DEST" ]; then
-        cp "$KEY" "$DEST"
+        # Never replace a different private key that already has this name
+        # (e.g. your own id_ed25519): install this one next to it instead.
+        n=0
+        while [ -e "$DEST" ] && ! cmp -s "$KEY" "$DEST"; do
+            n=$((n+1)); sfx=$n; [ "$n" -gt 1 ] || sfx=''
+            DEST="$HOME/.ssh/$(basename "$KEY")-claude-proxy$sfx"
+        done
+        if [ "$DEST" != "$HOME/.ssh/$(basename "$KEY")" ]; then
+            echo "[Info] ~/.ssh/$(basename "$KEY") is a different key - kept it. Installing yours as $DEST"
+        fi
+        [ -e "$DEST" ] || cp "$KEY" "$DEST"
     fi
     chmod 600 "$DEST"
     echo "[OK] Key installed and locked: $DEST"

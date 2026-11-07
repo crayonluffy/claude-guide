@@ -37,6 +37,30 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.1: audit fixes (safer node lists, keys and settings)
+
+From a review of the profiles, installers and docs
+([findings](superpowers/audits/2026-11-07-audit.md)):
+
+- **Node lists are checked before they reach your SSH files.** A host key from
+  the node list is pinned only for a host that has no key yet; a different key
+  is reported, never added. Invalid host names, users or ports are refused.
+- **The installer keeps your own SSH key.** If `~/.ssh` already has a different
+  key with the name of the one in Downloads, the new key is installed as
+  `<name>-claude-proxy`.
+- **Claude's `settings.json`:** paths with spaces (WSL with a Windows user name
+  such as "John Doe") now work; the file is replaced in one step; a symlinked
+  file stays a link; the first original is kept as
+  `settings.json.claude-proxy.orig`; Windows writes it without a byte-order mark.
+- **Settings values** with `"`, `$`, `` ` `` or `\` are saved exactly instead of
+  breaking the settings file.
+- `proxy-update` swaps the new profile in one step, so an interrupted update
+  cannot leave a broken profile.
+- Windows installer: the key is locked to your account by its security ID, so
+  Microsoft-account and work/school logins no longer risk an unreadable key.
+- Windows: desktop alerts report "unavailable" when the notification thread
+  cannot start (for example on Server Core) instead of claiming to work.
+
 ### 2.13.0: fewer commands, shared accounts, steadier nodes
 
 #### Fewer commands, clearer help, manual fallback

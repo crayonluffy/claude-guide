@@ -228,16 +228,37 @@ while (-not $keyPath -or -not (Test-Path -LiteralPath $keyPath)) {
 }
 
 # --- 3. Install + lock the key ---------------------------------------------
-$dest = Join-Path $sshDir ([System.IO.Path]::GetFileName($keyPath))
+$keyName = [System.IO.Path]::GetFileName($keyPath)
+$dest = Join-Path $sshDir $keyName
 if ((Resolve-Path -LiteralPath $keyPath).Path -ne $dest) {
-    Copy-Item -LiteralPath $keyPath -Destination $dest -Force
+    # Never replace a different private key that already has this name
+    # (e.g. your own id_ed25519): install this one next to it instead.
+    $srcHash = (Get-FileHash -LiteralPath $keyPath).Hash
+    $n = 0
+    while ((Test-Path -LiteralPath $dest) -and (Get-FileHash -LiteralPath $dest).Hash -ne $srcHash) {
+        $n++; $dest = Join-Path $sshDir ("$keyName-claude-proxy" + $(if ($n -gt 1) { $n } else { '' }))
+    }
+    if ($dest -ne (Join-Path $sshDir $keyName)) {
+        Write-Host "[Info] ~\.ssh\$keyName is a different key - kept it. Installing yours as $dest" -ForegroundColor Yellow
+    }
+    if (-not (Test-Path -LiteralPath $dest)) { Copy-Item -LiteralPath $keyPath -Destination $dest }
 }
 # OpenSSH refuses keys that others can read - strip inheritance, grant only you.
-icacls $dest /inheritance:r            | Out-Null
-icacls $dest /grant:r "$($env:USERNAME):R" | Out-Null
-icacls $dest /remove "SYSTEM"          | Out-Null
-icacls $dest /remove "Administrators"  | Out-Null
-Write-Host "[OK] Key installed and locked: $dest" -ForegroundColor Green
+# Grant by SID: a bare user name may not resolve for Microsoft-account, Entra ID
+# or domain logins, and a failed grant after removing inheritance would leave a
+# key that nobody - not even you - can read.
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+icacls $dest /grant:r "*${sid}:R" | Out-Null
+$granted = ($LASTEXITCODE -eq 0)
+if ($granted) {
+    icacls $dest /inheritance:r           | Out-Null
+    icacls $dest /remove "SYSTEM"         | Out-Null
+    icacls $dest /remove "Administrators" | Out-Null
+    Write-Host "[OK] Key installed and locked: $dest" -ForegroundColor Green
+} else {
+    Write-Host "[Warn] Could not restrict $dest to your account (icacls failed); its permissions were left unchanged." -ForegroundColor Yellow
+    Write-Host "       If ssh says the key's permissions are too open, run: icacls `"$dest`" /inheritance:r /grant:r `"*${sid}:R`"" -ForegroundColor Yellow
+}
 
 # --- 4. Write the ~/.ssh/config alias --------------------------------------
 $aliasExists = (Test-Path $configPath) -and
