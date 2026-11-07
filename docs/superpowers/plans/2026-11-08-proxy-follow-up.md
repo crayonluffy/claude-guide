@@ -21,8 +21,11 @@ Live main owners continue to retain their established settings and node roles.
   `PROXY_TEST_PWSH="$PWD/.superpowers/tools/powershell/pwsh" python3 tests/run.py`.
   Log: `.superpowers/2026-11-08-verified-suite.log`.
 - [x] Commit the changes on `fix/2.12.2-targeted-restart`.
-- [ ] Publish v2.12.2. GitHub's configured credential helper has no saved
-  credential; publishing requires authentication. Remote remains at v2.12.1.
+
+Release: [v2.12.2](https://github.com/crayonluffy/claude-guide/releases/tag/v2.12.2).
+The previously supplied GitHub credential was recovered from the authorized
+session and verified for publishing. Before publication, remote main remained
+at v2.12.1; no v2.13 branch, tag or open pull request was present.
 
 PowerShell execution uses portable 7.6.9 on macOS. Native Windows, Notepad and
 Windows PowerShell 5.1 are not available. The live proxy TLS probe passed;
