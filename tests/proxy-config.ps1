@@ -296,7 +296,8 @@ foreach ($node in @('main','sg')) {
     Invoke-Case "restart $node applies saved ports and probes the new port" {
         $script:RestartTrace=@()
         $values=if ($node -eq 'main') { "HTTP_PORT=8090" } else { "NODE_HTTP_BASE=9000" }
-        [IO.File]::WriteAllText($script:PROXY_CONF,"@{SSH_HOST='personal-host';SYNC_SETTINGS=0;BANNER=0;$values}")
+        $savedHost=if ($node -eq 'main') { 'personal-host' } else { 'sg-host' }
+        [IO.File]::WriteAllText($script:PROXY_CONF,"@{SSH_HOST='$savedHost';SYNC_SETTINGS=0;BANNER=0;$values}")
         function Stop-RecoveryOwner { param($Identity,$WaitSeconds)
             $slot=Split-Path -Leaf $Identity
             $script:RestartTrace+="stop:$slot"
@@ -324,6 +325,21 @@ foreach ($node in @('main','sg')) {
         Assert (($script:RestartTrace -join ',') -eq $expected) ($script:RestartTrace -join ',')
         Assert ($out -match 'Relaunch' -and $out -notmatch 'same ports') $out
     }
+}
+Invoke-Case 'node restart rejects pending default-server change before stopping' {
+    $script:LeaseBySlot.main.Dispose()
+    Remove-Item (Join-Path (Get-RecoveryIdentity) 'owner.json')
+    $script:SSH_HOST='main-host'
+    [IO.File]::WriteAllText($script:PROXY_CONF,"@{SSH_HOST='sg-host';SYNC_SETTINGS=0;BANNER=0;NODE_HTTP_BASE=9000}")
+    $script:RestartTrace=@()
+    function tunnel-stop { $script:RestartTrace+='stop'; return $true }
+    function Start-NodeTunnelOwner { $script:RestartTrace+='start'; return $true }
+    function Wait-ProxyTransport { return $true }
+    Assert-Throws { proxy-restart -Node sg 6>$null }
+    Assert ($script:RestartTrace.Count -eq 0) 'Pending default-server change stopped or started a tunnel'
+    Assert ($script:SSH_HOST -eq 'main-host') 'Rejected restart changed this window''s default server'
+    $record=Get-RecoveryStatus (Get-RecoveryIdentity -Slot node-sg) descriptor
+    Assert ($record.HTTP_PORT -eq 8181) 'Rejected restart changed the running node''s ports'
 }
 foreach ($values in @('HTTP_PORT=8181','HTTP_PORT=8090;SOCKS_PORT=8090')) {
     Invoke-Case "restart refuses conflicting saved ports: $values" {

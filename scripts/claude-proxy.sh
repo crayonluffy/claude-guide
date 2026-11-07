@@ -37,7 +37,7 @@ esac
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.12.1"
+CLAUDE_PROXY_VERSION="2.12.2"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -3125,6 +3125,22 @@ _conf_requested_ports() (
 )
 _conf_check_restart_ports() {  # <slot> <node or empty for main>
     local pending http socks dir other_http other_socks
+    if [ -n "$2" ]; then
+        local saved_slot
+        saved_slot=$(
+            CLAUDE_SSH_HOST=jpvpn
+            if [ -f "$CLAUDE_PROXY_CONF" ]; then
+                bash -n "$CLAUDE_PROXY_CONF" 2>/dev/null && . "$CLAUDE_PROXY_CONF" || exit 1
+            fi
+            _recovery_adopt >/dev/null 2>&1 || :
+            _node_slot "$2"
+        ) || return 1
+        if [ "$saved_slot" != "$1" ]; then
+            echo '[Err] Saved settings make this node the default server. No tunnel was stopped.' >&2
+            echo '      Run proxy-restart without a node to apply the saved default server.' >&2
+            return 1
+        fi
+    fi
     pending=$(_conf_requested_ports "$2") || {
         echo '[Err] Saved HTTP/SOCKS ports must be different valid ports. Fix: proxy-config edit.' >&2
         return 1

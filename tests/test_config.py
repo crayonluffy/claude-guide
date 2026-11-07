@@ -181,8 +181,8 @@ class ConfigChecks:
         self.node_catalogue()
         trace = self.root / "node-restart.trace"
         # The edit happens after shell startup, just like an external editor.
-        code = ('printf "\\nCLAUDE_NODE_HTTP_BASE=9000\\n" >> "$CLAUDE_PROXY_CONF"; '
-                '_conf_reload() { . "$CLAUDE_PROXY_CONF"; }; '
+        code = ('printf "\\nCLAUDE_NODE_HTTP_BASE=9000\\nCLAUDE_SSH_HOST=node-sg-host\\n" >> "$CLAUDE_PROXY_CONF"; '
+                '_conf_reload() { . "$CLAUDE_PROXY_CONF"; _recovery_adopt; }; '
                 'tunnel-stop() { rm -f "$XDG_STATE_HOME/claude-proxy/recovery/node-sg/lock/owner"; }; '
                 'tunnel-start() { (_node_ctx "$1" && echo "start:$CLAUDE_HTTP_PORT") >> ' + shlex.quote(str(trace)) + '; }; '
                 '_proxy_probe() { echo "probe:$1" >> ' + shlex.quote(str(trace)) + '; echo "ok 0 200 404"; }; '
@@ -213,6 +213,24 @@ class ConfigChecks:
         self.assertFalse(trace.exists(), "A conflicting port change stopped a running tunnel")
         self.assertIn("8181", result.stdout + result.stderr)
 
+    def test_node_restart_rejects_pending_default_change_before_stopping(self):
+        self.node_catalogue()
+        (self.root / "state/claude-proxy/recovery/main/lock/owner").unlink()
+        trace = self.root / "restart.trace"
+        code = ('CLAUDE_SSH_HOST=main-host; '
+                'printf "\\nCLAUDE_SSH_HOST=node-sg-host\\nCLAUDE_NODE_HTTP_BASE=9000\\n" >> "$CLAUDE_PROXY_CONF"; '
+                '_conf_reload() { . "$CLAUDE_PROXY_CONF"; }; '
+                'tunnel-stop() { echo stopped >> ' + shlex.quote(str(trace)) + '; }; '
+                'tunnel-start() { echo started >> ' + shlex.quote(str(trace)) + '; }; '
+                '_proxy_probe() { echo "ok 0 200 404"; }; '
+                'proxy-restart sg')
+        result = self.run_shell(code)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(trace.exists(), "A pending default-node change stopped a tunnel")
+        self.assertIn("proxy-restart", result.stdout + result.stderr)
+        record = self.root / "state/claude-proxy/recovery/node-sg/tunnel.rec"
+        self.assertIn("http=8181\n", record.read_text())
+
     def test_restart_rejects_identical_http_and_socks_before_stopping(self):
         trace = self.root / "stop.trace"
         code = ('printf "\\nCLAUDE_HTTP_PORT=8090\\nCLAUDE_SOCKS_PORT=8090\\n" >> "$CLAUDE_PROXY_CONF"; '
@@ -223,6 +241,24 @@ class ConfigChecks:
         result = self.run_shell(code)
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(trace.exists())
+
+    def test_node_restart_checks_builtin_default_when_saved_host_is_absent(self):
+        self.node_catalogue()
+        catalogue = self.root / "nodes.json"
+        data = json.loads(catalogue.read_text())
+        data["nodes"][1]["alias"] = "jpvpn"
+        catalogue.write_text(json.dumps(data))
+        self.conf.write_text("CLAUDE_SYNC_SETTINGS=0\nCLAUDE_PROXY_BANNER=0\n")
+        (self.root / "state/claude-proxy/recovery/main/lock/owner").unlink()
+        trace = self.root / "restart.trace"
+        code = ('CLAUDE_SSH_HOST=main-host; '
+                '_conf_reload() { CLAUDE_SSH_HOST=jpvpn; . "$CLAUDE_PROXY_CONF"; }; '
+                'tunnel-stop() { echo stopped >> ' + shlex.quote(str(trace)) + '; }; '
+                'tunnel-start() { echo started >> ' + shlex.quote(str(trace)) + '; }; '
+                '_proxy_probe() { echo "ok 0 200 404"; }; proxy-restart sg')
+        result = self.run_shell(code)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(trace.exists(), "A built-in default-node change stopped a tunnel")
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash not available")

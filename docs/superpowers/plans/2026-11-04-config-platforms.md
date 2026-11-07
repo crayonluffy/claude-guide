@@ -46,5 +46,8 @@ CLAUDE_PROXY_SELF and select their platform filename during updates.
   installer/updater selection, and real macOS process identity.
 - [x] Extract OS adapters, generate bundles, select downloads and bump versions.
 - [x] Run all local checks; document Linux/PowerShell runtime limits and CI checks.
-- [ ] Obtain final code review, fix material findings, install locally, verify fresh
+- [x] Obtain final code review, fix material findings, install locally, verify fresh
   concurrent shells, commit, push main and v2.12.0 and publish release notes.
+
+Published in commit 0d4baaa and tag v2.12.0. See the
+[2026-11-08 follow-up](2026-11-08-proxy-follow-up.md) for subsequent work.

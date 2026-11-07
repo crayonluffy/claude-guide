@@ -8,6 +8,8 @@ trap 'rm -rf "$test_dir"' EXIT
 eval "$(sed -n '/^# BEGIN PLATFORM ADAPTERS$/,/^# END PLATFORM ADAPTERS$/p' "$repo_dir/scripts/claude-proxy.sh")"
 # This test exercises the Linux launcher; macOS launching is covered separately.
 uname() { echo Linux; }
+# Keep the real launcher arguments without macOS nohup's console requirement.
+nohup() { "$@"; }
 eval "$(sed -n '/^chrome-proxy() {$/,/^}$/p' "$repo_dir/scripts/claude-proxy.sh")"
 _node_lookup() { case "$1" in sg) printf '1|sg|sgvpn|192.0.2.1\n';; jp) printf '0|jp|jpvpn|192.0.2.0\n';; *) return 1;; esac; }
 _node_slot() { case "$1" in sg) echo node-sg;; *) echo main;; esac; }

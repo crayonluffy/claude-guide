@@ -37,6 +37,19 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.12.2: targeted restart keeps the selected node
+
+If saved settings make the selected node the default server and no main owner
+is running, a targeted restart now refuses before stopping any tunnel. Previously,
+a stale terminal could stop that node and start the main tunnel on different
+ports. Run `proxy-restart` without a node to apply the saved default server.
+When the main owner is running, targeted restarts still retain its active settings
+and restart only the selected node. This applies to Windows, macOS, Linux and WSL.
+
+The portable Chrome regression also runs without requiring a macOS console.
+
+Type `proxy-update`, then open a new terminal window. Release tag: `v2.12.2`.
+
 ### 2.12.1 (Windows): active-node configuration parity
 
 - **`proxy-config edit` now lists every running node's ports on Windows too.**

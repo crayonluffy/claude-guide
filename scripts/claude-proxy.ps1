@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.12.1'
+$script:PROFILE_VERSION = '2.12.2'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -609,10 +609,16 @@ function Invoke-RecoveryWorker {
 }
 function proxy-restart {
     param([string]$Node)
-    $null=Use-RecoveryRecord
+    $mainRunning=Use-RecoveryRecord
     $slot=if ($Node) { Get-NodeSlot $Node } else { 'main' }
     if (-not $slot) { throw "Unknown or unprovisioned node '$Node'." }
     $saved=Get-ProxySavedConfig
+    if ($slot -ne 'main' -and -not $mainRunning) {
+        $savedSlot=Use-NodeContext $saved { Get-NodeSlot $Node }
+        if ($savedSlot -ne $slot) {
+            throw 'Saved settings make this node the default server. No tunnel was stopped. Run proxy-restart without -Node to apply the saved default server.'
+        }
+    }
     $requested=if ($slot -eq 'main') {
         @{Slot='main';HTTP_PORT=$saved.HTTP_PORT;SOCKS_PORT=$saved.SOCKS_PORT}
     } else { Get-NodeContext -Name $Node -Settings $saved }

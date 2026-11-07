@@ -43,4 +43,8 @@ Interfaces: existing node context/restart/status functions use saved/live helper
 - [x] Test and implement live-node adoption, explicit saved-setting restarts,
   conflict preflight, changed-endpoint guidance and status detail switch.
 - [x] Run all PowerShell and shell tests; document native Windows/5.1 limitations.
-- [ ] Obtain final review, fix material findings, publish 2.12.1 and verify remote.
+- [x] Obtain final review, fix material findings, publish 2.12.1 and verify remote.
+
+Remote main, tag and published release v2.12.1 were verified on 2026-11-08
+(commit a63009c). The remaining targeted-restart edge was addressed in the
+[2026-11-08 follow-up](2026-11-08-proxy-follow-up.md).
