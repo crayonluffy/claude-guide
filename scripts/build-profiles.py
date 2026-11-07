@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parent
-APIS = ("uptime", "process_start", "desktop_backend", "is_wsl", "ssh_options",
+APIS = ("port_bound", "uptime", "process_start", "desktop_backend", "is_wsl", "ssh_options",
         "chrome_base", "chrome_launch", "install_node", "install_hint")
 
 
@@ -46,7 +46,11 @@ def render(target):
         adapters += f'        {backend}) _{os_name}_desktop_send "$@";;\n'
     adapters += '        *) return 1;;\n    esac\n}\n# END PLATFORM ADAPTERS\n'
     assert common.count("# @PLATFORM_ADAPTERS@") == 1
-    return header + common.replace("# @PLATFORM_ADAPTERS@", adapters.rstrip())
+    assert common.count("# @OPERATIONS@") == 1
+    operations = (ROOT / "lib/operations.sh").read_text()
+    assert common.count("# @NODE_PORTS@") == 1
+    node_ports = (ROOT / "lib/node-ports.sh").read_text()
+    return header + common.replace("# @PLATFORM_ADAPTERS@", adapters.rstrip()).replace("# @OPERATIONS@", operations.rstrip()).replace("# @NODE_PORTS@", node_ports.rstrip())
 
 
 def main():

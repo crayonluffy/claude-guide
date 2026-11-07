@@ -27,6 +27,10 @@ CLAUDE_SSH_HOST=jpvpn CLAUDE_SSH_USER=alice CLAUDE_SSH_PORT=22 CLAUDE_SSH_KEY=/k
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_REMOTE_PROXY_PORT=8888
 _recovery_record_write "$dir"
 _recovery_owner_pid() { echo "$$"; }
+
+# Real coordinator leases have separate process-boundary tests.
+_proxy_operation_owned() { return 0; }
+_proxy_operation_release() { :; }
 CLAUDE_SSH_HOST=stale CLAUDE_SSH_USER=bob CLAUDE_SSH_PORT=2222 CLAUDE_SSH_KEY=''
 CLAUDE_HTTP_PORT=8081 CLAUDE_SOCKS_PORT=1081 CLAUDE_REMOTE_PROXY_PORT=9999
 _recovery_adopt "$dir"

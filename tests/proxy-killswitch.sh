@@ -11,6 +11,11 @@ fn _noproxy_exempts
 assert() { if ! "$@"; then echo "FAIL: $*" >&2; exit 1; fi; }
 scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
 
+# Coordinator concurrency is covered separately from this launch-protection fixture.
+_proxy_operation_owned() { return 0; }
+_proxy_operation_release() { :; }
+_proxy_shared() { return 1; }
+
 # 1) NO_PROXY exemption matcher.
 exempt() {  # <NO_PROXY> <expected hosts, space separated, '' for none>
     local got

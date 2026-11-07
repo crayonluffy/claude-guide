@@ -94,6 +94,10 @@ echo 'PASS: an idle owner wakes on demand and when a session starts'
 eval "$(sed -n '/^_proxy_transport_wait() {/,/^}/p;/^proxy-up() {/,/^}/p' "$src")"
 _killswitch_check() { :; }   # covered by tests/proxy-killswitch.sh
 _recovery_owner_pid() { echo 4242; }
+
+# This mock describes tunnel owners, not operation-coordinator leases.
+_proxy_operation_owned() { return 0; }
+_proxy_operation_release() { :; }
 _recovery_adopt() { :; }
 tunnel-start() { :; }
 _tunnel_health() { echo "ok 4242 ssh $CLAUDE_HTTP_PORT"; }

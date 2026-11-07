@@ -1,4 +1,5 @@
 # Linux and WSL adapters. Included in the generated profile at build time.
+_linux_port_bound() { return 2; } # common helper uses ss, then lsof
 _linux_uptime() {
     local up
     read -r up _ < /proc/uptime

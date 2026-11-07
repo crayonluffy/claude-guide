@@ -26,7 +26,7 @@ $script:NO_PROXY_LIST='localhost,127.0.0.1'; $script:KILLSWITCH='on'; $script:PL
 $oldPath=$env:PATH
 try {
  # 1) Slots and node context.
- Assert ((Get-NodeSlot jp) -eq 'main' -and (Get-NodeSlot jpvpn) -eq 'main') 'default node must be main'
+ Assert ((Get-NodeSlot jp) -eq 'node-jp' -and (Get-NodeSlot jpvpn) -eq 'node-jp') 'explicit named nodes must stay independent'
  Assert ((Get-NodeSlot sg) -eq 'node-sg' -and (Get-NodeSlot sgvpn) -eq 'node-sg') 'sg slot'
  Assert ($null -eq (Get-NodeSlot nowhere 6>$null)) 'unknown node accepted'
  Assert ($null -eq (Get-NodeSlot us 6>$null)) 'unprovisioned node accepted'
@@ -122,7 +122,7 @@ try {
  $env:HTTPS_PROXY=$null
  Remove-Item "$scratch/claude.argv"
  cc -Node jp -NoVerify -p hi 6>$null
- Assert ((@(Get-Content "$scratch/claude.argv"))[0] -eq '--dangerously-skip-permissions') 'cc -Node <default> must be plain cc'
+ Assert ((@(Get-Content "$scratch/claude.argv"))[0] -eq '--settings') 'explicit current-default node needs its stable node settings'
  'PASS: proxy-up -Node sets this window only; -Node <default node> is plain cc'
 
  # 6) proxy-node refuses to move running sessions.

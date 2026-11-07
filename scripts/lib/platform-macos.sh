@@ -1,4 +1,8 @@
 # macOS adapters. Included in the generated standalone profile at build time.
+_macos_port_bound() {
+    command -v netstat >/dev/null 2>&1 || return 2
+    netstat -an -p tcp 2>/dev/null | awk -v port="$1" '$6 == "LISTEN" && $4 ~ ("[.:]" port "$") { found=1 } END { exit !found }'
+}
 _macos_uptime() {
     osascript -l JavaScript -e 'ObjC.import("Foundation"); Math.floor($.NSProcessInfo.processInfo.systemUptime);' 2>/dev/null
 }

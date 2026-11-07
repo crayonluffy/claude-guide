@@ -23,8 +23,8 @@ CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_REMOTE_PROXY_PORT=8888
 CLAUDE_NODE_HTTP_BASE=8180 CLAUDE_NODE_SOCKS_BASE=1180
 
 # 1) Slots: the default node (by name or alias) is 'main'; others are node-<name>.
-assert test "$(_node_slot jp)" = main
-assert test "$(_node_slot jpvpn)" = main
+assert test "$(_node_slot jp)" = node-jp
+assert test "$(_node_slot jpvpn)" = node-jp
 assert test "$(_node_slot sg)" = node-sg
 assert test "$(_node_slot sgvpn)" = node-sg
 if out=$(_node_slot nowhere 2>&1); then echo 'FAIL: unknown node accepted' >&2; exit 1; fi
@@ -38,7 +38,7 @@ got=$( _node_ctx sg; echo "$CLAUDE_SSH_HOST|$CLAUDE_SSH_USER|$CLAUDE_SSH_KEY|$CL
 assert test "$got" = 'sgvpn|||8181|1181|8899'
 assert test "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT|$CLAUDE_SSH_USER" = 'jpvpn|8080|alice'
 got=$( _node_ctx jp; echo "$CLAUDE_SSH_HOST|$CLAUDE_SSH_USER|$CLAUDE_HTTP_PORT|$CLAUDE_SOCKS_PORT" )
-assert test "$got" = 'jpvpn|alice|8080|1080'
+assert test "$got" = 'jpvpn||8180|1180'
 echo "PASS: a node's context has its alias and fixed ports; the caller is unchanged"
 
 # 3) Node ports must never collide with the main ports.
@@ -152,7 +152,7 @@ run() {  # <conf lines> <commands>: fresh isolated shell with the profile and mo
         tunnel-start() { echo "tunnel-start $*" >> "$scratch/ts7"; }
         _tunnel_health() { echo "ok 1 ssh $CLAUDE_HTTP_PORT"; }
         _recovery_probe() { echo "$2" >> "$scratch/probed7"; echo 'healthy|0|200|404|healthy'; }
-        _recovery_owner_start() { _recovery_identity "$(_node_slot "${2:-$CLAUDE_SSH_HOST}")"; }
+        _recovery_owner_start() { if [ -n "${2:-}" ]; then _recovery_identity "$(_node_slot "$2")"; else _recovery_identity main; fi; }
         _listeners() { :; }; _port_bound() { return 1; }
         eval "$*"
     )
@@ -184,9 +184,9 @@ echo 'PASS: proxy-up --node sg sets this shell only; the default node and the pi
 
 rm -f "$scratch/claude.argv"
 run '' 'cc --node jp --no-verify -p hi' >/dev/null 2>&1
-if grep -q -- --settings "$scratch/claude.argv"; then echo 'FAIL: default node got --settings' >&2; exit 1; fi
-assert test "$(head -1 "$scratch/claude.argv")" = --dangerously-skip-permissions
-echo 'PASS: cc --node <default node> is plain cc'
+assert test "$(head -1 "$scratch/claude.argv")" = --settings
+assert test "$(sed -n 2p "$scratch/claude.argv" | jq -r .env.HTTPS_PROXY)" = http://127.0.0.1:8180
+echo 'PASS: explicit named nodes retain stable settings even when selected as default'
 
 rm -f "$scratch/claude.argv"
 run 'CLAUDE_PLAIN_COMMANDS=auto' 'claude --node sg -p hi' >/dev/null 2>&1
@@ -310,7 +310,7 @@ sect cx | grep -qx 'tunnel-stop sg' || { echo "FAIL: cx-stop: $(sect cx)" >&2; e
 if printf '%s\n' "$out" | sed -n '/^== forced$/,/^== default$/p' | grep -q 'stop-all\|proxy-off'; then echo 'FAIL: cc-stop sg stopped other nodes or cleared the shell' >&2; exit 1; fi
 sect env | grep -qx 'env:cleared' || { echo "FAIL: env of sg not cleared: $(sect env)" >&2; exit 1; }
 sect 'other env' | grep -qx 'env:http://127.0.0.1:8080' || { echo "FAIL: other env cleared: $(sect 'other env')" >&2; exit 1; }
-case "$(sect default)" in *'tunnel-stop default'*'proxy-off'*) ;; *) echo "FAIL: cc-stop <default node>: $(sect default)" >&2; exit 1;; esac
+case "$(sect default)" in *'tunnel-stop jp'*) ;; *) echo "FAIL: cc-stop <default node>: $(sect default)" >&2; exit 1;; esac
 if sect default | grep -q 'stop-all'; then echo 'FAIL: cc-stop <default> stopped other nodes' >&2; exit 1; fi
 case "$(sect unknown)" in *"Unknown node 'nowhere'"*'rc=1'*) ;; *) echo "FAIL: unknown: $(sect unknown)" >&2; exit 1;; esac
 echo 'PASS: cc-stop / cx-stop <node> stop one node only, guarded by its sessions'

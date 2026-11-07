@@ -50,8 +50,8 @@ printf 'recovering|5|10|5|2|12|1|proxy|lost\n' > "$owner/claude.state"
 assert test "$(_recovery_status "$owner" claude | cut -d '|' -f1)" = recovering
 # A stale PID identity must not authorize a signal to the live test process.
 if _recovery_signal_owned "$$" bogus; then echo 'FAIL: stale process identity accepted'; exit 1; fi
-printf 'recovering|5|10|5|0|0|1|tunnel|lost\n' > "$scratch/state"
-assert test "$(_recovery_retry_record "$(cat "$scratch/state")" 2 30 | cut -d '|' -f5)" = 2
+printf 'recovering|5|10|5|0|0|1|tunnel|lost\n' > "$scratch/state.fixture"
+assert test "$(_recovery_retry_record "$(cat "$scratch/state.fixture")" 2 30 | cut -d '|' -f5)" = 2
 echo 'PASS: Bash shared ownership, stale identity, and recovery status'
 # The actual worker runs with fake transport/process adapters in a private directory.
 # A proxy-only outage must never restart SSH or clear inherited proxy variables.
@@ -66,6 +66,7 @@ _recovery_probe() { echo 'proxy|0|407|000|proxy'; }
 _listeners() { :; }
 _port_bound() { return 1; }
 CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
+CLAUDE_SSH_HOST=example CLAUDE_SSH_USER='' CLAUDE_SSH_KEY='' CLAUDE_SSH_PORT=22 CLAUDE_REMOTE_PROXY_PORT=8888
 CLAUDE_DESKTOP_NOTIFICATIONS=off
 CLAUDE_WATCHDOG_INTERVAL=.02 CLAUDE_WATCHDOG_FAILS=2
 export HTTPS_PROXY=http://127.0.0.1:8080

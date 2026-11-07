@@ -71,6 +71,7 @@ $script:NODE_SOCKS_BASE   = 1180
 # one window, the default node in another). Node i (its catalogue slot) uses
 # HTTP NODE_HTTP_BASE + i and SOCKS NODE_SOCKS_BASE + i.
 $script:NODE_HTTP_BASE    = 8180
+$script:NODE_PORTS        = @{} # per-node HTTP_PORT / SOCKS_PORT overrides
 $script:CHROME_EXE        = ''         # chrome.exe path, only if Chrome isn't in one of the usual places
 $script:CHROME_BASE       = 'C:\ChromeVPNProfile'   # per-node Chrome data dirs are <this>-<node>
 
@@ -98,6 +99,7 @@ $script:KILLSWITCH = 'on'
 # cx-safe, but quiet). off = they run untouched: Claude is still protected by
 # its pinned settings; plain 'codex' is not.
 $script:PLAIN_COMMANDS = 'off'
+$script:PROXY_MODE = 'managed'   # managed SSH owner, or explicit shared proxy client
 
 $script:NO_PROXY_LIST = @(
     "localhost",
@@ -134,7 +136,7 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS','TERMINAL_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','NODE_PORTS','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','PROXY_MODE','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS','TERMINAL_NOTIFICATIONS')
 $script:CONFIG_DEFAULTS = @{}
 foreach ($configKey in $script:CONF_KEYS) {
     $script:CONFIG_DEFAULTS[$configKey] = Get-Variable -Name $configKey -Scope Script -ValueOnly
@@ -182,6 +184,43 @@ function Find-FreePort {
 #             back to another port instead
 # Anchored on the SOCKS port: its ssh owner identifies OUR tunnel even when the
 # HTTP forward went to a fallback port in an earlier shell.
+# Operation coordinator: keep its file outside recovery/, whose children are tunnels.
+function Test-RecoveryOperation {
+    $handle=Get-Variable -Name RECOVERY_OPERATION_HANDLE -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    return ($null -ne $handle -and -not $handle.SafeFileHandle.IsClosed)
+}
+function Exit-RecoveryOperation {
+    $handle=Get-Variable -Name RECOVERY_OPERATION_HANDLE -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    $script:RECOVERY_OPERATION_HANDLE=$null
+    if ($null -ne $handle) { $handle.Dispose() }
+}
+function Invoke-RecoveryOperation {
+    param([Parameter(Mandatory=$true)][string]$Operation,
+          [hashtable]$Parameters=@{}, [object[]]$ExtraArguments=@())
+    if (Test-RecoveryOperation) { & $Operation @Parameters @ExtraArguments; return }
+    $parent=Split-Path -Parent (Get-RecoveryRoot)
+    $null=[IO.Directory]::CreateDirectory($parent)
+    if ($env:OS -ne 'Windows_NT') { & chmod 700 $parent }
+    $path=Join-Path $parent 'operations.lock'
+    $lease=$null
+    for ($attempt=0; $attempt -le 300; $attempt++) {
+        try { $lease=[IO.File]::Open($path,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); break }
+        catch [IO.IOException] {
+            if ($attempt -ge 300) { throw 'Another window is still changing proxy settings or tunnels. Operation timed out after 30 seconds; retry when it finishes.' }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    $script:RECOVERY_OPERATION_HANDLE=$lease
+    try { & $Operation @Parameters @ExtraArguments }
+    finally {
+        # An interactive launcher may dispose this lease before starting its app.
+        # A later operation has a different handle, even when it reuses this process.
+        $current=Get-Variable -Name RECOVERY_OPERATION_HANDLE -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        if ([object]::ReferenceEquals($current,$lease)) { Exit-RecoveryOperation }
+        else { $lease.Dispose() }
+    }
+}
+
 # Recovery helpers never signal applications or change proxy settings.
 function Get-RecoveryTime { return [Math]::Floor([Diagnostics.Stopwatch]::GetTimestamp() / [double][Diagnostics.Stopwatch]::Frequency) }
 function Get-RecoveryTransition {
@@ -260,8 +299,14 @@ function Get-RecoveryIdentity {
 # use the tunnel that is actually running. The live owner's descriptor is that
 # record: written once by whoever started it, read as data. Adopts only while
 # the owner is live; otherwise changes nothing.
+function Test-RecoverySharedProxy { return ($script:PROXY_MODE -eq 'shared') }
+function Test-RecoverySharedSocks { param([int]$Port)
+    $null=& curl.exe -q -sS -o $(if ($env:OS -eq 'Windows_NT') {'NUL'} else {'/dev/null'}) --connect-timeout 2 --max-time 3 '--noproxy=' '--proxy=' --socks5-hostname "127.0.0.1:$Port" https://api.anthropic.com/ 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
 function Use-RecoveryRecord {
     param([string]$Identity)
+    if (Test-RecoverySharedProxy) { return $false }
     # Read-only: never creates the state directory just to look.
     if (-not $Identity) { $Identity=Join-Path (Get-RecoveryRoot) 'main' }
     if (-not (Test-Path -LiteralPath $Identity) -or -not (Test-RecoveryOwner $Identity)) { return $false }
@@ -610,6 +655,8 @@ function Invoke-RecoveryWorker {
 }
 function proxy-restart {
     param([string]$Node)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'proxy-restart' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if (Test-RecoverySharedProxy) { throw 'Shared proxy restart is managed by the owner; no tunnel was stopped.' }
     $mainRunning=Use-RecoveryRecord
     $slot=if ($Node) { Get-NodeSlot $Node } else { 'main' }
     if (-not $slot) { throw "Unknown or unprovisioned node '$Node'." }
@@ -1015,6 +1062,7 @@ function Test-KillswitchLaunch {
         return $false
     }
     # Our ssh is the one the owner published - checked by start time, so a reused PID is not it.
+    if (-not (Test-RecoverySharedProxy)) {
     $own = 0
     if (-not $Identity) { $Identity = Join-Path (Get-RecoveryRoot) 'main' }
     $rec = Get-RecoveryStatus $Identity sshpid
@@ -1030,6 +1078,7 @@ function Test-KillswitchLaunch {
                 return $false
             }
         }
+    }
     }
     # Claude reads its settings.json over the window's env, so it must name this same port.
     if ($HttpPort -eq $script:HTTP_PORT -and $script:SYNC_SETTINGS -eq 1) {
@@ -1132,6 +1181,7 @@ function Invoke-PlainLaunch {
     }
     # Version/help need no network.
     if ($rest.Count -and "$($rest[0])" -in @('--version','-v','--help','-h')) { & $exe @rest; return }
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'Invoke-PlainLaunch' -ExtraArguments $args; return }
     $out = @(proxy-up -NoVerify -Provider $name 6>&1)
     $ok = @($out | Where-Object { $_ -is [bool] })
     if (-not ($ok.Count -and $ok[-1])) {
@@ -1139,9 +1189,10 @@ function Invoke-PlainLaunch {
         $global:LASTEXITCODE = 1; return
     }
     $subscriber = $null
-    if ($script:TUNNEL_WATCHDOG) {
+    if ($script:TUNNEL_WATCHDOG -and -not (Test-RecoverySharedProxy)) {
         try { $identity = Start-RecoveryOwner $name 6>$null; $subscriber = Start-RecoverySubscriber $identity $name } catch { [Console]::Error.WriteLine("[Warn] $($_.Exception.Message)") }
     }
+    Exit-RecoveryOperation
     if ($name -eq 'codex') { $rest = @(Get-CodexPreArgs $exe) + $rest }
     try { & $exe @rest }
     finally {
@@ -1389,13 +1440,11 @@ function Get-NodeLocalSlot { param([string]$Alias)
 function Get-NodeSlot { param([string]$Name)
     $n = Find-ProxyNode $Name
     if (-not $n) {
-        if ($Name -eq $script:SSH_HOST) { return 'main' }
         # Not in the node list, but a plain ssh alias: a node of its own.
         if (Test-SshAlias $Name) { return "node-$Name" }
         Write-Host "[Err] Unknown node '$Name'. It is not in the node list ('proxy-nodes') and not an alias in ~\.ssh\config." -ForegroundColor Red
         return $null
     }
-    if ($n.Alias -eq $script:SSH_HOST) { return 'main' }
     if (-not (Test-NodeProvisioned $n.Host)) {
         Write-Host "[Err] Node '$($n.Name)' has no address in the catalogue yet - ask your admin, then 'proxy-nodes -Refresh'." -ForegroundColor Red
         return $null
@@ -1413,7 +1462,7 @@ function Get-NodeContext { param([string]$Name,[hashtable]$Settings)
             HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT;REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT}
     }
     $identity=Join-Path (Get-RecoveryRoot) $slot
-    if (-not $Settings -and (Test-RecoveryOwner $identity)) {
+    if (-not $Settings -and -not (Test-RecoverySharedProxy) -and (Test-RecoveryOwner $identity)) {
         $record=Get-RecoveryStatus $identity descriptor
         if ($record.HTTP_PORT -and $record.SOCKS_PORT) {
             return @{Name=($slot -replace '^node-','');Slot=$slot;SSH_HOST=$record.SSH_HOST;SSH_USER=$record.SSH_USER;SSH_KEY=$record.SSH_KEY;SSH_PORT=$record.SSH_PORT
@@ -1428,9 +1477,10 @@ function Get-NodeContext { param([string]$Name,[hashtable]$Settings)
         $remote=if ($Settings) { $Settings.REMOTE_PROXY_PORT } else { $script:REMOTE_PROXY_PORT }
         $n = [pscustomobject]@{ Name=$Name; Alias=$Name; Idx=(Get-NodeLocalSlot $Name); SshPort=22; ProxyPort=$remote }
     }
-    $httpBase=if ($Settings) { $Settings.NODE_HTTP_BASE } else { $script:NODE_HTTP_BASE }
-    $socksBase=if ($Settings) { $Settings.NODE_SOCKS_BASE } else { $script:NODE_SOCKS_BASE }
-    $http = [int]$httpBase + [int]$n.Idx; $socks = [int]$socksBase + [int]$n.Idx
+    $portSettings=if ($Settings) { $Settings } else { @{NODE_PORTS=$script:NODE_PORTS;NODE_HTTP_BASE=$script:NODE_HTTP_BASE;NODE_SOCKS_BASE=$script:NODE_SOCKS_BASE} }
+    $pair=Get-ProxyNodePorts -Name $n.Name -Index $n.Idx -Settings $portSettings
+    $http=$pair.HTTP_PORT; $socks=$pair.SOCKS_PORT
+    if ($http -eq $socks) { throw "Node '$($n.Name)' requires different HTTP and SOCKS ports. Fix: proxy-config edit." }
     if ($http -in @($script:HTTP_PORT, $script:SOCKS_PORT)) {
         Write-Host "[Err] Node '$($n.Name)' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $($script:HTTP_PORT + 100)" -ForegroundColor Red
         return $null
@@ -1718,6 +1768,12 @@ function proxy-nodes {
 
 function proxy-node {
     param([string]$Name, [switch]$Force)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'proxy-node' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if (Test-RecoverySharedProxy) {
+        Write-Host '[Shared] The default server is controlled by the proxy owner. Use cc/cx -Node <name> for a configured node endpoint.'
+        return (-not $Name)
+    }
+    $null=Use-RecoveryRecord
     if ($Name -in @('--force','-f')) { $Name = "$($args | Select-Object -First 1)"; $Force = $true }
     if ($args -contains '--force') { $Force = $true }
     if (-not $Name) {
@@ -1749,21 +1805,27 @@ function proxy-node {
         Write-Host "       Move them anyway:       proxy-node $label -Force" -ForegroundColor Yellow
         return $false
     }
-    $wasUp = ((Get-TunnelHealth).Status -eq 'ok')
+    $wasUp = ((Get-TunnelHealth).Status -eq 'ok') -or (Test-RecoveryOwner (Join-Path (Get-RecoveryRoot) 'main'))
+    $stableHttp=$script:HTTP_PORT; $stableSocks=$script:SOCKS_PORT
     $envOn = [bool]$env:HTTPS_PROXY
     if ($wasUp) {
+        Write-Host '[Warn] Switching the main endpoint also moves untracked clients: plain CLI, extensions, default Chrome and other accounts using it.' -ForegroundColor Yellow
+        Write-Host '       Explicit named-node clients keep their own node ports.' -ForegroundColor DarkGray
         Write-Host "[Node] Switching the cc/cx tunnel to $label ($alias)..." -ForegroundColor Cyan
-        tunnel-stop | Out-Null
+        if (-not (tunnel-stop)) { return $false }
     }
     $script:SSH_HOST = $alias
     if ($pport) { $script:REMOTE_PROXY_PORT = $pport }
     $values=@{SSH_HOST=$script:SSH_HOST}
     if ($pport) { $values.REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT }
     Save-ProxyConfigValues $values -NoApply
+    $script:HTTP_PORT=$stableHttp; $script:SOCKS_PORT=$stableSocks
     Write-Host "[OK] Active node: $label ($alias) - saved to $($script:PROXY_CONF)" -ForegroundColor Green
     if ($wasUp) {
         tunnel-start
         if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
+        $null=Use-RecoveryRecord
+        if ($script:SSH_HOST -ne $alias) { throw 'Default-node switch did not establish the requested server. Run proxy-status.' }
         if ($envOn) { proxy-on }
     }
     Write-Host "[Info] Other open windows keep the old node until they run:  . '$($script:PROFILE_PATH)'" -ForegroundColor DarkGray
@@ -1776,6 +1838,12 @@ function proxy-node {
 
 # tunnel-start -Node for a node that is not the default: its own owner and ports.
 function Start-NodeTunnelOwner { param([string]$Node)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'Start-NodeTunnelOwner' -Parameters $PSBoundParameters; return }
+    if (Test-RecoverySharedProxy) {
+        $sharedContext=Get-NodeContext $Node
+        if (-not $sharedContext) { return $false }
+        return (Test-RecoverySharedSocks $sharedContext.SOCKS_PORT)
+    }
     if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
         Write-Host "[Err] 'ssh' not found - no tunnel is possible. Install the OpenSSH Client (Settings > Apps > Optional features)." -ForegroundColor Red
         return $false
@@ -1784,6 +1852,7 @@ function Start-NodeTunnelOwner { param([string]$Node)
     if ($n -and -not (Confirm-NodeAlias $n)) { return $false }
     $ctx = Get-NodeContext $Node
     if (-not $ctx) { return $false }
+    if (-not (Test-RecoveryOwner (Join-Path (Get-RecoveryRoot) $ctx.Slot))) { Assert-ProxyRestartPorts $ctx }
     try { $dir = Start-RecoveryOwner claude $Node } catch { Write-Host "[Err] $($_.Exception.Message)" -ForegroundColor Red; return $false }
     for ($i=0; $i -lt 100 -and -not (Test-Port $ctx.HTTP_PORT); $i++) { Start-Sleep -Milliseconds 100 }
     if (Test-Port $ctx.HTTP_PORT) {
@@ -1799,6 +1868,11 @@ function Start-NodeTunnelOwner { param([string]$Node)
 
 function tunnel-start {
     param([string]$Node)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'tunnel-start' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if (Test-RecoverySharedProxy) {
+        Write-Host '[Shared] Using configured proxy endpoints; this account does not manage the tunnel.'
+        return
+    }
     if ($Node) {
         $slot = Get-NodeSlot $Node
         if (-not $slot) { return }
@@ -1980,7 +2054,9 @@ function Wait-ProxyTransport { param([string]$Provider,[int]$HttpPort,[int]$Sock
     while ((Test-RecoveryTransport $Provider $HttpPort $SocksPort).kind -ne 'healthy') {
         if (-not $woke) {
             $woke=$true
-            if ((Test-Path -LiteralPath $Identity) -and (Test-RecoveryOwner $Identity)) {
+            if (Test-RecoverySharedProxy) {
+                Write-Host '[Wait] Shared proxy is not answering yet; waiting for its owner to reconnect...'
+            } elseif ((Test-Path -LiteralPath $Identity) -and (Test-RecoveryOwner $Identity)) {
                 [IO.File]::WriteAllText((Join-Path $Identity 'wake'),'wake')
                 Write-Host '[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect...' -ForegroundColor Yellow
             } else { $waited=$grace }
@@ -2014,7 +2090,10 @@ function Invoke-NodeUp { param([string]$Node,[string]$Provider='claude')
     $ctx = Get-NodeContext $Node
     if (-not $ctx) { return $null }
     tunnel-start -Node $Node
-    $dir = Join-Path (Get-RecoveryRoot) $ctx.Slot
+    if (Test-RecoverySharedProxy) {
+        $dir=Join-Path (Join-Path $HOME '.claude-proxy/clients') $ctx.Slot
+        $null=[IO.Directory]::CreateDirectory($dir)
+    } else { $dir = Join-Path (Get-RecoveryRoot) $ctx.Slot }
     if (-not (Wait-ProxyTransport $Provider $ctx.HTTP_PORT $ctx.SOCKS_PORT $dir)) { return $null }
     if (-not (Test-KillswitchLaunch $ctx.HTTP_PORT $ctx.SOCKS_PORT $dir)) { return $null }
     $ctx.Identity = $dir
@@ -2043,6 +2122,8 @@ function Invoke-WithNodeEnv { param([hashtable]$Context, [scriptblock]$Block)
 
 function proxy-up {
     param([switch]$NoVerify, [string]$Node, [ValidateSet("claude","codex")][string]$Provider="claude")
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'proxy-up' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if ($script:PROXY_MODE -and $script:PROXY_MODE -notin @('managed','shared')) { throw 'PROXY_MODE must be managed or shared.' }
     # bash spellings too: --no-verify, --node <name>
     # A bash-style '--node' / '--no-verify' lands in $Node (PowerShell binds it as the
     # value of the first string parameter) - put it back in front of the rest.
@@ -2075,9 +2156,8 @@ function proxy-up {
     # and refuses (with a named culprit) when a foreign app holds the port -
     # so require actual health afterwards, not just "something is on the port".
     tunnel-start
-    if ((Get-TunnelHealth).Status -ne 'ok') { return $false }
-
     if (-not (Wait-ProxyTransport $Provider $script:HTTP_PORT $script:SOCKS_PORT (Join-Path (Get-RecoveryRoot) 'main'))) { return $false }
+    if (-not (Test-RecoverySharedProxy) -and (Get-TunnelHealth).Status -ne 'ok') { return $false }
     if (-not (Test-KillswitchLaunch $script:HTTP_PORT $script:SOCKS_PORT)) { return $false }
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -2128,6 +2208,7 @@ function _split-launch-args {
 }
 
 function cc {
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'cc' -ExtraArguments $args; return }
     $o = _split-launch-args $args
     $exe = Get-AppCommand claude   # the real program, not a plain-command function
     if (-not $exe) {
@@ -2156,12 +2237,14 @@ function cc {
     Write-Host ""
 
     $subscriber=$null
-    if ($script:TUNNEL_WATCHDOG) {
+    if ($script:TUNNEL_WATCHDOG -and -not (Test-RecoverySharedProxy)) {
         $identity=if ($ctx) { $ctx.Identity } else { Start-RecoveryOwner claude }
         $subscriber=Start-RecoverySubscriber $identity claude
         Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
     }
+    elseif (Test-RecoverySharedProxy) { Write-Host '[Shared] Recovery is managed by the account serving this proxy.' }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
+    Exit-RecoveryOperation
     try {
     $pre = @()
     if ($ctx) { $pre += @('--settings', (Write-NodeSettingsFile $ctx)) }
@@ -2184,6 +2267,7 @@ function cx-stop { cc-stop @args }   # Claude and Codex share each tunnel: the s
 # ============================================================
 
 function cx {
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'cx' -ExtraArguments $args; return }
     $o = _split-launch-args $args
 
     # Locate codex first, so we don't bring the tunnel up only to find it missing.
@@ -2214,12 +2298,14 @@ function cx {
     Write-Host ""
 
     $subscriber=$null
-    if ($script:TUNNEL_WATCHDOG) {
+    if ($script:TUNNEL_WATCHDOG -and -not (Test-RecoverySharedProxy)) {
         $identity=if ($ctx) { $ctx.Identity } else { Start-RecoveryOwner codex }
         $subscriber=Start-RecoverySubscriber $identity codex
         Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
     }
+    elseif (Test-RecoverySharedProxy) { Write-Host '[Shared] Recovery is managed by the account serving this proxy.' }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
+    Exit-RecoveryOperation
     try {
     $pre = @()
     $pre += @(Get-CodexPreArgs $exe)
@@ -2242,6 +2328,8 @@ function cx-safe { cx -Safe @args }
 
 function tunnel-stop {
     param([string]$Node)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'tunnel-stop' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if (Test-RecoverySharedProxy) { Write-Host '[Shared] Tunnel stop is managed by the proxy owner; no tunnel was stopped.'; return $false }
     if ($Node) {
         $slot = Get-NodeSlot $Node
         if (-not $slot) { return $false }
@@ -2335,6 +2423,12 @@ function Stop-OneNode { param([string]$Node, [bool]$Force)
 
 function cc-stop {
     param([string]$Node, [switch]$Force)
+    if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'cc-stop' -Parameters $PSBoundParameters -ExtraArguments $args; return }
+    if (Test-RecoverySharedProxy) {
+        proxy-off
+        Write-Host '[Shared] This window was disconnected. The shared tunnel was kept running.'
+        return
+    }
     # bash spellings too: cc-stop sg --force / cc-stop --force sg
     $rest = @($args)
     if ($Node -in @('--force','-f')) { $Force = $true; $Node = "$($rest | Where-Object { "$_" -notin @('--force','-f') } | Select-Object -First 1)" }
@@ -2596,11 +2690,93 @@ function _conf-write-all {
     )
     foreach ($k in $script:CONF_KEYS) {
         $v = Get-Variable -Name $k -Scope Script -ValueOnly -ErrorAction SilentlyContinue
-        if ($v -is [int]) { $lines += "    $k = $v" }
-        else              { $lines += "    $k = '$("$v" -replace "'", "''")'" }
+        $lines += "    $k = $(ConvertTo-ProxyConfigLiteral -Value $v)"
     }
     $lines += '}'
     Set-Content -Path $script:PROXY_CONF -Value $lines -Encoding ascii
+}
+
+# Saved node assignments are native PSD1 data; plans never adopt running owners.
+function Test-ProxyNodePortValue { param($Value)
+    return (($Value -is [int] -or $Value -is [long] -or $Value -is [string]) -and "$Value" -match '^[1-9][0-9]{0,4}$' -and [long]$Value -le 65535)
+}
+function Get-ProxyNodePorts {
+    param([string]$Name,[int]$Index,[hashtable]$Settings)
+    if ($Name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw "Invalid node name: $Name" }
+    $overrides=$Settings.NODE_PORTS
+    if ($null -ne $overrides -and $overrides -isnot [hashtable]) { throw 'NODE_PORTS must be a hashtable.' }
+    if ($overrides -and $overrides.ContainsKey($Name)) {
+        $row=$overrides[$Name]
+        if ($row -isnot [hashtable] -or $row.Count -ne 2 -or -not $row.ContainsKey('HTTP_PORT') -or -not $row.ContainsKey('SOCKS_PORT')) { throw "NODE_PORTS.$Name must contain HTTP_PORT and SOCKS_PORT." }
+        $http=$row.HTTP_PORT; $socks=$row.SOCKS_PORT
+    } else {
+        if ($Index -lt 0 -or -not (Test-ProxyNodePortValue $Settings.NODE_HTTP_BASE) -or -not (Test-ProxyNodePortValue $Settings.NODE_SOCKS_BASE)) { throw "Invalid node port bases or slot for $Name." }
+        $http=[long]$Settings.NODE_HTTP_BASE+$Index; $socks=[long]$Settings.NODE_SOCKS_BASE+$Index
+    }
+    if (-not (Test-ProxyNodePortValue $http) -or -not (Test-ProxyNodePortValue $socks)) { throw "Ports for $Name must be from 1 to 65535 without leading zeroes." }
+    return @{HTTP_PORT=[int]$http;SOCKS_PORT=[int]$socks}
+}
+function Get-ProxyNodePortRows {
+    param([hashtable]$Settings)
+    $rows=@{}; $known=@{}; $aliases=@{}
+    if ($null -ne $Settings.NODE_PORTS -and $Settings.NODE_PORTS -isnot [hashtable]) { throw 'NODE_PORTS must be a hashtable.' }
+    if ($Settings.NODE_PORTS) {
+        foreach ($name in $Settings.NODE_PORTS.Keys) { $rows[$name]=Get-ProxyNodePorts -Name $name -Index 0 -Settings $Settings }
+    }
+    foreach ($node in @(Get-ProxyNodes)) {
+        if ($known.ContainsKey($node.Name) -and $known[$node.Name] -ne $node.Idx) { throw "Conflicting catalogue slots for $($node.Name)." }
+        $known[$node.Name]=$node.Idx
+        if ($node.Alias) { $aliases[$node.Alias]=$true }
+        if (-not $rows.ContainsKey($node.Name)) { $rows[$node.Name]=Get-ProxyNodePorts -Name $node.Name -Index $node.Idx -Settings $Settings }
+    }
+    if ($script:LOCAL_NODES -and (Test-Path -LiteralPath $script:LOCAL_NODES)) {
+        foreach ($line in @([IO.File]::ReadAllLines($script:LOCAL_NODES))) {
+            if (-not $line.Trim() -or $line.Trim().StartsWith('#')) { continue }
+            $parts=$line.Trim() -split '\s+'
+            if ($parts.Count -ne 2 -or $parts[1] -notmatch '^[0-9]{1,5}$') { throw "Invalid local node slot: $line" }
+            $name=$parts[0]
+            if ($known.ContainsKey($name) -or $aliases.ContainsKey($name)) { continue }
+            if (-not $rows.ContainsKey($name)) { $rows[$name]=Get-ProxyNodePorts -Name $name -Index ([int]$parts[1]) -Settings $Settings }
+        }
+    }
+    return $rows
+}
+function Assert-ProxyNodePorts {
+    param([hashtable]$Settings)
+    $rows=Get-ProxyNodePortRows -Settings $Settings
+    $used=@{}
+    foreach ($key in @('HTTP_PORT','SOCKS_PORT','NODE_HTTP_BASE','NODE_SOCKS_BASE')) {
+        if (-not (Test-ProxyNodePortValue $Settings[$key])) { throw "$key must be from 1 to 65535 without leading zeroes." }
+    }
+    foreach ($key in @('HTTP_PORT','SOCKS_PORT')) {
+        $p=[int]$Settings[$key]
+        if ($used.ContainsKey($p)) { throw "Main ports conflict on $p." }; $used[$p]="main $key"
+    }
+    foreach ($name in $rows.Keys) {
+        foreach ($key in @('HTTP_PORT','SOCKS_PORT')) {
+            $p=$rows[$name][$key]
+            if ($used.ContainsKey($p)) { throw "$name $key conflicts with $($used[$p]) on port $p." }
+            $used[$p]="$name $key"
+        }
+    }
+}
+function ConvertTo-ProxyConfigLiteral {
+    param($Value,[int]$Indent=0)
+    if ($Value -is [hashtable]) {
+        if ($Value.Count -eq 0) { return '@{}' }
+        $pad=' ' * $Indent
+        $entryPad=' ' * ($Indent+4)
+        $entries=@('@{')
+        foreach ($key in @($Value.Keys | Sort-Object)) {
+            if ($key -isnot [string]) { throw 'Configuration hashtable keys must be strings.' }
+            $entries+=($entryPad+"'"+$key.Replace("'","''")+"' = "+(ConvertTo-ProxyConfigLiteral -Value $Value[$key] -Indent ($Indent+4)))
+        }
+        $entries+=($pad+'}')
+        return $entries -join "`n"
+    }
+    if ($Value -is [int] -or $Value -is [long]) { return $Value.ToString([Globalization.CultureInfo]::InvariantCulture) }
+    if ($Value -is [string]) { return "'"+$Value.Replace("'","''")+"'" }
+    throw 'Configuration values must be strings, integers, or hashtables.'
 }
 
 function Test-ProxyConfigPort { param($Value)
@@ -2637,6 +2813,8 @@ function Get-ProxySavedConfig { param([string]$Path=$script:PROXY_CONF,[switch]$
             if (-not (Test-ProxyConfigPort $saved[$k])) { throw "$k must be a port from 1 to 65535 without leading zeroes. Fix: proxy-config edit." }
             $saved[$k]=[int]$saved[$k]
         }
+        Assert-ProxyNodePorts $saved
+        if ($saved.PROXY_MODE -and $saved.PROXY_MODE -notin @('managed','shared')) { throw 'PROXY_MODE must be managed or shared.' }
     }
     return $saved
 }
@@ -2650,7 +2828,30 @@ function Get-ProxyActiveSshPort { param($Record)
     } catch { }
     return 'unknown'
 }
+function Get-ProxyPortUse { param([int]$Port,[string]$Identity)
+    if (-not (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue)) { return 'unknown' }
+    try { $connections=@(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop) }
+    catch { return 'unknown' }
+    if (-not $connections.Count) { return 'free' }
+    $record=Get-RecoveryStatus $Identity sshpid
+    $procId=$connections[0].OwningProcess
+    if ($record.Pid -eq $procId -and (Test-RecoveryProcess $record.Pid "$($record.Started)")) { return 'this node' }
+    if ($procId) { return "occupied:PID$procId" }
+    return 'occupied:another account'
+}
+function Get-ProxyNodePlanSummary { param([hashtable]$Saved)
+    try { $rows=Get-ProxyNodePortRows $Saved }
+    catch { "[Err] Saved node assignments need repair in proxy-config edit: $($_.Exception.Message)"; return }
+    'Named-node port plan (separate from main; named routes stay fixed across default switches):'
+    '  {0,-14} {1,-7} {2,-7} {3,-15} {4}' -f 'Node','HTTP','SOCKS','Running','Local ports now'
+    foreach ($name in @($rows.Keys | Sort-Object)) {
+        $row=$rows[$name];$identity=Join-Path (Get-RecoveryRoot) "node-$name";$running='-/-'
+        if (Test-RecoveryOwner $identity) { $live=Get-RecoveryStatus $identity descriptor; $running="$($live.HTTP_PORT)/$($live.SOCKS_PORT)" }
+        '  {0,-14} {1,-7} {2,-7} {3,-15} HTTP {4}; SOCKS {5}' -f $name,$row.HTTP_PORT,$row.SOCKS_PORT,$running,(Get-ProxyPortUse $row.HTTP_PORT $identity),(Get-ProxyPortUse $row.SOCKS_PORT $identity)
+    }
+}
 function Get-ProxyConfigSummary { param([hashtable]$Saved)
+    "Proxy mode: $(if ($Saved.PROXY_MODE) {$Saved.PROXY_MODE} else {'managed'}) (shared clients never manage the serving account's tunnel)"
     "Saved default ports: HTTP $($Saved.HTTP_PORT) | SOCKS $($Saved.SOCKS_PORT) | remote proxy $($Saved.REMOTE_PROXY_PORT) | SSH $($Saved.SSH_PORT)"
     "Saved node bases: HTTP $($Saved.NODE_HTTP_BASE) | SOCKS $($Saved.NODE_SOCKS_BASE) (base + node slot)"
     'Active node ports (running owners; check connection with proxy-status):'
@@ -2668,6 +2869,7 @@ function Get-ProxyConfigSummary { param([hashtable]$Saved)
         }
     }
     if (-not $found) { '  None. Run cc to start the default tunnel.' }
+    Get-ProxyNodePlanSummary $Saved
     if ($different) {
         'Saved defaults differ from the running main tunnel.'
         '  Keep running ports: proxy-config use-active'
@@ -2685,7 +2887,7 @@ function Update-ProxyConfigText { param([string]$Text,[hashtable]$Values)
     $edits=@(); $missing=@()
     foreach ($key in $Values.Keys) {
         $value=$Values[$key]
-        $literal=if ($value -is [int] -or $value -is [long]) { "$value" } else { "'$([string]$value -replace "'","''")'" }
+        $literal=ConvertTo-ProxyConfigLiteral -Value $value
         $pair=@($table.KeyValuePairs | Where-Object { $_.Item1.SafeGetValue() -ieq $key })
         if ($pair.Count) {
             $extent=$pair[0].Item2.Extent
@@ -2701,7 +2903,9 @@ function Write-ProxyConfigCandidate { param([string]$Path,[string]$Body,[hashtab
     $lines=@('# BEGIN CLAUDE PROXY PORT STATUS',"# Editing settings for: $($script:PROXY_CONF)")
     $lines+=@(Get-ProxyConfigSummary $Saved | ForEach-Object { "# $_" })
     $lines+=@('# Running node ports above are a snapshot. Edit the settings below.',
-        '# Main ports: HTTP_PORT / SOCKS_PORT. Node ports: NODE_HTTP_BASE / NODE_SOCKS_BASE + slot.',
+        '# Main ports serve unqualified cc/cx. Named nodes use the editable NODE_PORTS table.',
+        '# Node bases apply only to nodes without an explicit NODE_PORTS row.',
+        '# Shared clients only select endpoints; they never rebind or restart the serving account.',
         '# Save and exit, then proxy-restart (or proxy-restart -Node sg) to apply changes.',
         '# If local ports change, relaunch affected applications after the restart.',
         '# SSH aliases can override SSH_PORT; edit their Port in ~/.ssh/config when needed.',
@@ -2735,7 +2939,8 @@ function Complete-ProxyConfigSave { param([string]$Candidate,[string]$OriginalTe
     Use-ProxySavedConfig $saved
     Write-Host "[OK] Saved settings to $($script:PROXY_CONF). Running tunnels were kept." -ForegroundColor Green
     foreach ($line in @(Get-ProxyConfigSummary $saved)) { Write-Host $line }
-    Write-Host 'If you changed the server or ports: proxy-restart (or proxy-restart -Node sg).' -ForegroundColor Yellow
+    if (Test-RecoverySharedProxy) { Write-Host 'Shared client: the next cc/cx uses these endpoints; their owner manages any tunnel changes.' -ForegroundColor Yellow }
+    else { Write-Host 'If you changed the server or ports: proxy-restart (or proxy-restart -Node sg).' -ForegroundColor Yellow }
     Write-Host 'Changing local ports requires relaunching applications that use the old ports.' -ForegroundColor Yellow
     Write-Host 'Other windows: . "$HOME\.claude-proxy.ps1" before launching again.' -ForegroundColor DarkGray
 }
@@ -2777,6 +2982,8 @@ function Edit-ProxyConfig {
             foreach ($key in @('HTTP_PORT','SOCKS_PORT','REMOTE_PROXY_PORT','SSH_PORT','NODE_HTTP_BASE','NODE_SOCKS_BASE')) {
                 if (-not $existing.ContainsKey($key)) { $missing[$key]=[int]$saved[$key] }
             }
+            try { $missing.NODE_PORTS=Get-ProxyNodePortRows -Settings $saved }
+            catch { Write-Host '[Warn] Existing node-port data needs repair; its saved text is preserved in the editor.' -ForegroundColor Yellow }
             $body=Update-ProxyConfigText -Text $text -Values $missing
         } catch {
             $body=$text -replace '(?ms)^# BEGIN CLAUDE PROXY PORT STATUS\r?\n.*?^# END CLAUDE PROXY PORT STATUS\r?\n',''
@@ -3103,6 +3310,10 @@ function chrome-proxy {
         $label = "$(if ($name) { $name } else { $script:SSH_HOST }) (main tunnel)"
     }
 
+    if ((Test-RecoverySharedProxy) -and -not (Test-RecoverySharedSocks $port)) {
+        Write-Host "[Err] Shared SOCKS proxy :$port is unavailable. Ask its owner to start this endpoint." -ForegroundColor Red
+        return
+    }
     $socks = "socks5://127.0.0.1:$port"
     $pdir  = Get-ChromeProfileDir $script:CHROME_BASE $name
     if ($profileName) { $label += ", profile '$profileName'" }

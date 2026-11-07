@@ -79,6 +79,7 @@ CLAUDE_NODE_SOCKS_BASE=1180
 # HTTP NODE_HTTP_BASE + i and SOCKS NODE_SOCKS_BASE + i; the default node keeps
 # HTTP_PORT / SOCKS_PORT.
 CLAUDE_NODE_HTTP_BASE=8180
+CLAUDE_NODE_PORTS=''             # editable rows: node HTTP SOCKS; empty uses base + slot
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
 
 # Where 'proxy-nodes --refresh' gets the node list from (set with 'proxy-nodes --from / --domain'):
@@ -108,6 +109,7 @@ CLAUDE_KILLSWITCH=on
 # cx-safe, but quiet: only the app writes to stdout). off = they run untouched:
 # Claude is still protected by its pinned settings; plain 'codex' is not.
 CLAUDE_PLAIN_COMMANDS=off
+CLAUDE_PROXY_MODE=managed       # managed SSH owner, or explicit shared proxy client
 
 # WSL only: ALSO keep the WINDOWS-side Claude (%USERPROFILE%\.claude\settings.json)
 # pointed at this tunnel while it is up. Windows reaches WSL's 127.0.0.1 ports
@@ -168,7 +170,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS CLAUDE_TERMINAL_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_NODE_PORTS CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_MODE CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS CLAUDE_TERMINAL_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -205,7 +207,12 @@ _port_bound() {
         ss -ltn 2>/dev/null | awk -v port="$p" '$4 ~ ("[:.]" port "$") { f = 1 } END { exit !f }'
         return $?
     fi
-    # No ss: lsof still sees only our own sockets, but it beats nothing.
+    if type _platform_port_bound >/dev/null 2>&1; then
+        local bound_rc=0
+        _platform_port_bound "$p" || bound_rc=$?
+        [ "$bound_rc" -eq 2 ] || return "$bound_rc"
+    fi
+    # Last fallback when the platform has no system-wide socket listing.
     [ -n "$(_listeners "$p")" ]
 }
 
@@ -341,6 +348,7 @@ _tunnel_ssh_args() {
 # BEGIN PROXY RECOVERY
 # BEGIN PLATFORM ADAPTERS
 # Linux and WSL adapters. Included in the generated profile at build time.
+_linux_port_bound() { return 2; } # common helper uses ss, then lsof
 _linux_uptime() {
     local up
     read -r up _ < /proc/uptime
@@ -423,6 +431,9 @@ _linux_install_node() {
     return 1
 }
 
+_platform_port_bound() {
+    _linux_port_bound "$@"
+}
 _platform_uptime() {
     _linux_uptime "$@"
 }
@@ -587,7 +598,13 @@ _recovery_record_get() { sed -n "s/^$2=//p" "$1/tunnel.rec" 2>/dev/null | head -
 # A terminal whose settings are stale (old conf, fallback port, another node)
 # must use the tunnel that is actually running, not recompute its own.
 # Adopts only while the owner is live; otherwise changes nothing.
+_proxy_shared() { [ "${CLAUDE_PROXY_MODE:-managed}" = shared ]; }
+_proxy_socks_ready() {
+    curl -q -sS -o /dev/null --connect-timeout 2 --max-time "${CLAUDE_WATCHDOG_PROBE_TIMEOUT:-3}" \
+        --noproxy= --proxy= --socks5-hostname "127.0.0.1:$1" https://api.anthropic.com/ >/dev/null 2>&1
+}
 _recovery_adopt() {
+    _proxy_shared && return 1
     local dir="${1:-}" v
     [ -n "$dir" ] || dir=$(_recovery_identity) || return 1
     _recovery_owner_pid "$dir" >/dev/null || return 1
@@ -1068,6 +1085,160 @@ proxy-notify() {
         echo '[Notify] Try proxy-notify test in another terminal while cc/cx is open. Desktop alerts never take over CLI input.'
     fi
 }
+# Shared mutation lease. Included after the recovery helpers by the profile builder.
+# Keep it outside recovery/: a coordinator is not a tunnel owner.
+_proxy_operation_dir() {
+    local root
+    root=$(_recovery_root) || return 1
+    printf '%s/operations\n' "${root%/*}"
+}
+_proxy_operation_owned() {
+    local dir token owner expected stamp nonce
+    [ -n "${_CLAUDE_OPERATION_TOKEN:-}" ] || return 1
+    dir=$(_proxy_operation_dir) || return 1
+    owner=$(_recovery_owner_pid "$dir") || return 1
+    token=$(cat "$dir/token" 2>/dev/null) || return 1
+    [ "$token" = "$_CLAUDE_OPERATION_TOKEN" ] || return 1
+    IFS='|' read -r expected stamp nonce <<< "$token"
+    [ "$owner" = "$expected" ] && [ "$(_recovery_process_identity "$owner")" = "$stamp" ]
+}
+_proxy_operation_claim_wait() {
+    local dir="$1" me="$2" i=0
+    while ! _recovery_claim "$dir" "$me"; do
+        if [ "$i" -ge 300 ]; then
+            echo '[Err] Another terminal is still changing proxy settings or tunnels. Operation timed out after 30 seconds; retry when it finishes.' >&2
+            return 1
+        fi
+        sleep .1; i=$((i+1))
+    done
+}
+_proxy_operation_release() {
+    local token="${1-${_CLAUDE_OPERATION_TOKEN:-}}" dir owner current expected stamp nonce gate me rc=0
+    [ -n "$token" ] || return 0
+    dir=$(_proxy_operation_dir) || return 1
+    current=$(cat "$dir/token" 2>/dev/null) || return 0
+    [ "$current" = "$token" ] || return 0
+    owner=$(_recovery_owner_pid "$dir") || return 0
+    # Two inherited callbacks may release together. Serialize their validation
+    # and removal with the same crash-recoverable lease primitive as the owner.
+    # Recheck after acquiring: the earlier read may name a previous generation.
+    gate="$dir/release"
+    me=$(exec sh -c 'echo $PPID')
+    _proxy_operation_claim_wait "$gate" "$me" || return 1
+    current=$(cat "$dir/token" 2>/dev/null) || current=''
+    owner=$(_recovery_owner_pid "$dir") || owner=''
+    IFS='|' read -r expected stamp nonce <<< "$token"
+    if [ "$current" = "$token" ] && [ "$owner" = "$expected" ] && [ "$(_recovery_process_identity "$owner")" = "$stamp" ]; then
+        # Remove the generation before dropping the lease, never after: a new
+        # operation may publish its own token as soon as the owner is released.
+        rm -f "$dir/token"
+        _recovery_release "$dir" "$owner" || rc=1
+    fi
+    _recovery_release "$gate" "$me" || rc=1
+    if [ "${_CLAUDE_OPERATION_TOKEN:-}" = "$token" ]; then _CLAUDE_OPERATION_TOKEN=''; fi
+    return "$rc"
+}
+_proxy_operation_run() {
+    if _proxy_operation_owned; then "$@"; return $?; fi
+    local dir me candidate acquired rc stamp
+    local _CLAUDE_OPERATION_TOKEN="${_CLAUDE_OPERATION_TOKEN:-}"
+    dir=$(_proxy_operation_dir) || return 1
+    (umask 077; mkdir -p "$dir") || return 1
+    chmod 700 "$dir" || return 1
+    # Unlike $$, this is the executing shell even inside $(...) or a subshell.
+    me=$(exec sh -c 'echo $PPID')
+    _proxy_operation_claim_wait "$dir" "$me" || return 1
+    candidate=$(umask 077; mktemp "$dir/token.XXXXXX") || { _recovery_release "$dir" "$me"; return 1; }
+    stamp=$(_recovery_process_identity "$me") || { rm -f "$candidate"; _recovery_release "$dir" "$me"; return 1; }
+    acquired="$me|$stamp|${candidate##*/}"
+    rm -f "$candidate"
+    if ! _recovery_write "$dir/token" "$acquired" "$me"; then
+        _recovery_release "$dir" "$me"; return 1
+    fi
+    _CLAUDE_OPERATION_TOKEN=$acquired
+    # Do not install traps: callers retain their INT/TERM/EXIT handlers. A dead
+    # shell's lease is recovered by the existing identity-checked claim helper.
+    if "$@"; then rc=0; else rc=$?; fi
+    # The command can release early (before running an interactive CLI). Its
+    # original generation must never release a newer operation at final cleanup.
+    _proxy_operation_release "$acquired" || :
+    return "$rc"
+}
+# Saved node endpoint assignments are data: node HTTP SOCKS, one row per line.
+# Plan from saved/catalogue/local-slot data only; never adopt or allocate owners.
+_node_ports_plan() {  # [extra canonical name] [catalogue/local slot]
+    {
+        printf 'B|%s|%s|%s|%s\n' "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$CLAUDE_NODE_HTTP_BASE" "$CLAUDE_NODE_SOCKS_BASE"
+        printf '%s\n' "${CLAUDE_NODE_PORTS:-}" | while IFS= read -r row; do printf 'R|%s\n' "$row"; done
+        _nodes_tsv 2>/dev/null | while IFS='|' read -r idx name alias rest; do
+            [ -z "$name" ] || printf 'K|%s|%s|%s\n' "$name" "$idx" "$alias"
+        done
+        if [ -n "${CLAUDE_PROXY_LOCAL_NODES:-}" ] && [ -f "$CLAUDE_PROXY_LOCAL_NODES" ]; then
+            while read -r name idx rest; do
+                case "$name" in ''|\#*) continue;; esac
+                printf 'L|%s|%s\n' "$name" "$idx"
+            done < "$CLAUDE_PROXY_LOCAL_NODES"
+        fi
+        [ -z "${1:-}" ] || printf 'K|%s|%s|\n' "$1" "$2"
+    } | awk -F'|' -v allow_conflicts="${3:-0}" '
+        function fail(message) { print "[Err] Node ports: " message > "/dev/stderr"; bad=1 }
+        function port(p) { return p ~ /^[1-9][0-9]*$/ && length(p)<=5 && p+0<=65535 }
+        function nameok(n) { return n ~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/ }
+        function add(n, h, s) { if (!(n in listed)) { order[++count]=n; listed[n]=1 }; http[n]=h; socks[n]=s }
+        function claim(p, label) { if (allow_conflicts==1) return; if (p in occupied) fail(label " conflicts with " occupied[p] " on port " p); else occupied[p]=label }
+        $1=="B" { mainh=$2; mains=$3; baseh=$4; bases=$5; next }
+        $1=="R" {
+            row=substr($0,3); sub(/#.*/,"",row); gsub(/^[ \t]+|[ \t]+$/,"",row)
+            if (row=="") next
+            fields=split(row,a,/[ \t]+/); n=a[1]
+            if (fields!=3 || !nameok(n) || !port(a[2]) || !port(a[3])) { fail("invalid assignment: " row); next }
+            if (n in saved) { fail("duplicate node " n); next }
+            saved[n]=1; add(n,a[2],a[3]); next
+        }
+        $1=="K" {
+            if ($2 in known) { if (known[$2]!=$3) fail("conflicting catalogue slots for " $2); next }
+            known[$2]=$3; aliases[$4]=1; kn[++nk]=$2; next
+        }
+        $1=="L" { ln[++nl]=$2; li[nl]=$3; next }
+        END {
+            if (!port(mainh) || !port(mains) || !port(baseh) || !port(bases)) fail("main ports and node bases must be from 1 to 65535 without leading zeroes")
+            claim(mainh,"main HTTP"); claim(mains,"main SOCKS")
+            for (i=1;i<=nk;i++) {
+                n=kn[i]; idx=known[n]
+                if (!nameok(n) || idx !~ /^[0-9]+$/ || length(idx)>5) { fail("invalid node or slot: " n); continue }
+                if (!(n in saved)) add(n,baseh+idx,bases+idx)
+            }
+            for (i=1;i<=nl;i++) {
+                n=ln[i]; idx=li[i]
+                if (n in aliases || n in known) continue
+                if (!nameok(n) || idx !~ /^[0-9]+$/ || length(idx)>5) { fail("invalid local node or slot: " n); continue }
+                if (!(n in listed)) add(n,baseh+idx,bases+idx)
+            }
+            for (i=1;i<=count;i++) {
+                n=order[i]; h=http[n]; s=socks[n]
+                if (!port(h) || !port(s)) { fail("ports for " n " must be from 1 to 65535 without leading zeroes"); continue }
+                claim(h,n " HTTP"); claim(s,n " SOCKS")
+            }
+            if (bad) exit 1
+            for (i=1;i<=count;i++) { n=order[i]; print n "|" http[n] "|" socks[n] }
+        }'
+}
+_node_ports_saved() {  # <canonical name> <catalogue/local slot> -> HTTP SOCKS
+    local plan
+    plan=$(_node_ports_plan "$1" "$2" 1) || return 1
+    printf '%s\n' "$plan" | awk -F'|' -v name="$1" '$1==name {print $2 " " $3; found=1; exit} END {if (!found) exit 1}'
+}
+_node_ports_validate() { _node_ports_plan >/dev/null; }
+_node_ports_rows() {
+    local plan
+    plan=$(_node_ports_plan '' '' 1) || return 1
+    printf '%s\n' "$plan" | tr '|' ' '
+}
+_node_ports_editor_section() {
+    local rows
+    rows=$(_node_ports_rows) || return 1
+    printf "%s\n%s\n%s\n%s\n" '# BEGIN CLAUDE NODE PORTS' "CLAUDE_NODE_PORTS='" "$rows'" '# END CLAUDE NODE PORTS'
+}
 # END PROXY RECOVERY
 
 # Compatibility entry points all delegate to the single recovery owner.
@@ -1489,14 +1660,12 @@ _node_local_slot() {  # <alias>
 _node_slot() {  # <node name or alias>
     local line idx name alias host
     if ! line=$(_node_lookup "$1"); then
-        [ "$1" != "$CLAUDE_SSH_HOST" ] || { echo main; return 0; }
         # Not in the node list, but a plain ssh alias: a node of its own.
         if _ssh_config_has_alias "$1"; then echo "node-$1"; return 0; fi
         echo "[Err] Unknown node '$1'. It is not in the node list ('proxy-nodes') and not an alias in ~/.ssh/config." >&2
         return 1
     fi
     IFS='|' read -r idx name alias host _ <<< "$line"
-    if [ "$alias" = "$CLAUDE_SSH_HOST" ]; then echo main; return 0; fi
     if ! _node_provisioned "$host"; then
         echo "[Err] Node '$name' has no address in the catalogue yet - ask your admin, then 'proxy-nodes --refresh'." >&2
         return 1
@@ -1523,7 +1692,9 @@ _node_ctx() {  # <node name or alias>
         idx=$(_node_local_slot "$1") || return 1
         name=$1 alias=$1 sport='' pport=$CLAUDE_REMOTE_PROXY_PORT
     fi
-    http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
+    read -r http socks <<< "$(_node_ports_saved "$name" "$idx")"
+    [ -n "$http" ] && [ -n "$socks" ] || return 1
+    if [ "$http" = "$socks" ]; then echo '[Err] A node needs different HTTP and SOCKS ports. Fix: proxy-config edit.' >&2; return 1; fi
     if [ "$http" = "$CLAUDE_HTTP_PORT" ] || [ "$http" = "$CLAUDE_SOCKS_PORT" ]; then
         echo "[Err] Node '$name' would use port $http, which the default tunnel uses. Fix: proxy-config set NODE_HTTP_BASE $((CLAUDE_HTTP_PORT + 100))" >&2
         return 1
@@ -1817,7 +1988,13 @@ proxy-nodes() {
 }
 
 proxy-node() {  # [--force] [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run proxy-node "$@"; return; fi
+    if _proxy_shared; then
+        echo '[Shared] The default server is controlled by the proxy owner. Use cc/cx --node <name> for a configured node endpoint.'
+        [ $# -eq 0 ]; return
+    fi
     local force=0 want='' line idx name alias host user sport pport rest n dir
+    _recovery_adopt >/dev/null 2>&1 || :
     while [ $# -gt 0 ]; do
         case "$1" in --force|-f) force=1 ;; *) want="$1" ;; esac
         shift
@@ -1858,22 +2035,33 @@ proxy-node() {  # [--force] [node]
         return 1
     fi
 
-    local was_up=0 env_on=0
+    local was_up=0 env_on=0 stable_http=$CLAUDE_HTTP_PORT stable_socks=$CLAUDE_SOCKS_PORT
     [ "$(_tunnel_health | awk '{print $1}')" = "ok" ] && was_up=1
+    [ -z "$dir" ] || ! _recovery_owner_pid "$dir" >/dev/null || was_up=1
     [ -n "${HTTPS_PROXY:-}" ] && env_on=1
+    if [ "$was_up" -eq 1 ]; then
+        echo '[Warn] Switching the main endpoint also moves untracked clients: plain CLI, extensions, default Chrome and other accounts using it.' >&2
+        echo '       Explicit named-node clients keep their own node ports.' >&2
+    fi
 
-    _conf_set CLAUDE_SSH_HOST "$alias"
-    [ -n "$pport" ] && _conf_set CLAUDE_REMOTE_PROXY_PORT "$pport"
+    _conf_set CLAUDE_SSH_HOST "$alias" || return 1
+    if [ -n "$pport" ]; then _conf_set CLAUDE_REMOTE_PROXY_PORT "$pport" || return 1; fi
     if [ $was_up -eq 1 ]; then
         echo "[Node] Switching the cc/cx tunnel to $name ($alias)..."
-        tunnel-stop
+        tunnel-stop || return 1
     fi
-    _conf_reload
-    echo "[OK] Active node: $name ($alias) - saved to $CLAUDE_PROXY_CONF"
+    _conf_reload || return 1
+    CLAUDE_HTTP_PORT=$stable_http CLAUDE_SOCKS_PORT=$stable_socks
     if [ $was_up -eq 1 ]; then
         tunnel-start || return 1
+        _recovery_adopt >/dev/null 2>&1 || :
+        if [ "$CLAUDE_SSH_HOST" != "$alias" ]; then
+            echo '[Err] Default-node switch did not establish the requested server. Run proxy-status.' >&2
+            return 1
+        fi
         [ $env_on -eq 1 ] && proxy-on
     fi
+    echo "[OK] Active node: $name ($alias) - HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT"
     echo "[Info] Open shells keep the old node until they run: source $CLAUDE_PROXY_SELF"
 }
 
@@ -1915,10 +2103,23 @@ _node_tunnel_up() {  # <node>
 }
 
 tunnel-start() {  # [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run tunnel-start "$@"; return; fi
+    if _proxy_shared; then
+        echo '[Shared] Using the configured proxy endpoints; this account does not start or manage the tunnel.'
+        return 0
+    fi
+    _recovery_adopt >/dev/null 2>&1 || :
     if [ -n "${1:-}" ]; then
         local nslot
         nslot=$(_node_slot "$1") || return 1
-        if [ "$nslot" != main ]; then _node_tunnel_up "$1"; return; fi
+        if [ "$nslot" != main ]; then
+            local ndir
+            ndir=$(_recovery_identity "$nslot") || return 1
+            if ! _recovery_owner_pid "$ndir" >/dev/null; then
+                _conf_check_restart_ports "$nslot" "$1" || return 1
+            fi
+            _node_tunnel_up "$1"; return
+        fi
     fi
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     # Everything below needs an ssh client, and without this guard the failure
@@ -2046,6 +2247,11 @@ tunnel-start() {  # [node]
 }
 
 tunnel-stop() {  # [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run tunnel-stop "$@"; return; fi
+    if _proxy_shared; then
+        echo '[Shared] Tunnel stop is managed by the proxy owner; no tunnel was stopped.' >&2
+        return 1
+    fi
     if [ -n "${1:-}" ]; then
         local nslot ndir
         nslot=$(_node_slot "$1") || return 1
@@ -2172,6 +2378,7 @@ _killswitch_check() {  # <http port> <socks port> [slot dir]
         return 1
     fi
     # Our ssh is the one the owner published - checked by start identity, so a reused PID is not it.
+    if ! _proxy_shared; then
     [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
     if [ -n "$dir" ] && IFS='|' read -r spid sstamp < "$dir/ssh.pid" 2>/dev/null; then
         # An owner started by 2.11.3 or older saved macOS ps padding: compare trimmed.
@@ -2199,6 +2406,7 @@ _killswitch_check() {  # <http port> <socks port> [slot dir]
             return 1
         fi
     done
+    fi
     # Claude reads its settings.json over the shell, so it must name this same port.
     if [ "$http" = "$CLAUDE_HTTP_PORT" ] && [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] && command -v jq >/dev/null 2>&1; then
         _killswitch_ensure_pin >/dev/null
@@ -2319,7 +2527,10 @@ _proxy_transport_wait() {  # <provider> <http port> <socks port> [slot dir]
         if [ "$woke" -eq 0 ]; then
             woke=1
             [ -n "$dir" ] || dir=$(_recovery_identity 2>/dev/null) || dir=''
-            if [ -n "$dir" ] && _recovery_owner_pid "$dir" >/dev/null; then
+            if _proxy_shared; then
+                dir=shared
+                echo '[Wait] Shared proxy is not answering yet; waiting for its owner to reconnect...'
+            elif [ -n "$dir" ] && _recovery_owner_pid "$dir" >/dev/null; then
                 : > "$dir/wake"; echo "[Wait] Proxy not answering yet - waiting for the recovery owner to reconnect..."
             else dir=-; fi
         fi
@@ -2350,14 +2561,25 @@ _node_up() {  # <node> <provider>
     read -r http socks <<< "$(_node_ctx "$1" && echo "$CLAUDE_HTTP_PORT $CLAUDE_SOCKS_PORT")"
     [ -n "$http" ] || return 1
     tunnel-start "$1" >&2 || return 1
-    dir=$(_recovery_identity "$(_node_slot "$1")") || return 1
+    if _proxy_shared; then dir=shared
+    else dir=$(_recovery_identity "$(_node_slot "$1")") || return 1; fi
     _proxy_transport_wait "$2" "$http" "$socks" "$dir" >&2 || return 1
     _killswitch_check "$http" "$socks" "$dir" >&2 || return 1
     echo "$http $socks $dir"
 }
 
 proxy-up() {
-    _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
+    if ! _proxy_operation_owned; then _proxy_operation_run proxy-up "$@"; return; fi
+    case "${CLAUDE_PROXY_MODE:-managed}" in managed|shared) :;; *) echo '[Err] PROXY_MODE must be managed or shared.' >&2; return 1;; esac
+    if ! _recovery_adopt >/dev/null 2>&1 && ! _proxy_shared; then
+        # Read the saved transport without replacing caller function adapters.
+        CLAUDE_SSH_HOST=jpvpn CLAUDE_SSH_USER='' CLAUDE_SSH_KEY='' CLAUDE_SSH_PORT=22
+        CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080 CLAUDE_REMOTE_PROXY_PORT=8888
+        CLAUDE_NODE_HTTP_BASE=8180 CLAUDE_NODE_SOCKS_BASE=1180 CLAUDE_NODE_PORTS=''
+        if [ -n "${CLAUDE_PROXY_CONF:-}" ] && [ -f "$CLAUDE_PROXY_CONF" ]; then
+            bash -n "$CLAUDE_PROXY_CONF" 2>/dev/null && . "$CLAUDE_PROXY_CONF" || return 1
+        fi
+    fi
     local no_verify=0 node="" provider="${_CLAUDE_LAUNCH_PROVIDER:-claude}"
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -2388,13 +2610,13 @@ proxy-up() {
     # and falls back to a free port when a foreign app holds the configured one -
     # so require actual health afterwards, not just "something is on the port".
     tunnel-start || return 1
-    if [ "$(_tunnel_health | awk '{print $1}')" != "ok" ]; then
+    _proxy_transport_wait "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
+    if ! _proxy_shared && [ "$(_tunnel_health | awk '{print $1}')" != "ok" ]; then
         echo "[Err] Tunnel ports are not ready (HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT)."
         echo "      Run proxy-status to see the ports in use, or proxy-doctor for the cause."
         return 1
     fi
 
-    _proxy_transport_wait "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     _killswitch_check "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     # Step 2: Env vars (+ settings.json sync)
     proxy-on
@@ -2433,6 +2655,7 @@ _codex_no_daemon() {
 # EVERYTHING ELSE is passed straight to the app, so 'cc -c', 'cc -r',
 # 'cc --resume <id>', 'cx resume' ... all work.
 _launch_via_proxy() {
+    if ! _proxy_operation_owned; then _proxy_operation_run _launch_via_proxy "$@"; return; fi
     local label="$1" bin="$2" hint="$3" skip_flag="$4"
     shift 4
     local safe=0 quiet=0 node='' no_verify=0
@@ -2476,7 +2699,9 @@ _launch_via_proxy() {
         echo "[Node] This terminal uses $node. To make $node the default: proxy-node $node" >&2
     elif [ "$quiet" -eq 1 ]; then proxy-up ${up_args[@]+"${up_args[@]}"} >&2 || return 1
     else proxy-up ${up_args[@]+"${up_args[@]}"} || return 1; fi
-    if [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
+    if _proxy_shared; then
+        [ "$quiet" -eq 1 ] || echo '[Shared] Recovery is managed by the account serving this proxy.'
+    elif [ "${CLAUDE_TUNNEL_WATCHDOG:-1}" = 1 ]; then
         [ -n "$url" ] || identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
@@ -2485,6 +2710,7 @@ _launch_via_proxy() {
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
 
+    _proxy_operation_release || return 1
     saved_int=$(trap -p INT)
     trap '_recovery_unsubscribe "$subscriber" "$subscriber_stamp"' INT
     # Step 4: launch (it picks up HTTP(S)_PROXY from this shell's env)
@@ -2553,6 +2779,12 @@ _node_stop() {  # <node> <force 0|1>
 }
 
 cc-stop() {  # [--force] [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run cc-stop "$@"; return; fi
+    if _proxy_shared; then
+        proxy-off
+        echo '[Shared] This shell was disconnected. The shared tunnel was kept running.'
+        return 0
+    fi
     # tunnel-stop does the hardened kill-all-on-both-ports + verify; honour its
     # result so cc-stop never falsely claims success when a port is still held.
     local rc=0 force=0 others n sessions dir node='' a
@@ -2595,6 +2827,11 @@ cc-stop() {  # [--force] [node]
 # Restart explicitly using saved settings. Same endpoints let applications
 # reconnect; changed local ports require affected applications to be relaunched.
 proxy-restart() {  # [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run proxy-restart "$@"; return; fi
+    if _proxy_shared; then
+        echo '[Shared] Restart is managed by the proxy owner; no tunnel was stopped.' >&2
+        return 1
+    fi
     local state rc cc hc port old_http old_socks new_socks target=main
     if [ -n "${1:-}" ] && [ "$(_node_slot "$1" 2>/dev/null)" != main ]; then
         _node_slot "$1" >/dev/null || return 1
@@ -2979,6 +3216,7 @@ _doctor_vm_check() {
 # Write KEY=VALUE into the conf file (replace the line if the key exists,
 # append otherwise). Creates the file with a header on first use.
 _conf_set() {
+    if ! _proxy_operation_owned; then _proxy_operation_run _conf_set "$@"; return; fi
     local key="$1" val="$2" tmp
     case "$key" in CLAUDE_*) ;; *) key="CLAUDE_$key" ;; esac
     if [ ! -f "$CLAUDE_PROXY_CONF" ]; then
@@ -3006,6 +3244,7 @@ _conf_set() {
 _conf_write_all() {
     local k v
     for k in $(echo "$_CLAUDE_CONF_KEYS"); do
+        [ "$k" != CLAUDE_NODE_PORTS ] || continue # multiline data is materialized by the editor
         eval "v=\${$k}"
         _conf_set "$k" "$v"
     done
@@ -3026,18 +3265,20 @@ _conf_requested_ports() (
     # Read saved values without adopting live owners or changing this shell.
     CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
     CLAUDE_NODE_HTTP_BASE=8180 CLAUDE_NODE_SOCKS_BASE=1180
+    CLAUDE_NODE_PORTS=''
     if [ -f "$CLAUDE_PROXY_CONF" ]; then
         bash -n "$CLAUDE_PROXY_CONF" 2>/dev/null && . "$CLAUDE_PROXY_CONF" || return 1
     fi
     local line idx http=$CLAUDE_HTTP_PORT socks=$CLAUDE_SOCKS_PORT
     if [ -n "${1:-}" ]; then
         _conf_port_valid "$CLAUDE_NODE_HTTP_BASE" && _conf_port_valid "$CLAUDE_NODE_SOCKS_BASE" || return 1
-        if line=$(_node_lookup "$1"); then IFS='|' read -r idx _ <<< "$line"
-        else idx=$(_node_local_slot "$1") || return 1; fi
+        local name
+        if line=$(_node_lookup "$1"); then IFS='|' read -r idx name _ <<< "$line"
+        else idx=$(_node_local_slot "$1") || return 1; name=$1; fi
         case "$idx" in ''|*[!0-9]*) return 1;; esac
         [ "${#idx}" -le 5 ] || return 1
         idx=$((10#$idx))
-        http=$((CLAUDE_NODE_HTTP_BASE + idx)) socks=$((CLAUDE_NODE_SOCKS_BASE + idx))
+        read -r http socks <<< "$(_node_ports_saved "$name" "$idx")"
     fi
     _conf_port_valid "$http" && _conf_port_valid "$socks" || return 1
     [ "$http" != "$socks" ] || return 1
@@ -3109,13 +3350,45 @@ _conf_active_ports() {
     done <<< "$(_recovery_owned_dirs all || :)"
     [ "$found" -ne 0 ] || echo '  None. Run cc to start the default tunnel.'
 }
+_conf_port_use() {  # <port> [node owner directory]
+    local pids pid own='' stamp='' dir="${2:-}"
+    if [ -n "$dir" ] && _recovery_owner_pid "$dir" >/dev/null 2>&1; then
+        if [ -r "$dir/ssh.pid" ]; then IFS='|' read -r own stamp < "$dir/ssh.pid" || own=''; fi
+        [ -z "$own" ] || [ "$(_recovery_process_identity "$own" 2>/dev/null)" = "$stamp" ] || own=''
+    fi
+    pids=$(_listeners "$1")
+    if [ -n "$pids" ]; then
+        pid=$(printf '%s\n' "$pids" | head -1)
+        if [ "$pid" = "$own" ]; then echo 'this node'
+        else printf 'occupied:%s/PID%s\n' "$(_proc_name "$pid")" "$pid"; fi
+    elif _port_bound "$1"; then echo 'occupied:another account'
+    else echo free; fi
+}
+_conf_node_plan_summary() (
+    local plan name http socks dir live_http live_socks
+    CLAUDE_HTTP_PORT=$_CLAUDE_SAVED_HTTP_PORT CLAUDE_SOCKS_PORT=$_CLAUDE_SAVED_SOCKS_PORT
+    CLAUDE_NODE_HTTP_BASE=$_CLAUDE_SAVED_NODE_HTTP_BASE CLAUDE_NODE_SOCKS_BASE=$_CLAUDE_SAVED_NODE_SOCKS_BASE
+    plan=$(_node_ports_plan '' '' 1) || { echo '[Err] Saved node assignments need repair in proxy-config edit.'; return; }
+    echo 'Named-node port plan (separate from main; named routes stay fixed across default switches):'
+    printf '  %-14s %-7s %-7s %-15s %s\n' Node HTTP SOCKS Running 'Local ports now'
+    while IFS='|' read -r name http socks; do
+        [ -n "$name" ] || continue
+        dir="$(_recovery_root)/node-$name"; live_http=-; live_socks=-
+        if _recovery_owner_pid "$dir" >/dev/null 2>&1; then
+            live_http=$(_recovery_record_get "$dir" http); live_socks=$(_recovery_record_get "$dir" socks)
+        fi
+        printf '  %-14s %-7s %-7s %-15s HTTP %s; SOCKS %s\n' "$name" "$http" "$socks" "$live_http/$live_socks" "$(_conf_port_use "$http" "$dir")" "$(_conf_port_use "$socks" "$dir")"
+    done <<< "$plan"
+)
 _conf_port_summary() {
+    printf 'Proxy mode: %s (shared clients never manage the serving account\047s tunnel)\n' "${CLAUDE_PROXY_MODE:-managed}"
     printf 'Saved default ports: HTTP %s | SOCKS %s | remote proxy %s | SSH %s\n' \
         "$_CLAUDE_SAVED_HTTP_PORT" "$_CLAUDE_SAVED_SOCKS_PORT" \
         "$_CLAUDE_SAVED_REMOTE_PROXY_PORT" "$_CLAUDE_SAVED_SSH_PORT"
     printf 'Saved node bases: HTTP %s | SOCKS %s (base + node slot)\n' \
         "$_CLAUDE_SAVED_NODE_HTTP_BASE" "$_CLAUDE_SAVED_NODE_SOCKS_BASE"
     _conf_active_ports
+    _conf_node_plan_summary
     if [ "$CLAUDE_HTTP_PORT:$CLAUDE_SOCKS_PORT:$CLAUDE_REMOTE_PROXY_PORT:$CLAUDE_SSH_PORT" != \
          "$_CLAUDE_SAVED_HTTP_PORT:$_CLAUDE_SAVED_SOCKS_PORT:$_CLAUDE_SAVED_REMOTE_PROXY_PORT:$_CLAUDE_SAVED_SSH_PORT" ]; then
         echo 'Saved defaults differ from the running main tunnel.'
@@ -3127,30 +3400,50 @@ _conf_after_save() {
     _conf_reload || return 1
     echo "[OK] Saved settings to $CLAUDE_PROXY_CONF. Running tunnels were kept."
     _conf_port_summary
-    echo 'If you changed the server or ports: proxy-restart (or proxy-restart <node> for another node).'
+    if _proxy_shared; then
+        echo 'Shared client: the next cc/cx uses these endpoints; their owner manages any tunnel changes.'
+    else echo 'If you changed the server or ports: proxy-restart (or proxy-restart <node> for another node).'; fi
     echo 'Changing local ports requires relaunching applications that use the old ports.'
     echo 'Other windows: source ~/.claude-proxy.sh to load these settings.'
 }
-_conf_edit() {
-    local tmp key value editor="${VISUAL:-${EDITOR:-nano}}" rc
+_conf_commit_edit() {
+    if ! _proxy_operation_owned; then _proxy_operation_run _conf_commit_edit "$@"; return; fi
+    local candidate="$1" snapshot="$2" existed="$3"
+    if { [ "$existed" -eq 1 ] && { [ ! -f "$CLAUDE_PROXY_CONF" ] || ! cmp -s "$snapshot" "$CLAUDE_PROXY_CONF"; }; } ||
+       { [ "$existed" -eq 0 ] && [ -e "$CLAUDE_PROXY_CONF" ]; }; then
+        echo '[Err] Configuration changed in another window. Its changes were kept; reopen proxy-config edit.' >&2
+        return 1
+    fi
+    if [ "$existed" -eq 1 ]; then cp -p "$CLAUDE_PROXY_CONF" "$CLAUDE_PROXY_CONF.bak" || return 1; fi
+    mv "$candidate" "$CLAUDE_PROXY_CONF" || return 1
+    _conf_after_save
+}
+_conf_edit_run() {
+    local key value editor="${VISUAL:-${EDITOR:-nano}}" rc node_section=''
     local editor_args=()
-    mkdir -p "$(dirname "$CLAUDE_PROXY_CONF")" || return 1
-    tmp=$(mktemp "${CLAUDE_PROXY_CONF}.edit.XXXXXX") || return 1
+    CLAUDE_PROXY_CONF="$original" _conf_reload >/dev/null 2>&1 || :
+    node_section=$(_node_ports_editor_section) || node_section=''
     {
         echo '# BEGIN CLAUDE PROXY PORT STATUS'
         echo "# Editing settings for: $CLAUDE_PROXY_CONF"
         _conf_port_summary | sed 's/^/# /'
         echo '# Edit the CLAUDE_* port values below. Running node ports above are a snapshot.'
-        echo '# Main ports: HTTP_PORT / SOCKS_PORT. Node ports: NODE_HTTP_BASE / NODE_SOCKS_BASE + slot.'
+        echo '# Main ports serve unqualified cc/cx. Named nodes use the editable NODE_PORTS table.'
+        echo '# Node bases apply only to nodes without an explicit NODE_PORTS row.'
+        echo '# A shared client only selects endpoints; it never rebinds or restarts the owner.'
         echo '# Save and exit, then proxy-restart (or proxy-restart <node>) to apply port changes.'
         echo '# If local ports change, relaunch affected applications after the restart.'
         echo '# SSH aliases can override SSH_PORT; edit their Port in ~/.ssh/config when needed.'
         echo '# END CLAUDE PROXY PORT STATUS'
-        if [ -f "$CLAUDE_PROXY_CONF" ]; then
-            awk '/^# BEGIN CLAUDE PROXY PORT STATUS$/ {skip=1; next}
-                 /^# END CLAUDE PROXY PORT STATUS$/ {skip=0; next} !skip {print}' "$CLAUDE_PROXY_CONF"
+        if [ "$original_exists" -eq 1 ]; then
+            awk -v replace_nodes="$([ -n "$node_section" ] && echo 1 || echo 0)" '
+                 replace_nodes && /^# BEGIN CLAUDE NODE PORTS$/ {skip=1; next}
+                 replace_nodes && /^# END CLAUDE NODE PORTS$/ {skip=0; next}
+                 /^# BEGIN CLAUDE PROXY PORT STATUS$/ {skip=1; next}
+                 /^# END CLAUDE PROXY PORT STATUS$/ {skip=0; next} !skip {print}' "$original"
         fi
     } > "$tmp"
+    [ -z "$node_section" ] || printf '\n%s\n' "$node_section" >> "$tmp"
     for key in HTTP_PORT SOCKS_PORT REMOTE_PROXY_PORT SSH_PORT NODE_HTTP_BASE NODE_SOCKS_BASE; do
         if ! grep -q "^[[:space:]]*CLAUDE_${key}=" "$tmp"; then
             value=$(_conf_saved_port "$key")
@@ -3172,14 +3465,27 @@ _conf_edit() {
             eval 'value=$CLAUDE_'"$key"
             _conf_port_valid "$value" || { echo "[Err] $key must be a port from 1 to 65535, without leading zeroes." >&2; exit 1; }
         done
+        _node_ports_validate || exit 1
+        case "${CLAUDE_PROXY_MODE:-managed}" in managed|shared) :;; *) echo '[Err] PROXY_MODE must be managed or shared.' >&2; exit 1;; esac
     ); then
         rm -f "$tmp"
         echo '[Err] Invalid configuration; previous settings were kept.' >&2
         return 1
     fi
-    if [ -f "$CLAUDE_PROXY_CONF" ]; then cp -p "$CLAUDE_PROXY_CONF" "$CLAUDE_PROXY_CONF.bak" || { rm -f "$tmp"; return 1; }; fi
-    mv "$tmp" "$CLAUDE_PROXY_CONF" || { rm -f "$tmp"; return 1; }
-    _conf_after_save
+    _conf_commit_edit "$tmp" "$original" "$original_exists"
+}
+_conf_edit() {
+    local tmp original original_exists=0 rc
+    mkdir -p "$(dirname "$CLAUDE_PROXY_CONF")" || return 1
+    tmp=$(mktemp "${CLAUDE_PROXY_CONF}.edit.XXXXXX") || return 1
+    original=$(mktemp "${CLAUDE_PROXY_CONF}.original.XXXXXX") || { rm -f "$tmp"; return 1; }
+    if [ -f "$CLAUDE_PROXY_CONF" ]; then
+        original_exists=1
+        cp -p "$CLAUDE_PROXY_CONF" "$original" || { rm -f "$tmp" "$original"; return 1; }
+    fi
+    if _conf_edit_run; then rc=0; else rc=$?; fi
+    rm -f "$tmp" "$original"
+    return "$rc"
 }
 
 proxy-config() {
@@ -3243,6 +3549,8 @@ proxy-config() {
                 *) echo "[Err] Unknown key '$2'. Valid: $_CLAUDE_CONF_KEYS CLAUDE_NO_PROXY"; return 1 ;;
             esac
             case "${k#CLAUDE_}" in
+                NODE_PORTS) echo '[Err] Use proxy-config edit to change the per-node port table.' >&2; return 1;;
+                PROXY_MODE) case "$3" in managed|shared) :;; *) echo '[Err] PROXY_MODE must be managed or shared.' >&2; return 1;; esac;;
                 HTTP_PORT|SOCKS_PORT|REMOTE_PROXY_PORT|SSH_PORT|NODE_HTTP_BASE|NODE_SOCKS_BASE)
                     _conf_port_valid "$3" || { echo "[Err] ${k#CLAUDE_} must be a port from 1 to 65535, without leading zeroes." >&2; return 1; };;
             esac
@@ -3435,6 +3743,11 @@ chrome-proxy() {
         label="${name:-$CLAUDE_SSH_HOST} (main tunnel)"
     fi
     socks="socks5://127.0.0.1:$port"
+
+    if _proxy_shared && ! _proxy_socks_ready "$port"; then
+        echo "[Err] Shared SOCKS proxy :$port is unavailable. Ask its owner to start this endpoint." >&2
+        return 1
+    fi
 
     _platform_chrome_launch "$name" "$socks" "$profile" "$label" ${pargs[@]+"${pargs[@]}"} ${extra[@]+"${extra[@]}"}
 }

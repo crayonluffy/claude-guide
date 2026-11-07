@@ -6,7 +6,7 @@ $source = $ProfilePath
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy')
+$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-ProxyNodePorts', 'Test-ProxyNodePortValue', 'Test-RecoverySharedProxy', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy')
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($f.Name -in $wanted) { Invoke-Expression $f.Extent.Text }
 }
@@ -62,8 +62,8 @@ try {
     Reset-Launch
     $script:SSH_HOST = 'sgvpn'
     chrome-proxy sg -p work
-    Assert ($script:ChromeArgs -contains '--proxy-server=socks5://127.0.0.1:1080') 'Active SG must reuse a healthy main tunnel'
-    Assert ($script:TunnelPorts.Count -eq 0) 'Reusing the main tunnel must not start another one'
+    Assert ($script:ChromeArgs -contains '--proxy-server=socks5://127.0.0.1:1181') 'Named SG must retain its stable node port'
+    Assert ($script:TunnelPorts -contains 'sg') 'Named SG must ensure its independent tunnel'
     Write-Host 'PASS: six Chrome/node/profile scenarios'
 } finally {
     Remove-Item -LiteralPath $script:NODES_CACHE -Force
