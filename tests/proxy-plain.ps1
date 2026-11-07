@@ -52,7 +52,7 @@ try {
  'PASS: cc runs the real program once with the function defined'
 
  # 6) Switching off removes our functions but never a user's own.
- $script:PROXY_CONF=Join-Path $scratch 'conf.psd1'; $script:CONF_KEYS=@('PLAIN_COMMANDS')
+ $script:PROXY_CONF=Join-Path $scratch 'conf.psd1'; $script:NODES_CACHE=Join-Path $scratch 'nodes.json'; $script:LOCAL_NODES=Join-Path $scratch 'local-nodes'; $script:CONF_KEYS=@('PLAIN_COMMANDS')
  proxy-config set PLAIN_COMMANDS off 6>$null
  Assert (-not (Get-Item function:claude -ErrorAction SilentlyContinue)) 'proxy-config set PLAIN_COMMANDS off left the function'
  Set-Item function:global:codex { 'my own codex' }

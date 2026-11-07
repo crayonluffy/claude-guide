@@ -37,7 +37,52 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
-### 2.12.3: quieter notices inside Claude and Codex
+### 2.13.0: fewer commands, shared accounts, steadier nodes
+
+#### Fewer commands, clearer help, manual fallback
+
+You now need eight commands: `cc`, `cx`, `cc-stop`, `proxy-status`,
+`proxy-restart`, `proxy-nodes`, `chrome-proxy` and `proxy-config`. Several
+commands became options of these:
+
+| Old | New |
+|-----|-----|
+| `cc-safe`, `cx-safe` | `cc --safe`, `cx --safe` |
+| `cx-stop` | `cc-stop` |
+| `proxy-doctor` | `proxy-status --fix` |
+| `proxy-node sg` | `proxy-nodes use sg` |
+| `chrome-profiles` | `chrome-proxy --list` |
+| `proxy-killswitch` | `proxy-config killswitch` |
+
+The old names still work in this release and print the new name. `bridge-start`
+and `bridge-stop`, which did nothing, are removed.
+
+`cc-help` now starts with your mode, default node, ports and tunnel state, and
+groups commands by task; `cc-help all` lists maintenance and low-level commands.
+The new `cc-manual [node]` prints the exact `ssh`, `curl`, `claude` and `codex`
+commands for running everything by hand, without running anything.
+
+#### Two accounts, one tunnel
+
+A second macOS account can use the tunnel that another account already runs:
+`proxy-config set PROXY_MODE shared` in the second account. It never starts or
+stops that tunnel. Refer to [shared mode](proxy-profile.md#two-accounts-on-one-mac-shared-mode-2130).
+
+#### Nodes keep their ports; safer switches and restarts
+
+- Explicitly named nodes (`cc --node jp`, `chrome-proxy jp`, `proxy-restart jp`,
+  `cc-stop jp`) always use that node's own tunnel and ports, even when it is the
+  default node, so changing the default no longer moves them. Plain `cc` / `cx`
+  use the main tunnel, whose ports do not change.
+- Starts, stops, restarts and default-node changes from different tabs now wait
+  for each other instead of racing.
+- `proxy-config edit` lists every known node with editable ports (`NODE_PORTS`),
+  the ports it runs on now, and ports that another program or account uses.
+  Conflicting ports are refused before any tunnel stops.
+- When a tunnel is reconnecting, a new `cc` / `cx` waits for it instead of
+  failing with "Tunnel ports are not ready".
+
+#### Quieter notices inside Claude and Codex
 
 Brief connection drops no longer print lost/restored messages inside each CLI.
 By default, an outage lasting 60 seconds gets one warning, followed by one

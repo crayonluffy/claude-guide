@@ -8,6 +8,8 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+# The operation-race tests take ~100 s alone; leave headroom on a loaded machine.
+PER_TEST_TIMEOUT = int(os.environ.get("PROXY_TEST_TIMEOUT", "300"))
 
 
 def main():
@@ -36,7 +38,7 @@ def main():
         process = subprocess.Popen(command, cwd=ROOT, env=env, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True, start_new_session=True)
         try:
-            output, _ = process.communicate(timeout=120)
+            output, _ = process.communicate(timeout=PER_TEST_TIMEOUT)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)
             try:
@@ -44,7 +46,7 @@ def main():
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 output, _ = process.communicate()
-            output += "\nTimed out after 120 seconds.\n"
+            output += f"\nTimed out after {PER_TEST_TIMEOUT} seconds.\n"
         name = " ".join(command)
         passed = process.returncode == 0
         print(("PASS: " if passed else "FAIL: ") + name, flush=True)

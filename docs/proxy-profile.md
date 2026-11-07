@@ -113,13 +113,13 @@ What the kill switch does:
    - The profile cannot write the proxy into Claude's settings file.
 3. It does not move the tunnel to a different port. If another program uses the proxy port, `tunnel-start` stops and tells you the program and the fix.
 
-Plain `codex` reads only the proxy in your terminal. To protect it, type `proxy-config set PLAIN_COMMANDS auto`. Then plain `claude` and `codex` start through the tunnel, the same as `cc-safe` and `cx-safe`. Only the application writes to the output, so `claude -p "..." | jq` continues to work.
+Plain `codex` reads only the proxy in your terminal. To protect it, type `proxy-config set PLAIN_COMMANDS auto`. Then plain `claude` and `codex` start through the tunnel, the same as `cc --safe` and `cx --safe`. Only the application writes to the output, so `claude -p "..." | jq` continues to work.
 
 | Command | What it does |
 |---|---|
-| `proxy-killswitch` | Shows the status: Claude settings, Codex, `NO_PROXY`. |
-| `proxy-killswitch on` | Sets the kill switch on and writes the proxy into Claude's settings. |
-| `proxy-killswitch off` | Sets the kill switch off. This is the behavior before 2.9.0. |
+| `proxy-config killswitch` | Shows the status: Claude settings, Codex, `NO_PROXY`. |
+| `proxy-config killswitch on` | Sets the kill switch on and writes the proxy into Claude's settings. |
+| `proxy-config killswitch off` | Sets the kill switch off. This is the behavior before 2.9.0. |
 
 The kill switch does not protect the Claude Desktop app, web browsers, or other applications. `chrome-proxy` has its own rules. The kill switch is not a firewall: a program that ignores proxy settings can still connect directly.
 
@@ -192,35 +192,67 @@ Bash saves this as `CLAUDE_DESKTOP_NOTIFICATIONS=off`. PowerShell saves `DESKTOP
 
 The automated tests examine the alert sequence, the command arguments, failed alerts, the cleanup of the notifier, and the isolation of the demonstration. The real display on Windows and macOS, and the Windows tray icon, need the manual check above.
 
+## Two accounts on one Mac: shared mode (2.13.0+)
+
+Two macOS accounts cannot both run a tunnel on the same ports. If one account (for example `Kimmy`) already runs the tunnel on HTTP `8080` / SOCKS `1080`, the second account (for example `Ming`) can use it:
+
+```bash
+proxy-config set PROXY_MODE shared   # in the second account only
+cc                                    # uses 127.0.0.1:8080 from the first account
+```
+
+- In shared mode the profile **never starts, stops or restarts** a tunnel. It checks that the configured ports answer through HTTPS, then starts Claude or Codex. The kill switch and `NO_PROXY` checks still apply.
+- `cc-stop` only clears the proxy in this terminal. `proxy-restart` and `proxy-nodes use` refuse and tell you that the owning account controls the tunnel.
+- `cc --node sg` works if the owning account has the tunnel of `sg` running.
+- Use shared mode only with an account you trust: Claude and Codex send their traffic through whatever program listens on these ports.
+- `proxy-config set PROXY_MODE managed` returns to the normal behavior.
+
 ## The commands you get
+
+You only need these eight. `cc` already starts the tunnel, sets the proxy, checks the connection and repairs an old tunnel, so you do not run those steps yourself. `cc-help` shows this list with your current mode, node, ports and tunnel state; `cc-help all` also shows the rest.
 
 | Command | What it does |
 |---------|--------------|
-| `cc` | Proxy ON, then starts **Claude** (`--dangerously-skip-permissions`). It repairs the tunnel: it stops an old `ssh` and starts a new one. If a different program uses the port, `cc` stops and tells you the fix (kill switch on). With the kill switch off, it uses the next free port. |
-| `cc -c` / `cc -r` | The same, but **continues** the last Claude session, or **shows a list** of sessions. All arguments after `cc` go to `claude` (`cc --resume <id>`, `cc "fix the tests"`, …). |
-| `cc-safe` | The same as `cc`, but Claude asks for permission (it accepts the same arguments). |
-| `cx` | Proxy ON, then starts **Codex** (no approval prompts). Arguments go to Codex: `cx resume`. |
-| `cx-safe` | The same, but Codex asks for approval. |
-| `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
-| `proxy-restart` | Replaces the tunnel for **all** terminal windows if it does not work. It does not change the proxy settings or `settings.json`, so Claude and Codex in other tabs continue. |
-| `cc-stop` | Proxy OFF for `cc` and `cx`, for all nodes. It stops each tunnel (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. |
-| `cc-stop sg` / `cx-stop sg` | Stops only the tunnel of node `sg`. The other nodes continue. It refuses while a session uses `sg` (`--force` stops it anyway). |
-| `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
-| `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
-| `proxy-status` | Shows what runs and its ports. `--debug` adds recovery details on macOS/Linux/WSL; Windows uses `-Debug`. |
-| `proxy-doctor` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
-| `proxy-killswitch` | Shows the kill switch. `proxy-killswitch on` / `off` changes it. Refer to [Kill switch](#kill-switch-290). |
+| `cc` | Proxy ON, then starts **Claude** (`--dangerously-skip-permissions`). It repairs the tunnel: it stops an old `ssh` and starts a new one. If a different program uses the port, `cc` stops and tells you the fix (kill switch on). With the kill switch off, it uses the next free port. Arguments go to `claude`: `cc -c` continues the last session, `cc -r` shows a list, `cc --resume <id>`, `cc "fix the tests"`. |
+| `cx` | The same for **Codex** (no approval prompts). Arguments go to Codex: `cx resume`. |
+| `cc --safe` / `cx --safe` | Keeps the app's own permission / approval prompts. |
+| `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel on fixed ports. Other terminals and the default node do not change. |
+| `cc-stop` | Proxy OFF for `cc` and `cx`, for all nodes. It stops each tunnel (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. `cc-stop sg` stops only node `sg`. |
+| `proxy-status` | Shows what runs and its ports. `--debug` (`-Debug` on Windows) adds recovery details. |
+| `proxy-status --fix` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
+| `proxy-restart` | Replaces the tunnel for **all** terminal windows if it does not work. It does not change the proxy settings or `settings.json`, so Claude and Codex in other tabs continue. `proxy-restart sg` replaces only node `sg`. |
+| `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `--refresh` (`-Refresh`) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes use sg` makes `sg` the default for `cc` / `cx` (it refuses while a session uses the default node; `--force`). `--from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
+| `chrome-proxy` | Opens Chrome through the SOCKS5 proxy (a separate profile; it starts the tunnel if necessary). `chrome-proxy sg` uses node `sg` on its **own** tunnel and profile, so more regions can be open at the same time. `chrome-proxy sg https://…` also opens a URL. `--profile work` (`-Profile`) picks a different Chrome profile; `--list` shows the existing ones. |
+| `proxy-config` | Shows settings. `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports; `set SSH_HOST myvm` saves one value; `killswitch [on\|off]` shows or changes the [kill switch](#kill-switch-290). |
+| `cc-manual` | **Manual fallback.** Prints, without running anything, the exact `ssh` tunnel command, a `curl` check, and `claude` / `codex` commands with `HTTPS_PROXY` set, so you can do everything by hand if the profile misbehaves. `cc-manual sg` prints them for node `sg` (including the `--settings` override Claude needs for a node). |
+
+### Maintenance and low-level commands
+
+These still work and are listed by `cc-help all`; you rarely need them.
+
+| Command | What it does |
+|---------|--------------|
+| `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
 | `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
+| `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
 | `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |
 | `proxy-on` / `proxy-off` | Sets or clears the proxy settings in the terminal. With the kill switch on, `~/.claude/settings.json` keeps the proxy. |
-| `proxy-config` | Shows settings. `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports. `set SSH_HOST myvm` saves one value. |
-| `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
-| `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `proxy-nodes --refresh` (`-Refresh` on Windows) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes --from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
-| `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel. Other terminals and the default node do not change. |
-| `proxy-node sg` | Makes `sg` the default node for `cc` and `cx` (restarts the tunnel if it is up). It refuses while a session uses the default node; `--force` changes it anyway. |
-| `chrome-proxy` | Opens Chrome through the SOCKS5 proxy (a separate profile; it starts the tunnel if necessary). `chrome-proxy sg` opens Chrome through node `sg` on its **own** tunnel and profile, so more regions can be open at the same time. `chrome-proxy sg https://…` also opens a URL. `chrome-proxy jp --profile work` (`-Profile` on Windows) opens a different Chrome profile through the same node. |
-| `chrome-profiles` | Shows the Chrome profiles of all nodes (`chrome-profiles jp`: only the profiles of `jp`). |
-| `cc-help` | Shows this list. (A new shell shows only one line: "claude-proxy v… ready". `BANNER=0` in the settings file stops it.) |
+| `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
+| `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
+
+### Renamed commands
+
+The old names still work in this release and print the new name.
+
+| Old | New |
+|-----|-----|
+| `cc-safe`, `cx-safe` | `cc --safe`, `cx --safe` |
+| `cx-stop` | `cc-stop` |
+| `proxy-doctor` | `proxy-status --fix` |
+| `proxy-node sg` | `proxy-nodes use sg` |
+| `chrome-profiles` | `chrome-proxy --list` |
+| `proxy-killswitch` | `proxy-config killswitch` |
+| `bridge-start`, `bridge-stop` | Removed (they did nothing since the VM runs the HTTP proxy). |
 
 > **Codex note:** Codex reads the standard `HTTP(S)_PROXY` settings of the terminal, so it uses the same tunnel. It does not read a settings file. Plain `codex` uses the tunnel only with `PLAIN_COMMANDS=auto`. Claude also gets the proxy in `settings.json`, so plain `claude` uses the tunnel from all shells.
 
@@ -266,7 +298,7 @@ cx        # proxy ON + start Codex
 cc-stop   # proxy OFF (both)
 ```
 
-**✅ Check:** `proxy-up`, `cc` and `cx` show your external IP address. It must be the IP address of the **VM**, not your own. If something is not correct, type `proxy-doctor`.
+**✅ Check:** `proxy-up`, `cc` and `cx` show your external IP address. It must be the IP address of the **VM**, not your own. If something is not correct, type `proxy-status --fix`.
 
 The tunnel works. **Next: [install Claude Code](install-claude.md)** (and, if you want, [Codex](install-codex.md)). Their sign-in goes through this proxy, so keep it up. To set up the proxy **by hand**, refer to [Set up by hand — Windows](#set-up-by-hand--windows) below.
 
@@ -313,7 +345,7 @@ cx        # proxy ON + start Codex
 cc-stop   # proxy OFF (both)
 ```
 
-**✅ Check:** `proxy-up`, `cc` and `cx` show your external IP address. It must be the IP address of the **VM**, not your own. If something is not correct, type `proxy-doctor`.
+**✅ Check:** `proxy-up`, `cc` and `cx` show your external IP address. It must be the IP address of the **VM**, not your own. If something is not correct, type `proxy-status --fix`.
 
 The tunnel works. **Next: [install Claude Code](install-claude.md)** (and, if you want, [Codex](install-codex.md)). Their sign-in goes through this proxy, so keep it up. To set up the proxy **by hand**, refer to [Set up by hand — macOS / Linux](#set-up-by-hand--macos--linux) below.
 
@@ -327,9 +359,9 @@ If you work in **WSL** (Ubuntu) on Windows, do the **macOS / Linux** steps above
 - **Claude and Codex** are installed *in* WSL (Node.js in WSL, then `npm install -g …` as in [Install Claude Code](install-claude.md)). `cc` and `cx` start them there.
 - **Passphrase:** WSL does not keep an ssh-agent between terminals. A key *with* a passphrase would block the background tunnel. The profile starts an agent and loads the key for you. If the tunnel still does not start, type `ssh-add ~/.ssh/<your-key>` one time in that terminal (or use a key without a passphrase).
 - **Chrome:** `chrome-proxy` finds **Windows** Chrome in `/mnt/c` and starts it through the tunnel. WSL2 forwards the `127.0.0.1` ports to Windows automatically.
-- **Claude on Windows too:** Windows can use the tunnel at `http://127.0.0.1:8080`. Thus Claude Code in *Windows* PowerShell can also use it. Type `proxy-config set SYNC_WINDOWS_SETTINGS 1`. Then the profile also writes the proxy into the Windows `%USERPROFILE%\.claude\settings.json`, the same as for WSL. With the kill switch on, the profile keeps it there. This needs the default `localhostForwarding` of WSL2. `proxy-doctor` shows if this setting is on.
+- **Claude on Windows too:** Windows can use the tunnel at `http://127.0.0.1:8080`. Thus Claude Code in *Windows* PowerShell can also use it. Type `proxy-config set SYNC_WINDOWS_SETTINGS 1`. Then the profile also writes the proxy into the Windows `%USERPROFILE%\.claude\settings.json`, the same as for WSL. With the kill switch on, the profile keeps it there. This needs the default `localhostForwarding` of WSL2. `proxy-status --fix` shows if this setting is on.
 
-All other commands (`cc -c`, `proxy-update`, `proxy-config`, `proxy-doctor`) are the same as on Linux.
+All other commands (`cc -c`, `proxy-update`, `proxy-config`, `proxy-status --fix`) are the same as on Linux.
 
 ---
 
@@ -619,7 +651,7 @@ A new terminal keeps adopting a running owner's ports until that owner is
 restarted. Failed editors or invalid ports leave the saved file unchanged.
 
 To use another alias, save `proxy-config set SSH_HOST other-vm` and run
-`proxy-restart`. If your admin publishes more nodes, `proxy-node sg` changes
+`proxy-restart`. If your admin publishes more nodes, `proxy-nodes use sg` changes
 the default for you. Refer to **[Nodes](proxy-nodes.md)**.
 
 On Windows, the equivalent keys are `HTTP_PORT`, `SOCKS_PORT`,
@@ -686,5 +718,5 @@ If you changed `SOCKS_PORT`, use that port in place of `1080`. `proxy-status` sh
 ## Next
 
 - **[Install Claude Code](install-claude.md)** (then, if you want, **[Codex](install-codex.md)**). The sign-in goes through this proxy, so do it *after* this page.
-- Something does not work? Refer to **[Troubleshooting](troubleshooting.md)** (start with `proxy-doctor`).
+- Something does not work? Refer to **[Troubleshooting](troubleshooting.md)** (start with `proxy-status --fix`).
 - You do not want a profile? Refer to **[Manual — no profile](proxy-manual.md)**.

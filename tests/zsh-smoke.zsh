@@ -104,7 +104,7 @@ cat > "$HOME/.claude-proxy.nodes.json" <<'JSON'
 ] }
 JSON
 CLAUDE_SSH_HOST=jpvpn CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
-[[ $(_node_slot jp) == main && $(_node_slot sg) == node-sg ]] || fail "node slots: $(_node_slot jp) $(_node_slot sg)"
+[[ $(_node_slot jp) == node-jp && $(_node_slot sg) == node-sg ]] || fail "node slots: $(_node_slot jp) $(_node_slot sg)"   # named routes keep their own slot even as the default
 got=$( _node_ctx sg; print "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT|$CLAUDE_SOCKS_PORT|$CLAUDE_REMOTE_PROXY_PORT" )
 [[ $got == 'sgvpn|8181|1181|8899' ]] || fail "node ctx: $got"
 [[ "$CLAUDE_SSH_HOST|$CLAUDE_HTTP_PORT" == 'jpvpn|8080' ]] || fail 'node ctx leaked into the caller'

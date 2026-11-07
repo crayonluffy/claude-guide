@@ -9,7 +9,7 @@ foreach($f in $ast.FindAll({param($n)$n -is [System.Management.Automation.Langua
 function Assert($Condition,$Message){if(-not $Condition){throw "FAIL: $Message"}}
 $scratch=Join-Path ([IO.Path]::GetTempPath()) ('killswitch-'+[guid]::NewGuid()); $null=New-Item -ItemType Directory $scratch
 function Get-RecoveryRoot { Join-Path $scratch 'recovery' }
-$script:PROXY_CONF=Join-Path $scratch 'conf.psd1'
+$script:PROXY_CONF=Join-Path $scratch 'conf.psd1'; $script:NODES_CACHE=Join-Path $scratch 'nodes.json'; $script:LOCAL_NODES=Join-Path $scratch 'local-nodes'
 $script:CLAUDE_SETTINGS=Join-Path $scratch 'settings.json'
 $script:CONF_KEYS=@('SSH_HOST','HTTP_PORT','SOCKS_PORT','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','NO_PROXY_EXTRA')
 $script:SSH_HOST='jp';$script:HTTP_PORT=8080;$script:SOCKS_PORT=1080;$script:SYNC_SETTINGS=1

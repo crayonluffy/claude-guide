@@ -17,7 +17,7 @@
 #
 # NODES (v2.1): the admin publishes a catalogue of VMs (jp / sg / us ...) as
 # scripts/nodes.json. 'proxy-nodes --refresh' downloads it and creates the
-# matching ~/.ssh/config aliases; 'proxy-node sg' makes sg the node that cc / cx
+# matching ~/.ssh/config aliases; 'proxy-nodes use sg' makes sg the node that cc / cx
 # use; 'chrome-proxy sg' opens a Chrome window through sg on its OWN tunnel and
 # profile, so several regions can be open side by side.
 #
@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.12.3"
+CLAUDE_PROXY_VERSION="2.13.0"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -97,10 +97,10 @@ CLAUDE_SETTINGS="${CLAUDE_SETTINGS:-$HOME/.claude/settings.json}"
 # shell - so plain 'claude' and the IDE extensions go through the tunnel or get
 # "connection refused", never out from your own IP. cc / cx also refuse to start
 # when something would leak (a NO_PROXY that exempts the API, another program on
-# the proxy port). 'off' = the pre-2.9 behaviour. See 'proxy-killswitch'.
+# the proxy port). 'off' = the pre-2.9 behaviour. See 'proxy-config killswitch'.
 CLAUDE_KILLSWITCH=on
-# auto = plain 'claude' and 'codex' also start through the tunnel (like cc-safe /
-# cx-safe, but quiet: only the app writes to stdout). off = they run untouched:
+# auto = plain 'claude' and 'codex' also start through the tunnel (like cc --safe /
+# cx --safe, but quiet: only the app writes to stdout). off = they run untouched:
 # Claude is still protected by its pinned settings; plain 'codex' is not.
 CLAUDE_PLAIN_COMMANDS=off
 CLAUDE_PROXY_MODE=managed       # managed SSH owner, or explicit shared proxy client
@@ -548,10 +548,10 @@ _recovery_migrate() {
         *) echo "[Err] Port $CLAUDE_HTTP_PORT or $CLAUDE_SOCKS_PORT is used by another program - see proxy-status." >&2; return 1 ;;
     esac
     echo '[Upgrade] Replacing the tunnel from an older profile with a self-healing one on the same ports (open sessions reconnect within seconds).' >&2
-    tunnel-stop >/dev/null 2>&1 || { echo '[Err] The old tunnel could not be stopped - run proxy-doctor.' >&2; return 1; }
+    tunnel-stop >/dev/null 2>&1 || { echo '[Err] The old tunnel could not be stopped - run proxy-status --fix.' >&2; return 1; }
     while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
     if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
-        echo "[Err] Ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not free up after the old tunnel stopped - run proxy-doctor." >&2
+        echo "[Err] Ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not free up after the old tunnel stopped - run proxy-status --fix." >&2
         return 1
     fi
 }
@@ -579,7 +579,7 @@ _recovery_migrate_node() {
     done
     while { _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; } && [ "$i" -lt 50 ]; do sleep .1; i=$((i+1)); done
     if _port_in_use "$CLAUDE_HTTP_PORT" || _port_in_use "$CLAUDE_SOCKS_PORT"; then
-        echo "[Err] The old tunnel on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not stop - run proxy-doctor." >&2
+        echo "[Err] The old tunnel on ports $CLAUDE_HTTP_PORT / $CLAUDE_SOCKS_PORT did not stop - run proxy-status --fix." >&2
         return 1
     fi
 }
@@ -1161,7 +1161,7 @@ _killswitch_ensure_pin() {
         _settings_file_pinned "$f" && continue
         _settings_file_proxy_on "$f" >/dev/null 2>&1 && changed=1
     done <<< "$(_settings_targets 2>/dev/null)"
-    [ "$changed" -eq 0 ] || echo "[Kill switch] Claude's settings now point at the tunnel (127.0.0.1:$CLAUDE_HTTP_PORT): while it is down Claude cannot connect, so it never goes out directly. Details: proxy-killswitch"
+    [ "$changed" -eq 0 ] || echo "[Kill switch] Claude's settings now point at the tunnel (127.0.0.1:$CLAUDE_HTTP_PORT): while it is down Claude cannot connect, so it never goes out directly. Details: proxy-config killswitch"
 }
 
 # ============================================================
@@ -1546,7 +1546,8 @@ _node_tunnels_stop() {
 }
 
 # --- commands ----------------------------------------------------------------
-proxy-nodes() {
+proxy-nodes() {  # [--refresh ...] | use [--force] [node]
+    if [ "${1:-}" = use ]; then shift; _proxy_node_use "$@"; return; fi
     # (zsh prints a variable when 'local' re-declares it - declare everything once)
     local refresh=0 tmp updated source line idx name alias host user sport pport region note hostkey
     local tstate hpid hname hport running mark target where found_active=0 cur dups
@@ -1700,16 +1701,16 @@ proxy-nodes() {
         echo "  * ($current)  - current server, not in this list"
     fi
     echo ""
-    echo "  proxy-node <name>                  make it the node cc / cx use (restarts the tunnel if it's up)"
+    echo "  proxy-nodes use <name>             make it the node cc / cx use (restarts the tunnel if it's up)"
     echo "  chrome-proxy <name>                open a Chrome window through that node (own tunnel; several nodes can be open)"
-    echo "  chrome-proxy <name> --profile <p>  another Chrome profile through the same node ('chrome-profiles' lists them)"
+    echo "  chrome-proxy <name> --profile <p>  another Chrome profile through the same node ('chrome-proxy --list' lists them)"
     echo "  proxy-nodes --refresh              reload the list and create any missing ssh aliases"
     echo "  proxy-nodes --from <vm>            take the list (privately, over SSH) from another VM from now on"
     echo ""
 }
 
-proxy-node() {  # [--force] [node]
-    if ! _proxy_operation_owned; then _proxy_operation_run proxy-node "$@"; return; fi
+_proxy_node_use() {  # [--force] [node]
+    if ! _proxy_operation_owned; then _proxy_operation_run _proxy_node_use "$@"; return; fi
     if _proxy_shared; then
         echo '[Shared] The default server is controlled by the proxy owner. Use cc/cx --node <name> for a configured node endpoint.'
         [ $# -eq 0 ]; return
@@ -1723,7 +1724,7 @@ proxy-node() {  # [--force] [node]
     if [ -z "$want" ]; then
         name=$(_node_active_name)
         if [ -n "$name" ]; then
-            echo "[..] Active node: $name ($CLAUDE_SSH_HOST) - 'proxy-node <name>' switches, 'proxy-nodes' lists them"
+            echo "[..] Active node: $name ($CLAUDE_SSH_HOST) - 'proxy-nodes use <name>' switches, 'proxy-nodes' lists them"
         else
             echo "[..] Active server: $CLAUDE_SSH_HOST (not in the node catalogue) - 'proxy-nodes' lists the known nodes"
         fi
@@ -1752,7 +1753,7 @@ proxy-node() {  # [--force] [node]
     if [ "$n" -gt 0 ] && [ "$force" -eq 0 ]; then
         echo "[Node] $n session(s) use the default node ($CLAUDE_SSH_HOST). They would move to $name."
         echo "       For this terminal only: cc --node $name   (or cx --node $name)"
-        echo "       Move them anyway:        proxy-node $name --force"
+        echo "       Move them anyway:        proxy-nodes use $name --force"
         return 1
     fi
 
@@ -1801,7 +1802,7 @@ _recovery_failure_report() {  # [slot dir]
     echo "       ssh said:"
     if [ -n "$dir" ] && [ -s "$dir/ssh.err" ]; then tail -n 5 "$dir/ssh.err" | sed 's/^/       /'
     else tail -n 5 "$CLAUDE_TUNNEL_LOG" 2>/dev/null | sed 's/^/       /'; fi
-    echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-doctor' for more)"
+    echo "       (full log: $CLAUDE_TUNNEL_LOG - 'proxy-status --fix' for more)"
 }
 
 # tunnel-start <node> for a node that is not the default: its own owner and ports.
@@ -2055,8 +2056,6 @@ tunnel-stop() {  # [node]
 
 # Back-compat stubs: the separate HTTP bridge is gone - the VM runs the proxy now,
 # and 'tunnel-start' forwards straight to it.
-bridge-start() { echo "[Info] No bridge needed anymore - the VM runs the HTTP proxy; 'tunnel-start' forwards straight to it."; }
-bridge-stop()  { echo "[Info] No bridge to stop - the VM runs the HTTP proxy now. Use 'tunnel-stop'."; }
 
 # ============================================================
 # 2. Proxy env vars (+ Claude settings.json sync)
@@ -2083,7 +2082,7 @@ proxy-off() {
     if ! _killswitch_on; then
         _claude_settings_proxy_off
     elif [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ]; then
-        echo "[Kill switch] Claude's settings keep the proxy, so plain 'claude' cannot go out directly ('proxy-killswitch off' allows that)."
+        echo "[Kill switch] Claude's settings keep the proxy, so plain 'claude' cannot go out directly ('proxy-config killswitch off' allows that)."
     fi
 }
 
@@ -2134,26 +2133,26 @@ _killswitch_check() {  # <http port> <socks port> [slot dir]
         state=$(_killswitch_pin_state)
         if [ "$state" != "pinned $http" ]; then
             echo "[Kill switch] Claude's settings ($CLAUDE_SETTINGS) could not be pointed at the tunnel on port $http ($state) - not launched."
-            echo "              Fix: repair that file (valid JSON), or 'proxy-killswitch off'."
+            echo "              Fix: repair that file (valid JSON), or 'proxy-config killswitch off'."
             return 1
         fi
     fi
 }
 
-# proxy-doctor's kill-switch lines, with its own ok / warn / fail markers.
+# proxy-status --fix's kill-switch lines, with its own ok / warn / fail markers.
 _killswitch_report() {  # <ok> <warn> <bad>
     local ok="$1" warn="$2" bad="$3" state hosts
     if ! _killswitch_on; then
-        echo "$warn Kill switch OFF - with the tunnel down, plain 'claude' / 'codex' go out from your own IP. Fix: proxy-killswitch on"
+        echo "$warn Kill switch OFF - with the tunnel down, plain 'claude' / 'codex' go out from your own IP. Fix: proxy-config killswitch on"
         return 0
     fi
     state=$(_killswitch_pin_state)
     case "$state" in
         "pinned $CLAUDE_HTTP_PORT") echo "$ok  Kill switch on - Claude's settings pinned to 127.0.0.1:$CLAUDE_HTTP_PORT" ;;
-        mismatch*) echo "$bad Kill switch on, but Claude's settings point at port ${state#mismatch } (tunnel: $CLAUDE_HTTP_PORT). Fix: proxy-killswitch on" ;;
+        mismatch*) echo "$bad Kill switch on, but Claude's settings point at port ${state#mismatch } (tunnel: $CLAUDE_HTTP_PORT). Fix: proxy-config killswitch on" ;;
         'unpinned sync-off') echo "$warn Kill switch on, but settings.json is not managed (SYNC_SETTINGS=0): only cc-launched Claude is protected" ;;
         'unpinned no-jq') echo "$warn Kill switch on, but jq is missing: Claude's settings cannot be pinned. Fix: install jq" ;;
-        *) echo "$bad Kill switch on, but Claude's settings are not pinned ($state). Fix: proxy-killswitch on" ;;
+        *) echo "$bad Kill switch on, but Claude's settings are not pinned ($state). Fix: proxy-config killswitch on" ;;
     esac
     hosts=$(_noproxy_exempts "$CLAUDE_NO_PROXY" | tr '\n' ' ' | sed 's/ $//')
     [ -z "$hosts" ] || echo "$bad NO_PROXY would send $hosts DIRECT - cc/cx refuse to start. Fix: remove those entries (proxy-config edit)"
@@ -2162,7 +2161,7 @@ _killswitch_report() {  # <ok> <warn> <bad>
 }
 
 # Kill switch: show it, or switch it (saved to the conf file).
-proxy-killswitch() {
+_proxy_killswitch() {
     local action="${1:-status}" running=0 f state hosts
     case "$action" in
         status) ;;
@@ -2181,10 +2180,10 @@ proxy-killswitch() {
                 echo "[OK] Kill switch OFF - with no tunnel, plain 'claude' now goes out directly (from your own IP)."
             fi
             return 0 ;;
-        *) echo 'usage: proxy-killswitch [status|on|off]'; return 2 ;;
+        *) echo 'usage: proxy-config killswitch [status|on|off]'; return 2 ;;
     esac
 
-    if _killswitch_on; then echo "=== Kill switch: ON ==="; else echo "=== Kill switch: OFF (pre-2.9 behaviour) - 'proxy-killswitch on' ==="; fi
+    if _killswitch_on; then echo "=== Kill switch: ON ==="; else echo "=== Kill switch: OFF (pre-2.9 behaviour) - 'proxy-config killswitch on' ==="; fi
     if [ "${CLAUDE_SYNC_SETTINGS:-0}" != 1 ]; then
         echo "[!!]  Claude : settings.json is not managed (SYNC_SETTINGS=0) - only cc-launched Claude is protected. Fix: proxy-config set SYNC_SETTINGS 1"
     elif ! command -v jq >/dev/null 2>&1; then
@@ -2195,7 +2194,7 @@ proxy-killswitch() {
             if _settings_file_pinned "$f"; then
                 echo "[ON]  Claude : pinned to 127.0.0.1:$CLAUDE_HTTP_PORT ($f) - plain 'claude' and IDEs use the tunnel or fail"
             elif _killswitch_on; then
-                echo "[!!]  Claude : $f does not point at the tunnel - run 'proxy-killswitch on' to fix it"
+                echo "[!!]  Claude : $f does not point at the tunnel - run 'proxy-config killswitch on' to fix it"
             else
                 echo "[OFF] Claude : not pinned ($f) - plain 'claude' goes direct while no tunnel is up"
             fi
@@ -2223,7 +2222,7 @@ _verify_proxy_ip() {  # [http port]
 
     if [ -z "$proxied" ]; then
         echo "[FAIL] Could not fetch your IP THROUGH the proxy - the proxy isn't working."
-        echo "       Run 'proxy-doctor'; check the VM with 'webproxy-status'."
+        echo "       Run 'proxy-status --fix'; check the VM with 'webproxy-status'."
         return 1
     fi
     if [ -n "$direct" ] && [ "$proxied" = "$direct" ]; then
@@ -2256,7 +2255,7 @@ _proxy_transport_wait() {  # <provider> <http port> <socks port> [slot dir]
             else dir=-; fi
         fi
         if [ "$dir" = - ] || [ "$waited" -ge "${CLAUDE_WATCHDOG_STARTUP_GRACE:-20}" ]; then
-            echo "[Err] $1 proxy transport unavailable; application was not launched. Run proxy-status / proxy-doctor."; return 1
+            echo "[Err] $1 proxy transport unavailable; application was not launched. Run proxy-status --fix."; return 1
         fi
         sleep 1; waited=$((waited+1))
     done
@@ -2321,7 +2320,7 @@ proxy-up() {
         export http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY"
         echo "[OK] Env vars set: HTTPS_PROXY=$url (node $node, this shell only)"
         [ $no_verify -eq 1 ] || _verify_proxy_ip "$nhttp"
-        echo "[OK]  This shell uses node $node. The default node ($CLAUDE_SSH_HOST) and other terminals are unchanged. To make $node the default: proxy-node $node"
+        echo "[OK]  This shell uses node $node. The default node ($CLAUDE_SSH_HOST) and other terminals are unchanged. To make $node the default: proxy-nodes use $node"
         return 0
     fi
     [ -z "$node" ] || _node_slot "$node" >/dev/null || return 1
@@ -2334,7 +2333,7 @@ proxy-up() {
     _proxy_transport_wait "$provider" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" || return 1
     if ! _proxy_shared && [ "$(_tunnel_health | awk '{print $1}')" != "ok" ]; then
         echo "[Err] Tunnel ports are not ready (HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT)."
-        echo "      Run proxy-status to see the ports in use, or proxy-doctor for the cause."
+        echo "      Run proxy-status to see the ports in use, or proxy-status --fix for the cause."
         return 1
     fi
 
@@ -2417,7 +2416,7 @@ _launch_via_proxy() {
         fi
         url="http://127.0.0.1:$nhttp"
         [ "$bin" != claude ] || pre_args=(--settings "$(_node_settings_json "$nhttp")")
-        echo "[Node] This terminal uses $node. To make $node the default: proxy-node $node" >&2
+        echo "[Node] This terminal uses $node. To make $node the default: proxy-nodes use $node" >&2
     elif [ "$quiet" -eq 1 ]; then proxy-up ${up_args[@]+"${up_args[@]}"} >&2 || return 1
     else proxy-up ${up_args[@]+"${up_args[@]}"} || return 1; fi
     if _proxy_shared; then
@@ -2451,11 +2450,8 @@ _launch_via_proxy() {
     return "$rc"
 }
 
-cx-stop() { cc-stop "$@"; }   # Claude and Codex share each tunnel: the same stop
 cc() { _launch_via_proxy Claude claude "npm install -g @anthropic-ai/claude-code" --dangerously-skip-permissions "$@"; }
 cx() { _launch_via_proxy Codex  codex  "npm install -g @openai/codex"            --dangerously-bypass-approvals-and-sandbox "$@"; }
-cc-safe() { cc --safe "$@"; }
-cx-safe() { cx --safe "$@"; }
 
 # PLAIN_COMMANDS=auto: plain 'claude' / 'codex' start through the tunnel too, in
 # safe mode (the app's own prompts) and quietly. Version/help need no network.
@@ -2473,7 +2469,7 @@ else
     case "$(type -t codex 2>/dev/null; whence -w codex 2>/dev/null)" in *function*) unset -f codex;; esac
 fi
 
-# cc-stop <node> / cx-stop <node>: stop the tunnel of one node only. The other
+# cc-stop <node>: stop the tunnel of one node only. The other
 # nodes keep running. Refuses while a cc/cx session uses that node (--force).
 _node_stop() {  # <node> <force 0|1>
     local slot dir n url
@@ -2540,7 +2536,7 @@ cc-stop() {  # [--force] [node]
     if [ $rc -eq 0 ]; then
         echo "[OK] All proxy services stopped"
     else
-        echo "[Err] Env cleared, but the tunnel did NOT fully stop (see above). Run 'proxy-doctor' to see what's stuck."
+        echo "[Err] Env cleared, but the tunnel did NOT fully stop (see above). Run 'proxy-status --fix' to see what's stuck."
         return 1
     fi
 }
@@ -2590,7 +2586,7 @@ proxy-restart() {  # [node]
             echo "[OK]  api.anthropic.com answers through the new tunnel on HTTP :$port."
         fi
     else
-        echo "[FAIL] API check through HTTP :$port failed (curl exit $rc, CONNECT $cc). Run proxy-doctor to locate the cause."
+        echo "[FAIL] API check through HTTP :$port failed (curl exit $rc, CONNECT $cc). Run proxy-status --fix to locate the cause."
         return 1
     fi
 }
@@ -2601,7 +2597,11 @@ proxy-restart() {  # [node]
 
 proxy-status() {
     local debug=0
-    case "${1:-}" in '') ;; --debug) debug=1;; *) echo 'usage: proxy-status [--debug]'; return 2;; esac
+    case "${1:-}" in
+        '') ;; --debug) debug=1;;
+        --fix|fix|--doctor) _proxy_doctor; return;;   # full diagnosis with the exact fix
+        *) echo 'usage: proxy-status [--fix | --debug]'; return 2;;
+    esac
     _recovery_adopt >/dev/null 2>&1 || :   # use the live owner's tunnel, not stale settings
     local identity provider
     identity=$(_recovery_identity)
@@ -2616,8 +2616,18 @@ proxy-status() {
     echo ""
     _conf_port_summary
     local tstate hpid hname hport note=""
-    read -r tstate hpid hname hport <<< "$(_tunnel_health)"
+    # Shared clients cannot see (or manage) another account's ssh, so they only
+    # check that the configured endpoint answers.
+    if _proxy_shared; then tstate=shared; else read -r tstate hpid hname hport <<< "$(_tunnel_health)"; fi
     case "$tstate" in
+        shared)
+            echo "[SHARED] Tunnel     : served by another account on HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT (this account never starts or stops it)"
+            case "$(_proxy_probe "$CLAUDE_HTTP_PORT" 6)" in
+                ok*)    echo "[OK]  Proxy answers : yes, through the shared tunnel" ;;
+                proxy*) echo "[!!]  Proxy answers : the proxy answers but the request fails - the owning account can run 'proxy-status --fix'" ;;
+                *)      echo "[!!]  Proxy answers : NO - nothing answers on :$CLAUDE_HTTP_PORT. The owning account must start its tunnel ('cc' there)." ;;
+            esac
+            ;;
         ok)
             if [ -n "$hport" ] && [ "$hport" != "$CLAUDE_HTTP_PORT" ]; then
                 export CLAUDE_HTTP_PORT=$hport
@@ -2632,14 +2642,14 @@ proxy-status() {
             fi
             case "$(_proxy_probe "$CLAUDE_HTTP_PORT" 6)" in
                 ok*)    echo "[OK]  Proxy answers : yes" ;;
-                proxy*) echo "[!!]  Proxy answers : VM proxy answers but the request fails - run 'proxy-doctor'" ;;
+                proxy*) echo "[!!]  Proxy answers : VM proxy answers but the request fails - run 'proxy-status --fix'" ;;
                 *)      echo "[!!]  Proxy answers : NO - tunnel hung. Run 'proxy-restart' (safe with Claude open in other windows)" ;;
             esac
             ;;
         down)
             echo "[OFF] HTTP tunnel   : not running"
             echo "[OFF] SOCKS tunnel  : not running"
-            echo "      Run cc to start it; proxy-doctor explains connection failures."
+            echo "      Run cc to start it; proxy-status --fix explains connection failures."
             ;;
         stale)
             echo "[!!]  Tunnel BROKEN : stale ssh (PID $hpid) - run proxy-restart, then retry cc"
@@ -2664,24 +2674,24 @@ proxy-status() {
         echo "[OFF] Env HTTPS_PROXY: not set"
     fi
     if ! _killswitch_on; then
-        echo "[OFF] Kill switch   : off - plain claude/codex go direct while the tunnel is down ('proxy-killswitch on')"
+        echo "[OFF] Kill switch   : off - plain claude/codex go direct while the tunnel is down ('proxy-config killswitch on')"
     else
         case "$(_killswitch_pin_state)" in
-            "pinned $CLAUDE_HTTP_PORT") echo "[ON]  Kill switch   : Claude pinned to 127.0.0.1:$CLAUDE_HTTP_PORT - no direct connections ('proxy-killswitch' for details)" ;;
-            *) echo "[!!]  Kill switch   : on, but Claude's settings are not pinned - run 'proxy-killswitch'" ;;
+            "pinned $CLAUDE_HTTP_PORT") echo "[ON]  Kill switch   : Claude pinned to 127.0.0.1:$CLAUDE_HTTP_PORT - no direct connections ('proxy-config killswitch' for details)" ;;
+            *) echo "[!!]  Kill switch   : on, but Claude's settings are not pinned - run 'proxy-config killswitch'" ;;
         esac
     fi
     local nname
     nname=$(_node_active_name)
     if [ -n "$nname" ]; then
-        echo "[..]  Node          : $nname ($CLAUDE_SSH_HOST)  - 'proxy-node <name>' switches, 'proxy-nodes' lists  (settings: $CLAUDE_PROXY_CONF)"
+        echo "[..]  Node          : $nname ($CLAUDE_SSH_HOST)  - 'proxy-nodes use <name>' switches, 'proxy-nodes' lists  (settings: $CLAUDE_PROXY_CONF)"
     else
         echo "[..]  Server        : $CLAUDE_SSH_HOST  (settings: $CLAUDE_PROXY_CONF)"
     fi
     _node_status_lines
 
     echo ""
-    echo "Next: proxy-config edit (ports), proxy-restart (reconnect), proxy-doctor (diagnose)."
+    echo "Next: proxy-config edit (ports), proxy-restart (reconnect), proxy-status --fix (diagnose)."
     echo "More detail: proxy-status --debug"
     echo ""
 }
@@ -2690,7 +2700,7 @@ proxy-status() {
 # Doctor - check every part and say exactly what's wrong + how to fix it
 # ============================================================
 
-proxy-doctor() {
+_proxy_doctor() {
     local ok="[ OK ]" warn="[WARN]" bad="[FAIL]"
     echo ""
     echo "=== Proxy Doctor (claude-proxy v$CLAUDE_PROXY_VERSION) ==="
@@ -2718,7 +2728,7 @@ proxy-doctor() {
         nn=$(_count "$(_nodes_tsv)"); an=$(_node_active_name)
         echo "$ok  Node catalogue: $CLAUDE_PROXY_NODES ($nn nodes, active: ${an:-none - '$CLAUDE_SSH_HOST' is not a catalogue node}) - 'proxy-nodes --refresh' updates it"
     else
-        echo "$warn No node catalogue ($CLAUDE_PROXY_NODES) - only needed for 'proxy-node' / 'chrome-proxy <node>'. Fix: proxy-nodes --refresh"
+        echo "$warn No node catalogue ($CLAUDE_PROXY_NODES) - only needed for 'proxy-nodes use' / 'chrome-proxy <node>'. Fix: proxy-nodes --refresh"
     fi
 
     if _is_wsl; then
@@ -2769,6 +2779,14 @@ proxy-doctor() {
     fi
 
     # --- tunnel / ports ---
+    if _proxy_shared; then
+    echo "$ok  Shared mode: another account serves HTTP :$CLAUDE_HTTP_PORT / SOCKS :$CLAUDE_SOCKS_PORT; this account never starts or stops it"
+    case "$(_proxy_probe "$CLAUDE_HTTP_PORT" 6)" in
+        ok*)    echo "$ok  Proxy answers : yes, through the shared tunnel" ;;
+        proxy*) echo "$bad Proxy answers : the proxy answers but the request fails - the owning account can run 'proxy-status --fix'" ;;
+        *)      echo "$bad Proxy answers : NO - nothing answers on :$CLAUDE_HTTP_PORT. The owning account must start its tunnel ('cc' there)." ;;
+    esac
+    else
     # If the tunnel runs on a fallback port (configured one was busy), adopt it
     # so every check below looks at the right port.
     local dstatus dpid dname dport
@@ -2813,6 +2831,7 @@ proxy-doctor() {
     if [ "$(_count "$http_pids")" -gt 1 ]; then
         echo "$warn Port $CLAUDE_HTTP_PORT has MULTIPLE listeners ($(printf '%s\n' "$http_pids" | tr '\n' ' ')) - stale process. Fix: cc-stop"
     fi
+    fi   # managed
 
     # --- shell env ---
     if [ -n "${HTTPS_PROXY:-}" ]; then
@@ -2925,7 +2944,7 @@ _doctor_vm_check() {
             echo "       Fix on the VM: check tinyproxy's log and config ('webproxy-status')"
         else
             echo "       The VM itself can't reach api.anthropic.com (curl exit $rc) - VM network / firewall / DNS problem, not your Mac."
-            echo "       Try another node meanwhile: proxy-nodes, then proxy-node <name>"
+            echo "       Try another node meanwhile: proxy-nodes, then proxy-nodes use <name>"
         fi
     fi
 }
@@ -3006,22 +3025,12 @@ _conf_requested_ports() (
     printf '%s %s\n' "$http" "$socks"
 )
 _conf_check_restart_ports() {  # <slot> <node or empty for main>
+    # Named nodes always keep their node-<name> slot, so a saved default-server
+    # change cannot move a named restart onto main; only port conflicts matter.
     local pending http socks dir other_http other_socks
-    if [ -n "$2" ]; then
-        local saved_slot
-        saved_slot=$(
-            CLAUDE_SSH_HOST=jpvpn
-            if [ -f "$CLAUDE_PROXY_CONF" ]; then
-                bash -n "$CLAUDE_PROXY_CONF" 2>/dev/null && . "$CLAUDE_PROXY_CONF" || exit 1
-            fi
-            _recovery_adopt >/dev/null 2>&1 || :
-            _node_slot "$2"
-        ) || return 1
-        if [ "$saved_slot" != "$1" ]; then
-            echo '[Err] Saved settings make this node the default server. No tunnel was stopped.' >&2
-            echo '      Run proxy-restart without a node to apply the saved default server.' >&2
-            return 1
-        fi
+    if [ -f "$CLAUDE_PROXY_CONF" ] && ! bash -n "$CLAUDE_PROXY_CONF" 2>/dev/null; then
+        echo '[Err] Saved settings have a syntax error. No tunnel was stopped. Fix: proxy-config edit.' >&2
+        return 1
     fi
     pending=$(_conf_requested_ports "$2") || {
         echo '[Err] Saved HTTP/SOCKS ports must be different valid ports. Fix: proxy-config edit.' >&2
@@ -3212,6 +3221,7 @@ _conf_edit() {
 proxy-config() {
     local k v
     case "${1:-show}" in
+        killswitch) shift; _proxy_killswitch "$@" ;;
         show|"")
             echo ""
             echo "=== claude-proxy settings (v$CLAUDE_PROXY_VERSION) ==="
@@ -3238,6 +3248,7 @@ proxy-config() {
             echo "  proxy-config set KEY VALUE      e.g. proxy-config set SSH_HOST myvm"
             echo "  proxy-config use-active         save the running main tunnel's ports"
             echo "  proxy-config path               print the file path"
+            echo "  proxy-config killswitch [on|off]  show / change the kill switch"
             echo ""
             ;;
         path)
@@ -3403,7 +3414,8 @@ _chrome_base_dir() {
 #                           of a node lives in that node's data dir, so all of them share its
 #                           tunnel and IP but keep their own logins/cookies/extensions.
 #   chrome-proxy sg URL     ...and open URL there (any other argument is passed to Chrome)
-chrome-proxy() {
+chrome-proxy() {  # [node] [--profile name] [url] | --list [node]
+    case "${1:-}" in --list|-l|list) shift; _chrome_profiles "$@"; return;; esac
     local a line node="" name idx alias host rest socks port label profile="" want_profile=0
     local extra=() pargs=()
     for a in "$@"; do
@@ -3426,7 +3438,7 @@ chrome-proxy() {
         fi
     done
     if [ $want_profile -eq 1 ]; then
-        echo "usage: chrome-proxy [node] --profile <name> [url]   ('chrome-profiles' lists the existing ones)"
+        echo "usage: chrome-proxy [node] --profile <name> [url]   ('chrome-proxy --list' lists the existing ones)"
         return 1
     fi
     case "$profile" in
@@ -3453,7 +3465,7 @@ chrome-proxy() {
             echo "[Info] SSH tunnel (SOCKS port $CLAUDE_SOCKS_PORT) not running - starting it..."
             tunnel-start
             _port_in_use "$CLAUDE_SOCKS_PORT" || {
-                echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'proxy-doctor' to diagnose."
+                echo "[Err] SSH tunnel could not be started - Chrome not launched. Run 'proxy-status --fix' to diagnose."
                 return 1
             }
         else
@@ -3473,8 +3485,8 @@ chrome-proxy() {
     _platform_chrome_launch "$name" "$socks" "$profile" "$label" ${pargs[@]+"${pargs[@]}"} ${extra[@]+"${extra[@]}"}
 }
 
-# chrome-profiles [node]  - the Chrome profiles that exist in each node's data dir
-chrome-profiles() {
+# chrome-proxy --list [node]  - the Chrome profiles that exist in each node's data dir
+_chrome_profiles() {
     local want="${1:-}" base idx name alias rest dir prefs p disp state found=0
     base=$(_chrome_base_dir)
     echo ""
@@ -3684,7 +3696,7 @@ cc-install() {
     if [ $proxy = 1 ] && [ -z "${HTTPS_PROXY:-}" ]; then
         echo "[Tools] Starting the proxy first, so downloads go through your VM..."
         proxy-up --no-verify >/dev/null 2>&1 && echo "[OK]  Proxy is up" ||
-            echo "[Warn] Proxy didn't start - trying the internet directly ('proxy-doctor' explains why)"
+            echo "[Warn] Proxy didn't start - trying the internet directly ('proxy-status --fix' explains why)"
     fi
     min=$(_tools_min_node)
     case "$want" in *node*) _tools_node "$min" || { node_ok=0; rc=1; } ;; esac
@@ -3707,50 +3719,137 @@ cc-install() {
 # Help / command list
 # ============================================================
 
-cc-help() {
+# Older names keep working for now; each says once what replaced it.
+_cc_renamed() { echo "[Renamed] '$1' is now '$2'; the old name still works for now." >&2; }
+cc-safe()          { _cc_renamed cc-safe 'cc --safe'; cc --safe "$@"; }
+cx-safe()          { _cc_renamed cx-safe 'cx --safe'; cx --safe "$@"; }
+cx-stop()          { _cc_renamed cx-stop 'cc-stop'; cc-stop "$@"; }
+proxy-doctor()     { _cc_renamed proxy-doctor 'proxy-status --fix'; _proxy_doctor "$@"; }
+proxy-node()       { _cc_renamed proxy-node 'proxy-nodes use <node>'; _proxy_node_use "$@"; }
+chrome-profiles()  { _cc_renamed chrome-profiles 'chrome-proxy --list'; _chrome_profiles "$@"; }
+proxy-killswitch() { _cc_renamed proxy-killswitch 'proxy-config killswitch'; _proxy_killswitch "$@"; }
+
+# One status line for cc-help: no network probes, only local owner state.
+_cc_help_status() {
+    local node tunnel dir mode="${CLAUDE_PROXY_MODE:-managed}"
+    node=$(_node_active_name 2>/dev/null); node="${node:+$node / }$CLAUDE_SSH_HOST"
+    if _proxy_shared; then tunnel='shared (served by another account)'
+    elif dir=$(_recovery_identity main 2>/dev/null) && _recovery_owner_pid "$dir" >/dev/null 2>&1; then tunnel='running'
+    else tunnel='not running (cc starts it)'; fi
+    printf '  Mode: %s | default node: %s | HTTP :%s  SOCKS :%s | tunnel: %s\n' \
+        "$mode" "$node" "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT" "$tunnel"
+}
+cc-help() {  # [all]
     echo ""
-    echo "=== Claude / Codex + SSH Tunnel Quick Commands (claude-proxy v$CLAUDE_PROXY_VERSION) ==="
-    echo "  cc              - Turn the proxy ON and launch Claude (skips permission prompts)"
-    echo "  cc -c / cc -r   - Same, but continue the last session / pick one to resume"
-    echo "  cc-safe         - Same as cc, but keeps Claude's permission prompts"
-    echo "  cx              - Turn the proxy ON and launch Codex (skips approval prompts)"
-    echo "  cx-safe         - Same, but keeps Codex's approval prompts"
-    echo "                    (anything after cc/cx is passed to claude/codex as-is)"
-    echo "  proxy-up        - Turn the proxy ON, but DON'T launch anything"
-    echo "  proxy-restart   - Proxy stuck? New tunnel for ALL windows; Claude in other tabs keeps running"
-    echo "  cc-stop         - Turn the proxy OFF (one off-switch for cc AND cx; refuses while other tabs use it, --force to insist)"
-    echo "  cc-stop sg      - Stop only the tunnel of node 'sg' (cx-stop sg: the same); other nodes keep running"
-    echo "  proxy-notify test - show a real desktop test alert (no proxy/session changes)"
-    echo "  proxy-test prolonged --fast - safely preview outage warnings (no live changes)"
-    echo "  proxy-status    - Show saved ports, active node ports and tunnel health (--debug for recovery details)"
-    echo "  proxy-doctor    - Diagnose each part and say exactly what's wrong + how to fix"
-    echo "  cc-install      - Check / install / update Node.js, Claude Code and Codex (--check: report only)"
+    echo "=== claude-proxy v$CLAUDE_PROXY_VERSION: Claude / Codex through your SSH tunnel ==="
+    _cc_help_status
+    cat <<'EOF'
+
+  EVERYDAY
+    cc                    Claude through the tunnel (starts the tunnel if needed)
+    cx                    Codex, the same way
+      --safe                keep the app's permission/approval prompts
+      --node sg             use node 'sg' in THIS terminal only (others keep theirs)
+      -c / -r ...           anything else goes straight to claude / codex
+    cc-stop [node]        stop the tunnel (or one node); refuses while sessions use it (--force)
+
+  SOMETHING WRONG?
+    proxy-status          what is running, on which ports
+    proxy-status --fix    check every part and print the exact fix
+    proxy-restart [node]  fresh tunnel; running Claude/Codex reconnect on their own
+    cc-manual [node]      print plain ssh + claude/codex commands to run by hand
+
+  NODES, CHROME, SETTINGS
+    proxy-nodes           list nodes (--refresh: update the list; use sg: make sg the default)
+    chrome-proxy [node]   Chrome through a node, own profile (--profile NAME, --list)
+    proxy-config          settings and ports (edit | set KEY VALUE | use-active | killswitch)
+
+  Examples:  cc -c            continue the last Claude session
+             cc --node sg     tab 2 on Singapore while tab 1 stays on the default
+             cx --safe        Codex with approval prompts
+EOF
+    if [ "${1:-}" != all ]; then
+        echo ""
+        echo "  More (maintenance, low-level steps, renamed commands): cc-help all"
+        echo ""
+        return 0
+    fi
+    cat <<'EOF'
+
+  MAINTENANCE
+    proxy-update          update this profile; your settings are kept
+    cc-install [--check]  install / update Node.js, Claude Code and Codex
+    proxy-nodes --from jpvpn   fetch the node list privately over SSH
+
+  LOW-LEVEL STEPS (cc / cc-stop already do these; useful in scripts)
+    proxy-up [--node sg]  tunnel + proxy env in this shell, without launching an app
+    tunnel-start [node]   start only the SSH tunnel      tunnel-stop [node]  stop it
+    proxy-on / proxy-off  set / clear proxy env vars in this shell
+
+  TESTING NOTIFICATIONS
+    proxy-notify test     show a desktop test alert
+    proxy-test prolonged --fast   preview outage warnings (no live changes)
+
+  RENAMED (old names still work for now and print the new one)
+    cc-safe, cx-safe   -> cc --safe, cx --safe      cx-stop          -> cc-stop
+    proxy-doctor       -> proxy-status --fix         proxy-node sg    -> proxy-nodes use sg
+    chrome-profiles    -> chrome-proxy --list        proxy-killswitch -> proxy-config killswitch
+
+  OPTIONS (proxy-config set KEY VALUE)
+    TERMINAL_NOTIFICATIONS quiet|verbose|off   quiet (default) hides brief outages
+    PROXY_MODE managed|shared   shared: use another account's tunnel on these ports
+EOF
     echo ""
-    echo "  -- nodes (jp / sg / us ...): several at the same time, one tunnel each --"
-    echo "  proxy-nodes     - List the nodes; a node must be listed here first (--refresh: get the latest list)"
-    echo "  cc --node sg    - Claude through 'sg' in THIS terminal only (also: cx --node sg, proxy-up --node sg)"
-    echo "                    e.g. tab 1: cc (default node)   tab 2: cc --node sg   - both run at the same time"
-    echo "  proxy-node sg   - Make 'sg' the default node for new cc / cx (refuses while a session uses it; --force)"
-    echo "  tunnel-start sg - Start only the tunnel of 'sg' (tunnel-stop sg / proxy-restart sg: the same, one node)"
-    echo "  chrome-proxy sg - Chrome through 'sg' on its own tunnel + profile (jp and sg can be open together)"
-    echo "  chrome-proxy jp --profile work - another Chrome profile through jp ('chrome-profiles' lists them)"
-    echo "  proxy-nodes --from jpvpn - get the node list privately from a VM over SSH (--domain <d>: public DNS)"
-    echo ""
-    echo "  -- settings & updates --"
-    echo "  proxy-config    - Show settings and active ports (edit / set KEY VALUE / use-active)"
-    echo "  proxy-update    - Fetch the latest version of this profile; your settings are kept"
-    echo ""
-    echo "  -- advanced: manage one piece at a time --"
-    echo "  tunnel-start    - Start the SSH tunnel of the default node (tunnel-start sg: node sg only)"
-    echo "  tunnel-stop     - Stop the SSH tunnel of the default node (tunnel-stop sg: node sg only)"
-    echo "  proxy-on        - Set proxy env vars + sync Claude settings.json"
-    echo "  proxy-off       - Clear proxy env vars (Claude settings.json keeps the proxy while the kill switch is on)"
-    echo "  proxy-killswitch - Show the kill switch (on/off): Claude/Codex never go out directly"
-    echo ""
-    echo "  chrome-proxy    - Open Chrome via SOCKS5 through the active node (auto-starts the tunnel, separate profile)"
-    echo "                    chrome-proxy [node] [--profile name] [url]  - e.g. chrome-proxy us -p shop https://example.com"
-    echo "  cc-help         - Show this list again"
-    echo ""
+}
+
+# Print a manual, profile-free way to run everything: the exact ssh tunnel, a
+# check, and claude/codex with proxy variables. Nothing is started or changed.
+cc-manual() {  # [node]
+    (
+        local node="${1:-}" label http socks q_np claude_bin codex_bin pinned=$CLAUDE_HTTP_PORT settings=''
+        _cc_manual_quote() { case "$1" in *\'*) printf '%q' "$1";; *) printf "'%s'" "$1";; esac; }
+        if [ -n "$node" ]; then _node_ctx "$node" || exit 1; label="node $node"
+        else _recovery_adopt >/dev/null 2>&1 || :; label="default node ($CLAUDE_SSH_HOST)"; fi
+        http=$CLAUDE_HTTP_PORT socks=$CLAUDE_SOCKS_PORT
+        q_np=$(_cc_manual_quote "$CLAUDE_NO_PROXY")
+        # Claude's settings.json pins the main port and wins over shell variables,
+        # so a named node needs its own --settings, exactly like cc --node does.
+        [ -z "$node" ] || settings=" --settings $(_cc_manual_quote "$(_node_settings_json "$http")")"
+        claude_bin=$(_bin_path claude 2>/dev/null); claude_bin=${claude_bin:-claude}
+        codex_bin=$(_bin_path codex 2>/dev/null); codex_bin=${codex_bin:-codex}
+        echo ""
+        echo "=== Manual fallback for $label (copy and paste; nothing was run) ==="
+        echo ""
+        if _proxy_shared; then
+            echo "# 1) Tunnel: shared mode - the serving account runs it. Nothing to start here."
+        else
+            _tunnel_ssh_args
+            echo "# 1) Start the SSH tunnel in its own terminal (Ctrl-C stops it):"
+            printf '   ssh'; printf ' %q' "${_CP_SSH_ARGS[@]}"; echo ""
+            echo "#    -L $http -> HTTP proxy on the VM (Claude/Codex)    -D $socks -> SOCKS5 (Chrome)"
+            echo "#    If the port is busy, an earlier tunnel is still running: proxy-status / lsof -i :$http"
+        fi
+        echo ""
+        echo "# 2) Check it (expect a number such as 404 or 200, not 000):"
+        printf '   curl -sS -o /dev/null -w %s -x http://127.0.0.1:%s https://api.anthropic.com\n' "'%{http_code}\\n'" "$http"
+        echo ""
+        echo "# 3) Launch through the proxy (these bypass the cc/cx shell functions):"
+        echo "   HTTPS_PROXY=http://127.0.0.1:$http HTTP_PROXY=http://127.0.0.1:$http NO_PROXY=$q_np \\"
+        printf '     %q%s\n' "$claude_bin" "$settings"
+        echo "   HTTPS_PROXY=http://127.0.0.1:$http HTTP_PROXY=http://127.0.0.1:$http NO_PROXY=$q_np \\"
+        printf '     %q\n' "$codex_bin"
+        echo "#    Add your usual flags, e.g. --dangerously-skip-permissions (claude) or"
+        echo "#    --dangerously-bypass-approvals-and-sandbox (codex), which cc / cx add for you."
+        echo ""
+        echo "# Chrome by hand:  <chrome> --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder>"
+        if _killswitch_on; then
+            echo "# Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel"
+            echo "# Claude fails closed instead of going direct. Check with: proxy-config killswitch"
+        else
+            echo "# Kill switch is OFF: plain claude/codex without these variables go direct."
+        fi
+        echo ""
+    )
 }
 
 # Kill switch: make sure Claude's settings point at the tunnel (also protects IDE

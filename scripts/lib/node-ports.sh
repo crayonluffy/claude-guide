@@ -45,7 +45,8 @@ _node_ports_plan() {  # [extra canonical name] [catalogue/local slot]
             for (i=1;i<=nl;i++) {
                 n=ln[i]; idx=li[i]
                 if (n in aliases || n in known) continue
-                if (!nameok(n) || idx !~ /^[0-9]+$/ || length(idx)>5) { fail("invalid local node or slot: " n); continue }
+                # Machine-written slot file: skip malformed lines like _node_local_slot does.
+                if (!nameok(n) || idx !~ /^[0-9]+$/ || length(idx)>5) continue
                 if (!(n in listed)) add(n,baseh+idx,bases+idx)
             }
             for (i=1;i<=count;i++) {

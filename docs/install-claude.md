@@ -114,11 +114,11 @@ At the first start, Claude shows the sign-in steps for your Anthropic account. A
 
 > **The browser page does not open?** The sign-in occurs in your browser. The browser does not use the tunnel automatically. Open the sign-in URL in a browser that uses the proxy: type `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there. Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
 
-> **Note:** With the kill switch on (the default), plain `claude` always uses the tunnel. On a network that does not block Anthropic, you can type `proxy-killswitch off`. Then plain `claude` connects directly.
+> **Note:** With the kill switch on (the default), plain `claude` always uses the tunnel. On a network that does not block Anthropic, you can type `proxy-config killswitch off`. Then plain `claude` connects directly.
 
 ---
 
 ## Next
 
 - **[Install Codex](install-codex.md)**: the CLI of OpenAI, if you want the two tools.
-- **[Tips & commands](tips.md)**: daily use of `cc`, `cx`, `cc-stop` and `proxy-doctor`.
+- **[Tips & commands](tips.md)**: daily use of `cc`, `cx`, `cc-stop` and `proxy-status --fix`.

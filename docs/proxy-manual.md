@@ -2,6 +2,8 @@
 
 This page shows how to run the proxy **by hand**, without the profile in your shell. These are the same steps that `cc` and `cx` do automatically. Use this page if you do not want the profile, or to find which part of the setup has a problem.
 
+> **Have the profile installed?** Type `cc-manual` (or `cc-manual sg` for a node). It prints these commands already filled in with your server, ports and paths, and runs nothing.
+
 **How it works: you keep 2 windows open.**
 
 ```mermaid
@@ -190,4 +192,4 @@ google-chrome \
 
 For more conditions, refer to **[Troubleshooting](troubleshooting.md)**.
 
-> **Tip:** If you do this often, use the [one-command profile setup](proxy-profile.md). `cc` and `cx` do all five steps, and `proxy-doctor` examines each part automatically.
+> **Tip:** If you do this often, use the [one-command profile setup](proxy-profile.md). `cc` and `cx` do all five steps, and `proxy-status --fix` examines each part automatically.

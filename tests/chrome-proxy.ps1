@@ -28,7 +28,8 @@ function Start-NodeTunnelOwner { param($Node) $script:TunnelPorts += $Node; retu
 function Reset-Launch { $script:ChromeArgs = @(); $script:TunnelPorts = @() }
 $script:CHROME_EXE = 'chrome-proxy-test-browser'
 $script:CHROME_BASE = 'C:\ChromeVPNProfile'
-$script:SSH_HOST = 'jpvpn'; $script:SOCKS_PORT = 1080; $script:NODE_SOCKS_BASE = 1180
+$script:SSH_HOST = 'jpvpn'; $script:HTTP_PORT = 8080; $script:SOCKS_PORT = 1080
+$script:NODE_HTTP_BASE = 8180; $script:NODE_SOCKS_BASE = 1180; $script:NODE_PORTS = $null; $script:REMOTE_PROXY_PORT = 8888
 $script:NODES_CACHE = [System.IO.Path]::GetTempFileName()
 $catalogue = '{"nodes":[{"name":"jp","alias":"jpvpn","host":"jp.example.com","slot":0},{"name":"sg","alias":"sgvpn","host":"sg.example.com","slot":1}]}'
 try {

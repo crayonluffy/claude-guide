@@ -23,10 +23,10 @@ Files: common.sh, claude-proxy.ps1, tests/test_shared_proxy.py, tests/proxy-shar
 Interface: PROXY_MODE managed/shared; runtime helpers select client behavior;
 existing proxy-up and cc/cx interfaces stay.
 
-- [ ] Reproduce hidden foreign ownership and live-owner reconnect rejection.
-- [ ] Add explicit shared clients with no owner lifecycle calls and guarded controls.
-- [ ] Wait for an owned reconnect before the final readiness/kill-switch checks.
-- [ ] Verify managed behavior, shared failure/NO_PROXY pinning and both providers.
+- [x] Reproduce hidden foreign ownership and live-owner reconnect rejection.
+- [x] Add explicit shared clients with no owner lifecycle calls and guarded controls.
+- [x] Wait for an owned reconnect before the final readiness/kill-switch checks.
+- [x] Verify managed behavior, shared failure/NO_PROXY pinning and both providers.
 
 ## Task 2: Serialize operations and stabilize named nodes
 
@@ -35,10 +35,10 @@ tests/proxy-operations.*, switch-race regression and existing node regressions.
 Interfaces: shell _proxy_operation_owned/run/release; PowerShell
 Test-RecoveryOperation / Invoke-RecoveryOperation / Exit-RecoveryOperation.
 
-- [ ] Integrate coordinator artifacts; prove concurrency/nesting/early release.
-- [ ] Guard main switch/restart/start and startup through subscriber registration.
-- [ ] Named nodes always get node-name slots; main is selected only implicitly.
-- [ ] Reproduce/fix switch races; retain selected server and main ports.
+- [x] Integrate coordinator artifacts; prove concurrency/nesting/early release.
+- [x] Guard main switch/restart/start and startup through subscriber registration.
+- [x] Named nodes always get node-name slots; main is selected only implicitly.
+- [x] Reproduce/fix switch races; retain selected server and main ports.
 
 ## Task 3: Node editor
 
@@ -46,14 +46,14 @@ Files: common.sh, claude-proxy.ps1, config regressions and docs.
 Interface: NODE_PORTS data; shell multiline rows `node HTTP SOCKS`, PowerShell
 native per-node hashtables. Missing entries fall back to base+slot.
 
-- [ ] Add failing multi-node editing, preservation and conflict regressions.
-- [ ] Expose editable saved assignments for every known node alongside running
+- [x] Add failing multi-node editing, preservation and conflict regressions.
+- [x] Expose editable saved assignments for every known node alongside running
   endpoints and occupied-port diagnostics; validate before replacing settings.
-- [ ] Use overrides consistently at node launch/restart/preflight; preserve owners.
+- [x] Use overrides consistently at node launch/restart/preflight; preserve owners.
 
 ## Task 4: Release
 
-- [ ] Update docs and all generated markers to 2.13.0; run full portable suite.
+- [x] Update docs and all generated markers to 2.13.0; run full portable suite.
 - [ ] Fresh focused review and necessary fixes; verify real local network startup
   without changing Kimmy's live owner/config or Ming's private files.
 - [ ] Install/commit as crayonluffy <crayonluffy@gmail.com>; publish and verify.

@@ -60,22 +60,22 @@ The kill switch protects Claude Code (the CLI and the IDE extensions) and Codex 
 ## Daily commands (full list)
 
 ```bash
-cc              # proxy ON + start Claude   (cc-safe keeps the permission prompts)
+cc              # proxy ON + start Claude   (cc --safe keeps the permission prompts)
 cc -c           # ...and continue the last session (cc -r: select one; all claude flags go through)
-cx              # proxy ON + start Codex    (cx-safe keeps the approval prompts)
+cx              # proxy ON + start Codex    (cx --safe keeps the approval prompts)
 proxy-up        # proxy ON, start nothing
 cc-stop         # proxy OFF for both (also the Chrome tunnels of each node)
 proxy-status    # what runs + your external IP
-proxy-doctor    # a problem? it tells you the cause and the fix
-proxy-killswitch  # the kill switch status (on / off)
+proxy-status --fix    # a problem? it tells you the cause and the fix
+proxy-config killswitch  # the kill switch status (on / off)
 proxy-update    # get the newest profile; your settings (proxy-config) stay
 cc-install      # examine / install / update Node.js, Claude Code and Codex  (--check: report only)
 
 proxy-nodes     # the nodes (jp / jp2 / sg / us …) and the node that you use
 cc --node sg    # Claude through node sg, in this terminal only   (also cx --node sg)
-proxy-node sg   # make sg the default node for new terminals
+proxy-nodes use sg   # make sg the default node for new terminals
 chrome-proxy us # a Chrome window through 'us': its own tunnel and profile; other nodes stay open
-chrome-proxy jp --profile work   # a different Chrome profile through the same node (chrome-profiles shows them)
+chrome-proxy jp --profile work   # a different Chrome profile through the same node (chrome-proxy --list shows them)
 proxy-nodes --from jpvpn         # get the node list privately from one of your VMs (over SSH)
 ```
 

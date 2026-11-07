@@ -205,7 +205,8 @@ try {
  $env:HTTPS_PROXY='http://127.0.0.1:8080'; cc-stop sg 6>$null
  Assert ($env:HTTPS_PROXY -eq 'http://127.0.0.1:8080') 'other window env cleared'
  $script:Stops=@(); cc-stop jp 6>$null
- Assert (($script:Stops -join ',') -eq 'default,proxy-off') "cc-stop <default>: $($script:Stops -join ',')"
+ # Named routes keep node-<name> even for the default node; main and the window stay (same as bash)
+ Assert (($script:Stops -join ',') -eq 'jp') "cc-stop <default>: $($script:Stops -join ',')"
  'PASS: cc-stop / cx-stop <node> stop one node only, guarded by its sessions'
 } finally {
  $env:PATH=$oldPath; $env:HTTPS_PROXY=$null; $env:HTTP_PROXY=$null; $env:NO_PROXY=$null; $env:https_proxy=$null; $env:http_proxy=$null; $env:no_proxy=$null

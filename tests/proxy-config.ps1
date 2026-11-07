@@ -290,7 +290,11 @@ Invoke-Case 'editor refreshes active node snapshot without duplicating headers' 
     proxy-config edit 6>$null
     $edited=[IO.File]::ReadAllText($script:PROXY_CONF)
     Assert (([regex]::Matches($edited,'# BEGIN CLAUDE PROXY PORT STATUS')).Count -eq 1) 'Duplicate status sections'
-    Assert ($edited.Contains('8191') -and -not $edited.Contains('8181')) 'Stale active node snapshot'
+    Assert (([regex]::Matches($edited,'(?m)^NODE_PORTS|^\s*NODE_PORTS\s*=')).Count -eq 1) 'Duplicate NODE_PORTS entries'
+    # The running snapshot is refreshed; sg's saved assignment (8181) stays editable.
+    Assert ($edited -match '(?m)^#\s+sg\s+sg-host\s+8191\s') 'Running snapshot missing refreshed port'
+    Assert ($edited -notmatch '(?m)^#\s+sg\s+sg-host\s+8181\s') 'Stale active node snapshot'
+    Assert ($edited -match '(?m)^#\s+sg\s+8181\s+1181\s+8191/1181\s') 'Plan does not show saved versus running ports'
 }
 foreach ($node in @('main','sg')) {
     Invoke-Case "restart $node applies saved ports and probes the new port" {
@@ -326,20 +330,31 @@ foreach ($node in @('main','sg')) {
         Assert ($out -match 'Relaunch' -and $out -notmatch 'same ports') $out
     }
 }
-Invoke-Case 'node restart rejects pending default-server change before stopping' {
-    $script:LeaseBySlot.main.Dispose()
-    Remove-Item (Join-Path (Get-RecoveryIdentity) 'owner.json')
+Invoke-Case 'node restart keeps the named slot when saved settings make it the default' {
+    # Explicit node routes keep node-<name>; main must stay untouched.
     $script:SSH_HOST='main-host'
     [IO.File]::WriteAllText($script:PROXY_CONF,"@{SSH_HOST='sg-host';SYNC_SETTINGS=0;BANNER=0;NODE_HTTP_BASE=9000}")
     $script:RestartTrace=@()
-    function tunnel-stop { $script:RestartTrace+='stop'; return $true }
-    function Start-NodeTunnelOwner { $script:RestartTrace+='start'; return $true }
-    function Wait-ProxyTransport { return $true }
-    Assert-Throws { proxy-restart -Node sg 6>$null }
-    Assert ($script:RestartTrace.Count -eq 0) 'Pending default-server change stopped or started a tunnel'
-    Assert ($script:SSH_HOST -eq 'main-host') 'Rejected restart changed this window''s default server'
-    $record=Get-RecoveryStatus (Get-RecoveryIdentity -Slot node-sg) descriptor
-    Assert ($record.HTTP_PORT -eq 8181) 'Rejected restart changed the running node''s ports'
+    function Stop-RecoveryOwner { param($Identity,$WaitSeconds)
+        $slot=Split-Path -Leaf $Identity
+        $script:RestartTrace+="stop:$slot"
+        $script:LeaseBySlot[$slot].Dispose()
+        Remove-Item (Join-Path $Identity 'owner.json')
+    }
+    function tunnel-start { $script:RestartTrace+='start:main' }
+    function Start-NodeTunnelOwner { param($Node)
+        $ctx=Get-NodeContext $Node
+        $script:RestartTrace+="start:$($ctx.Slot):$($ctx.HTTP_PORT)"
+        $null=New-ConfigTestOwner $ctx.Slot $ctx
+        return $true
+    }
+    function Wait-ProxyTransport { param($Provider,$HttpPort,$SocksPort,$Identity) return $true }
+    function proxy-on { $script:RestartTrace+='proxy-on' }
+    proxy-restart -Node sg 6>$null | Out-Null
+    Assert (($script:RestartTrace -join ',') -eq 'stop:node-sg,start:node-sg:9001') ($script:RestartTrace -join ',')
+    $main=Get-RecoveryStatus (Get-RecoveryIdentity) descriptor
+    Assert ($main.HTTP_PORT -eq 8081) 'Named restart changed the main tunnel'
+    Assert (Test-Path (Join-Path (Get-RecoveryIdentity) 'owner.json')) 'Named restart stopped the main owner'
 }
 foreach ($values in @('HTTP_PORT=8181','HTTP_PORT=8090;SOCKS_PORT=8090')) {
     Invoke-Case "restart refuses conflicting saved ports: $values" {

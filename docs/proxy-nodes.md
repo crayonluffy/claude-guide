@@ -16,12 +16,12 @@ The commands are the same for all sources:
 |-----------|---------|
 | See the nodes, and the node that you use | `proxy-nodes` |
 | Send **Claude or Codex in this terminal** through a different VM | `cc --node sg` / `cx --node sg` (other terminals do not change) |
-| Make a different VM the **default** for all new terminals | `proxy-node sg` |
-| Stop the tunnel of **one node** (the other nodes continue) | `cc-stop sg` or `cx-stop sg` |
+| Make a different VM the **default** for all new terminals | `proxy-nodes use sg` |
+| Stop the tunnel of **one node** (the other nodes continue) | `cc-stop sg` |
 | Use a VM that is **only an alias** in `~/.ssh/config` (not in the node list) | `cc --node devbox` (any command above works with the alias) |
 | Open a **Chrome window** through a specific VM, without a change to `cc`, and with more VMs open at the same time | `chrome-proxy sg` |
 | Open a **different Chrome profile** (different logins) through the **same** VM | `chrome-proxy jp --profile work` (Windows: `-Profile work`) |
-| See the Chrome profiles | `chrome-profiles` |
+| See the Chrome profiles | `chrome-proxy --list` |
 | Get the node list (privately) from one of your VMs | `proxy-nodes --from jpvpn` (Windows: `-From jpvpn`). Use a VM that gives the list. |
 
 If you use only one node, nothing changes: `cc`, `cx` and `chrome-proxy` work as before.
@@ -36,11 +36,11 @@ If you use only one node, nothing changes: `cc`, `cx` and `chrome-proxy` work as
 
 - A **node** is one VM. The profile connects to it through an alias in `~/.ssh/config` (`jpvpn`, `jpvpn2`, `sgvpn`, …). This is the same type of alias that the setup wizard made for your first server. All nodes use the **same SSH key and username**. When `proxy-nodes --refresh` writes a new alias, it copies `IdentityFile` and `User` from your current alias.
 - **More VMs in one region** are more nodes: `jp`, `jp2`, `jp3` (aliases `jpvpn`, `jpvpn2`, `jpvpn3`). Each one has its own IP address. `proxy-nodes` shows them in groups by region.
-- The **active node** (the default node) is the node that `cc`, `cx` and a plain `chrome-proxy` use. It is `SSH_HOST` in your settings file. `proxy-node <name>` changes it. If the tunnel is up, `proxy-node` restarts the tunnel on the new node. If a `cc` or `cx` session uses the default node, `proxy-node` refuses, because the session would move to the new node. Use `cc --node <name>` for one terminal, or `proxy-node <name> --force`.
-- Each node that is **not** active can have its **own tunnel** (2.10+). The tunnel has two fixed ports: an HTTP port for Claude and Codex (`NODE_HTTP_BASE` + the **slot** of the node: `8180`, `8181`, …) and a SOCKS port for Chrome (`NODE_SOCKS_BASE` + slot: `1180`, `1181`, …). The admin gives each node a fixed slot. This tunnel repairs itself, the same as the main tunnel. `cc --node sg`, `cx --node sg` and `chrome-proxy sg` all use the tunnel of `sg`. The main tunnel does not change.
+- The **active node** (the default node) is the node that `cc`, `cx` and a plain `chrome-proxy` use. It is `SSH_HOST` in your settings file. `proxy-nodes use <name>` changes it. If the tunnel is up, `proxy-nodes use` restarts the tunnel on the new node. If a `cc` or `cx` session uses the default node, `proxy-nodes use` refuses, because the session would move to the new node. Use `cc --node <name>` for one terminal, or `proxy-nodes use <name> --force`.
+- Each node you **name** has its **own tunnel** (2.10+; since 2.13.0 also when that node is the default, so `cc --node jp` and `chrome-proxy jp` keep the same ports when you change the default node). Only a plain `cc`, `cx` or `chrome-proxy` uses the main tunnel. The node tunnel has two fixed ports: an HTTP port for Claude and Codex (`NODE_HTTP_BASE` + the **slot** of the node: `8180`, `8181`, …) and a SOCKS port for Chrome (`NODE_SOCKS_BASE` + slot: `1180`, `1181`, …). The admin gives each node a fixed slot; `NODE_PORTS` can override the ports of one node (below). This tunnel repairs itself, the same as the main tunnel. `cc --node sg`, `cx --node sg` and `chrome-proxy sg` all use the tunnel of `sg`. The main tunnel does not change.
 - `cc --node sg` changes only **this terminal**. Claude gets the proxy of `sg` through `--settings` (Claude reads its `settings.json` first, and the kill switch keeps the default node there). Codex gets it in its environment. Your shell, the default node and the other terminals do not change.
 - Chrome opens with **its own data folder** for each node (`…-jp`, `…-jp2`, …). Thus a JP window and an SG window can be open at the same time. (Chrome ignores a different `--proxy-server` for a data folder that is already open. Thus each node needs its own folder.)
-- **Chrome profiles** are *in* the data folder of a node. `chrome-proxy jp --profile work` opens the profile `work` in `…-jp` (and makes it if necessary). All profiles of `jp` use the tunnel and the IP address of `jp`, but each profile has its own logins, cookies, history and extensions. Profiles that you add from the profile menu of Chrome (*Profile 1*, …) work the same way. `chrome-profiles` shows all of them. For a profile on a **different IP address**, put it on a different VM: `chrome-proxy jp2 --profile work`.
+- **Chrome profiles** are *in* the data folder of a node. `chrome-proxy jp --profile work` opens the profile `work` in `…-jp` (and makes it if necessary). All profiles of `jp` use the tunnel and the IP address of `jp`, but each profile has its own logins, cookies, history and extensions. Profiles that you add from the profile menu of Chrome (*Profile 1*, …) work the same way. `chrome-proxy --list` shows all of them. For a profile on a **different IP address**, put it on a different VM: `chrome-proxy jp2 --profile work`.
 - `cc-stop` stops all tunnels: the main tunnel **and** the Chrome tunnel of each node. `proxy-status` shows all of them.
 
 ---
@@ -57,18 +57,18 @@ proxy-nodes --from ''              # use the (empty) list of this guide again
 # The profile saves a new source only when it answers; --force (-Force) saves it anyway. Only one source at a time:
 # --from removes --domain, and --domain removes --from. The two spellings work on all systems (--from / -From, ...).
 
-proxy-node                         # show the active node
-proxy-node jp2                     # make jp2 the default (saved; restarts the tunnel; refuses while sessions use it - --force)
+proxy-nodes use                         # show the active node
+proxy-nodes use jp2                     # make jp2 the default (saved; restarts the tunnel; refuses while sessions use it - --force)
 cc --node jp2                      # Claude through jp2 in THIS terminal only   (also cx --node, proxy-up --node)
 tunnel-start jp2                   # start only the tunnel of jp2; tunnel-stop jp2 / proxy-restart jp2 work the same way
-cc-stop jp2                        # stop only the tunnel of jp2 (cx-stop jp2: the same); refuses while a session uses it - --force
+cc-stop jp2                        # stop only the tunnel of jp2; refuses while a session uses it - --force
 cc --node devbox                   # a plain ssh alias, not in the node list, works too (its own fixed ports)
 
 chrome-proxy                       # Chrome through the ACTIVE node (main tunnel; the profile starts it if necessary)
 chrome-proxy jp2                   # Chrome through the tunnel of jp2, with its own data folder (no change to the main tunnel)
 chrome-proxy jp --profile work     # ...as the Chrome profile 'work' (made at the first use)   (Windows: -Profile work, or -p work)
 chrome-proxy us -p shop https://x  # ...and open a URL there (all other arguments go to Chrome)
-chrome-profiles                    # the profiles of all nodes (chrome-profiles jp: only the profiles of jp)
+chrome-proxy --list                    # the profiles of all nodes (chrome-proxy --list jp: only the profiles of jp)
 ```
 
 The output of `proxy-nodes` looks like this:
@@ -82,7 +82,7 @@ The output of `proxy-nodes` looks like this:
     us    usvpn    US          <not provisioned>
 ```
 
-The output of `chrome-profiles` looks like this:
+The output of `chrome-proxy --list` looks like this:
 
 ```
 === Chrome profiles per node (data dirs: ~/.chrome-proxy-profile-<node>) ===
@@ -101,7 +101,7 @@ The output of `chrome-profiles` looks like this:
 
 **Plain ssh aliases (2.11+):** a VM that is only an alias in `~/.ssh/config` (for example `devbox`) can also be a node. Type `cc --node devbox`. The profile gives the alias a fixed slot from 100 up (ports `8280` / `1280`, then `8281` / `1281` …). It saves the slot in `~/.claude-proxy.local-nodes`, so the ports stay the same. The profile assumes that the VM runs tinyproxy on the same port as the default node. If the node list contains the same name, the node list wins.
 
-**Change the default node:** `proxy-node sg` restarts the main tunnel on the *same* local port. It refuses while a `cc` or `cx` session uses the default node. (`--force` changes it anyway. Then a `claude` that runs sees a short interruption and continues on the new node.) Other terminals use the old node until they load the profile again (`source ~/.claude-proxy.sh`, or a new window).
+**Change the default node:** `proxy-nodes use sg` restarts the main tunnel on the *same* local port. It refuses while a `cc` or `cx` session uses the default node. (`--force` changes it anyway. Then a `claude` that runs sees a short interruption and continues on the new node.) Other terminals use the old node until they load the profile again (`source ~/.claude-proxy.sh`, or a new window).
 
 **Profile names:** use letters, digits, spaces, `.`, `_` and `-`. `default` is the first profile of Chrome (`Default`). To delete a profile, use the profile menu of Chrome. Or close Chrome and delete the profile folder in the data folder of the node.
 
@@ -111,11 +111,12 @@ The output of `chrome-profiles` looks like this:
 
 | macOS / Linux key | Windows key | Default | Meaning |
 |---|---|---|---|
-| `CLAUDE_SSH_HOST` | `SSH_HOST` | `jpvpn` | The alias of the active node. `proxy-node` changes it. |
+| `CLAUDE_SSH_HOST` | `SSH_HOST` | `jpvpn` | The alias of the active node. `proxy-nodes use` changes it. |
 | `CLAUDE_NODES_FROM` | `NODES_FROM` | *(empty)* | The VM (ssh alias) that gives the node list over SSH. `proxy-nodes --from` sets it. |
 | `CLAUDE_PROXY_DOMAIN` | `PROXY_DOMAIN` | *(empty)* | Get the list from the public DNS of this domain. `proxy-nodes --domain` sets it. |
 | `CLAUDE_NODE_HTTP_BASE` | `NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (Claude and Codex with `--node`). A node uses this number + its slot. Change it if a different program uses ports `8180`–`8199`. |
 | `CLAUDE_NODE_SOCKS_BASE` | `NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (Chrome). A node uses this number + its slot. Change it if a different program uses ports `1180`–`1199`. |
+| `CLAUDE_NODE_PORTS` | `NODE_PORTS` | *(base + slot)* | Ports for single nodes, when base + slot does not suit you. macOS / Linux: one line per node, `node HTTP SOCKS` (`CLAUDE_NODE_PORTS='sg 9181 9281'`). Windows: `NODE_PORTS = @{ 'sg' = @{ HTTP_PORT = 9181; SOCKS_PORT = 9281 } }`. `proxy-config edit` lists every known node with its saved and running ports and marks ports that another program or account uses. A running node tunnel keeps its ports until `proxy-restart <node>`. |
 | `CLAUDE_CHROME_BIN` | `CHROME_EXE` | *(auto)* | Set it only if Chrome is not in the usual location (Windows also looks in `%LOCALAPPDATA%`). |
 | `CLAUDE_PROXY_NODES` *(environment only)* | — | `~/.claude-proxy.nodes.json` | The location of the saved catalogue. |
 
@@ -229,7 +230,7 @@ _claude-proxy.example.com.  TXT  "v=cp1 name=jp2 slot=3 region=Japan note=Second
 | Key | Necessary | Meaning |
 |---|---|---|
 | `v=cp1` | ✅ first word | Shows that the record is a node. The profile ignores other TXT records on that name. |
-| `name` | ✅ | The short ID that users type: `proxy-node jp2`. Letters, then digits. No `-`. |
+| `name` | ✅ | The short ID that users type: `proxy-nodes use jp2`. Letters, then digits. No `-`. |
 | `slot` | ✅ | A fixed number `0, 1, 2, …`. It must be **unique**. Do not use it again. The Chrome tunnel of the node listens on `NODE_SOCKS_BASE` + slot on each computer. Thus the order of the records is not important. |
 | `region` | | The label in the lists. The nodes show in groups by region. `_` = space (`Hong_Kong`). |
 | `alias` | | The `~/.ssh/config` alias to make. Default: `<letters>vpn<digits>`. |
@@ -239,7 +240,7 @@ _claude-proxy.example.com.  TXT  "v=cp1 name=jp2 slot=3 region=Japan note=Second
 | `note` | | Free text. `_` = space. |
 | `hostkey` | | Recommended. The host key of the VM, with `:` in place of the space: `ssh-keyscan -t ed25519 <host> \| cut -d' ' -f2- \| tr ' ' ':'`. The computers add it to `known_hosts`. |
 
-To see what the computers will see, type `dig +short TXT _claude-proxy.example.com` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.example.com`), or `proxy-doctor`.
+To see what the computers will see, type `dig +short TXT _claude-proxy.example.com` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.example.com`), or `proxy-status --fix`.
 
 **3. Tell the users the domain** (one time):
 

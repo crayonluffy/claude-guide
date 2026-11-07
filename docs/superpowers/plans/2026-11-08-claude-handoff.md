@@ -178,3 +178,27 @@ commits 0285b87/2bf94cc were rewritten as de9c958/e0d50be with identical trees;
 the v2.12.2 tagger and release target were corrected too. Local backup refs exist
 under `refs/backup/2026-11-08-author-fix/`. Keep the corrected history. Never
 include authentication tokens or private local credentials in Git.
+
+## Completed by Claude — 2026-11-07 (Linux host)
+
+- Named-node restart: removed the unreachable "saved settings make this node
+  the default" guard (Bash and PowerShell). The four old tests now assert the
+  new contract: `proxy-restart sg` restarts only node-sg on its saved ports and
+  leaves main untouched; a conflict with another live node fails before teardown.
+- Editor re-open: behaviour was correct; assertions now check the running
+  snapshot row instead of the bare port (the saved NODE_PORTS row legitimately
+  keeps 8181). PowerShell editing now parses, materializes and compares one
+  snapshot of the file.
+- Malformed lines in the machine-written local-nodes file are skipped (as the
+  allocator already did) instead of disabling every local alias node.
+- PowerShell `Write-NodeSettingsFile` creates the slot folder (shared clients
+  never start a local owner).
+- Shared mode: `proxy-status` and `proxy-status --fix` probe the shared
+  endpoint instead of telling the client account to start its own tunnel.
+- Command surface: eight core commands; old names are rename wrappers;
+  `bridge-*` removed; new `cc-manual`; task-oriented `cc-help`.
+- Test fixtures updated for stable node slots; runner per-test timeout 300 s
+  (`PROXY_TEST_TIMEOUT`), since the race suite takes ~100 s alone.
+- Not verified here: native Windows / Windows PowerShell 5.1, a real Ming
+  account, and installation on the Mac. `tests/proxy-desktop.ps1` fails on a
+  non-Windows host also on main (fake-Windows init fails lazily); see audit.

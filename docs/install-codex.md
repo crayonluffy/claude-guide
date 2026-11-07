@@ -69,5 +69,5 @@ cx
 
 ## Next
 
-- **[Tips & commands](tips.md)**: daily use of `cc`, `cx`, `cc-stop` and `proxy-doctor`.
+- **[Tips & commands](tips.md)**: daily use of `cc`, `cx`, `cc-stop` and `proxy-status --fix`.
 - **[Troubleshooting](troubleshooting.md)**: if something does not work correctly.

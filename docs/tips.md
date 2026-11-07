@@ -116,7 +116,7 @@
 }
 ```
 
-> **Note:** With the kill switch on, the proxy profile also keeps `env.HTTPS_PROXY`, `env.HTTP_PROXY` and `env.NO_PROXY` in your user `settings.json`. Do not remove them by hand. To change this, use `proxy-killswitch`.
+> **Note:** With the kill switch on, the proxy profile also keeps `env.HTTPS_PROXY`, `env.HTTP_PROXY` and `env.NO_PROXY` in your user `settings.json`. Do not remove them by hand. To change this, use `proxy-config killswitch`.
 
 Current model IDs: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`. Or use the aliases `opus`, `sonnet` and `haiku`. The aliases always use the latest version.
 

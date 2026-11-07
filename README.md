@@ -84,9 +84,9 @@ Windows uses the same `proxy-config edit` and `proxy-config use-active`
 commands. Its editor is Notepad; use `proxy-status -Debug` for detailed recovery
 information (`proxy-status --debug` on macOS/Linux/WSL).
 
-1. Type **`proxy-doctor`**. It examines each part and tells you the problem and the fix.
+1. Type **`proxy-status --fix`**. It examines each part and tells you the problem and the fix.
 2. If the problem continues, **run the installer again** (step 1). This is safe. The installer keeps your settings.
-3. Send the output of `proxy-doctor` to your admin.
+3. Send the output of `proxy-status --fix` to your admin.
 
 ## 🔄 Keeping up to date
 
