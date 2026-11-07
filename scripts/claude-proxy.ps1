@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.12.2'
+$script:PROFILE_VERSION = '2.12.3'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -129,11 +129,12 @@ $script:WATCHDOG_MAX_BACKOFF=30
 # its forwards up before failed probes count as an outage or get it killed.
 $script:WATCHDOG_STARTUP_GRACE=20
 $script:DESKTOP_NOTIFICATIONS='auto' # auto or off
+$script:TERMINAL_NOTIFICATIONS='quiet' # quiet, verbose or off; actionable warnings always show
 $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS','TERMINAL_NOTIFICATIONS')
 $script:CONFIG_DEFAULTS = @{}
 foreach ($configKey in $script:CONF_KEYS) {
     $script:CONFIG_DEFAULTS[$configKey] = Get-Variable -Name $configKey -Scope Script -ValueOnly
@@ -784,6 +785,18 @@ function proxy-notify {
     } finally {Stop-RecoveryDesktopContext $ctx}
 }
 
+function Get-RecoveryTerminalTransition {
+    param([string]$Mode,[string]$Phase,[string]$Event,[bool]$Warned)
+    $notice='none'
+    if ($Event -eq 'takeover') { $notice='takeover' }
+    elseif ($Mode -eq 'verbose') {
+        if ($Event -in @('lost','prolonged','restored','progress')) { $notice=$Event }
+    } elseif ($Mode -ne 'off') {
+        if ($Phase -eq 'prolonged' -and -not $Warned) { $Warned=$true; $notice='prolonged' }
+        elseif ($Phase -eq 'healthy' -and $Warned) { $Warned=$false; $notice='restored' }
+    }
+    return @{Warned=$Warned;Event=$notice}
+}
 function Start-RecoverySubscriber {
     param([string]$Identity,[string]$Provider)
     $messages=@{}
@@ -802,8 +815,9 @@ function Start-RecoverySubscriber {
     $lines=[Collections.ArrayList]::Synchronized([Collections.ArrayList]::new())
     $ps=[PowerShell]::Create()
     [void]$ps.AddScript({
-        param($path,$provider,$messages,$sshPath,$hints,$lines,$takeoverPath)
-        $seen=-1; $seenSsh=''
+        param($path,$provider,$messages,$sshPath,$hints,$lines,$takeoverPath,$mode,$terminalSource)
+        $seen=-1; $seenSsh=''; $warned=$false
+        $terminalStep=[scriptblock]::Create($terminalSource)
         function Say([string]$Text) { [void]$lines.Add($Text); [Console]::Error.WriteLine("`n[$provider proxy] $Text") }
         while ($true) {
             try {
@@ -812,18 +826,20 @@ function Start-RecoverySubscriber {
                 $s=[IO.File]::ReadAllText($path) | ConvertFrom-Json -ErrorAction Stop
                 if ($s.generation -ne $seen) {
                     if ($seen -ne -1 -or $s.phase -ne 'healthy') {
-                        if ($s.event -eq 'takeover') {
+                        $r=& $terminalStep $mode $s.phase $s.event $warned
+                        $warned=$r.Warned
+                        if ($r.Event -eq 'takeover') {
                             $t=try { [IO.File]::ReadAllText($takeoverPath) | ConvertFrom-Json } catch { $null }
                             if ($t) { Say ($messages.takeover.Replace('{pid}',"$($t.Pid)").Replace('{name}',"$(if ($t.Name) {$t.Name} else {'unknown'})").Replace('{port}',"$($t.Port)")) }
                         }
-                        elseif ($messages.ContainsKey($s.event)) { Say $messages[$s.event] }
+                        elseif ($messages.ContainsKey($r.Event)) { Say $messages[$r.Event] }
                     }
                     $seen=$s.generation
                 }
             } catch { }
             Start-Sleep -Milliseconds 500
         }
-    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages).AddArgument((Join-Path $Identity 'ssh.json')).AddArgument($hints).AddArgument($lines).AddArgument((Join-Path $Identity 'takeover.json'))
+    }).AddArgument((Join-Path $Identity "$Provider.json")).AddArgument($Provider).AddArgument($messages).AddArgument((Join-Path $Identity 'ssh.json')).AddArgument($hints).AddArgument($lines).AddArgument((Join-Path $Identity 'takeover.json')).AddArgument($script:TERMINAL_NOTIFICATIONS).AddArgument(${function:Get-RecoveryTerminalTransition}.ToString())
     $async=$ps.BeginInvoke()
     return [pscustomobject]@{PowerShell=$ps;Async=$async;Lines=$lines;Session=$session}
 }

@@ -110,6 +110,7 @@ assert test "$(cat "$scratch/app.args")" = 'hello world'
 assert test ! -e "$scratch/unexpected"
 echo 'PASS: Bash mandatory preflight, native argument preservation, and application exit code'
 # Real subscriber receives each generation once and never mutates shared status.
+CLAUDE_TERMINAL_NOTIFICATIONS=verbose
 mkdir "$scratch/notifications"
 printf 'healthy|-|0|0|0|0|0|healthy|none\n' > "$scratch/notifications/claude.state"
 sub=$(_recovery_subscribe "$scratch/notifications" claude 2>"$scratch/notices")

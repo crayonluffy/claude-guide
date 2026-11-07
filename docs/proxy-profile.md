@@ -46,7 +46,24 @@ Before `cc` and `cx` start the application, an HTTPS connection through the HTTP
 
 If a different program uses a tunnel port, the profile reports a `conflict`. The recovery waits. It does not change the port and it does not stop the other program. If a different program takes a proxy port **while the tunnel is down**, Claude or Codex can send traffic to that program. Thus the owner shows one special alert in each open session, in the log, and on the desktop: `Another program (<name>, PID <pid>) took proxy port <port> while the tunnel was down ... exit this session now; nothing was stopped.` The owner does not stop that program. When the port is free, the recovery continues automatically.
 
-During an outage, each `cc` or `cx` terminal shows a warning. After 60 seconds, the terminal shows one more warning that the session stays open. Then the owner continues to try, and shows progress notices from time to time. The owner does not close the application, does not send input to it, and does not change its proxy settings. You can stop the application in the usual way and continue later. The recovery does not make sure that the application sends a failed request again. If necessary, send the request again. If you start an application by hand after `proxy-up`, the recovery works, but the session does not get warnings.
+Terminal notices default to `quiet`: brief outages produce no messages inside
+Claude or Codex. After 60 seconds (`WATCHDOG_NOTICE_AFTER`), each affected
+terminal shows one warning. It shows one recovery message when connectivity
+returns, and no periodic progress messages. The owner keeps retrying and logs
+every event throughout. Desktop alerts are configured separately.
+
+Use `proxy-config set TERMINAL_NOTIFICATIONS off` to suppress routine terminal
+notices entirely, or `verbose` for immediate lost/restored and periodic progress
+messages. `quiet` restores the default. Authentication, host-key and port-takeover
+warnings remain visible in every mode. Reload the profile and relaunch the CLI
+to use the new subscriber policy; no proxy restart is needed. Applications that
+are already running retain their existing notifier until they exit normally.
+
+The owner does not close the application, send input to it, or change its proxy
+settings. You can stop the application in the usual way and continue later. The
+recovery does not make sure that the application sends a failed request again.
+If necessary, send the request again. If you start an application by hand after
+`proxy-up`, recovery works, but that session does not get terminal warnings.
 
 To see the two possible results without a real outage:
 
@@ -66,8 +83,9 @@ PowerShell also accepts `-Fast`. Each line shows `[SIMULATION]`. 60 simulated se
 | `WATCHDOG_IDLE_INTERVAL` | `CLAUDE_WATCHDOG_IDLE_INTERVAL` | `60` seconds while no `cc` or `cx` session is open |
 | `WATCHDOG_FAILS` | `CLAUDE_WATCHDOG_FAILS` | `2` checks |
 | `WATCHDOG_NOTICE_AFTER` | `CLAUDE_WATCHDOG_NOTICE_AFTER` | `60` seconds |
+| `TERMINAL_NOTIFICATIONS` | `CLAUDE_TERMINAL_NOTIFICATIONS` | `quiet`: prolonged warning once, then recovery once; `verbose` or `off` are also available |
 | `WATCHDOG_PROBE_TIMEOUT` | `CLAUDE_WATCHDOG_PROBE_TIMEOUT` | `3` seconds for each check |
-| `WATCHDOG_PROGRESS_INTERVAL` | `CLAUDE_WATCHDOG_PROGRESS_INTERVAL` | `30` seconds |
+| `WATCHDOG_PROGRESS_INTERVAL` | `CLAUDE_WATCHDOG_PROGRESS_INTERVAL` | `30` seconds in logs and verbose terminal mode |
 | `WATCHDOG_MAX_BACKOFF` | `CLAUDE_WATCHDOG_MAX_BACKOFF` | `30` seconds |
 | `WATCHDOG_STARTUP_GRACE` | `CLAUDE_WATCHDOG_STARTUP_GRACE` | `20` seconds. A new SSH connection gets this time before failed checks count. |
 

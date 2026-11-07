@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=linux
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.12.2"
+CLAUDE_PROXY_VERSION="2.12.3"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -147,6 +147,7 @@ CLAUDE_WATCHDOG_MAX_BACKOFF=30
 # the forwards up before failed checks count as an outage or get it killed.
 CLAUDE_WATCHDOG_STARTUP_GRACE=20
 CLAUDE_DESKTOP_NOTIFICATIONS=auto  # auto or off; never changes CLI input
+CLAUDE_TERMINAL_NOTIFICATIONS=quiet  # quiet, verbose or off; actionable warnings always show
 
 # --- personal overrides ------------------------------------------------------
 if [ -f "$CLAUDE_PROXY_CONF" ]; then
@@ -167,7 +168,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS CLAUDE_TERMINAL_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -889,6 +890,20 @@ _recovery_idle_sleep() {  # <seconds> <dir> [ssh pid]
         _wd_sleep 1; i=$((i+1))
     done
 }
+_recovery_terminal_step() {  # <mode> <phase> <event> <warned: 0|1> -> warned|notice
+    local warned="$4" notice=none
+    if [ "$3" = takeover ]; then
+        notice=takeover
+    elif [ "$1" = verbose ]; then
+        case "$3" in lost|prolonged|restored|progress) notice=$3;; esac
+    elif [ "$1" != off ]; then
+        case "$2:$warned" in
+            prolonged:0) warned=1; notice=prolonged;;
+            healthy:1) warned=0; notice=restored;;
+        esac
+    fi
+    printf '%s|%s\n' "$warned" "$notice"
+}
 _recovery_subscribe() {
     local dir="$1" provider="$2" parent stamp sub
     parent=$$; stamp=$(_recovery_process_identity "$parent")
@@ -897,7 +912,8 @@ _recovery_subscribe() {
         me=$(exec sh -c 'echo $PPID')
         trap 'rm -f "$dir/sessions/$me"; exit 0' TERM
         trap '' HUP
-        local state gen event phase seen=-1 sshwhy seenssh=''
+        local state gen event phase seen=-1 sshwhy seenssh='' warned=0 notice
+        local mode="${CLAUDE_TERMINAL_NOTIFICATIONS:-quiet}"
         while [ "$(_recovery_process_identity "$parent")" = "$stamp" ]; do
             sshwhy=$(cut -d'|' -f1 "$dir/ssh.status" 2>/dev/null) || sshwhy=''
             if [ "$sshwhy" != "$seenssh" ]; then
@@ -909,7 +925,10 @@ _recovery_subscribe() {
                 IFS='|' read -r phase _ _ _ _ _ gen _ event <<< "$state"
                 if [ "$gen" != "$seen" ]; then
                     if [ "$seen" != -1 ] || [ "$phase" != healthy ]; then
-                        printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$event" "$(cat "$dir/takeover" 2>/dev/null)")" >&2
+                        IFS='|' read -r warned notice <<< "$(_recovery_terminal_step "$mode" "$phase" "$event" "$warned")"
+                        if [ "$notice" != none ]; then
+                            printf '\n[%s proxy] %s\n' "$provider" "$(_recovery_message "$notice" "$(cat "$dir/takeover" 2>/dev/null)")" >&2
+                        fi
                     fi
                     seen=$gen
                 fi

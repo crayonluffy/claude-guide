@@ -37,6 +37,19 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.12.3: quieter notices inside Claude and Codex
+
+Brief connection drops no longer print lost/restored messages inside each CLI.
+By default, an outage lasting 60 seconds gets one warning, followed by one
+recovery message when it ends. Progress stays in the logs. Use
+`proxy-config set TERMINAL_NOTIFICATIONS verbose` for the previous output, or
+`off` for no routine terminal messages. Actionable SSH and port-takeover warnings
+remain visible. Desktop notifications and automatic recovery keep working.
+
+Update, reload the profile and relaunch the CLI to use the new policy. Existing
+running notifiers retain their behavior until those CLI sessions exit normally;
+the shared tunnel does not need to restart.
+
 ### 2.12.2: targeted restart keeps the selected node
 
 If saved settings make the selected node the default server and no main owner

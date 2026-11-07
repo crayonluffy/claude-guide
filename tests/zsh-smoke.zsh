@@ -21,6 +21,11 @@ s=$(_recovery_step "$s" 'tunnel|7|000|000|tunnel' 70 60)
 s=$(_recovery_step "$s" 'healthy|0|200|404|healthy' 75 60)
 [[ ${s%%|*} == healthy && ${s##*|} == restored ]] || fail "step restored: $s"
 print 'PASS: zsh - recovery state reducer'
+[[ $(_recovery_terminal_step quiet recovering lost 0) == '0|none' ]] || fail 'quiet lost'
+[[ $(_recovery_terminal_step quiet prolonged progress 0) == '1|prolonged' ]] || fail 'quiet prolonged'
+[[ $(_recovery_terminal_step quiet healthy restored 1) == '0|restored' ]] || fail 'quiet restored'
+[[ $(_recovery_terminal_step off recovering takeover 0) == '0|takeover' ]] || fail 'critical alert'
+print 'PASS: zsh - quiet terminal notices'
 
 # Slot identity, record and adoption.
 CLAUDE_SSH_HOST=jpvpn CLAUDE_HTTP_PORT=8080 CLAUDE_SOCKS_PORT=1080
