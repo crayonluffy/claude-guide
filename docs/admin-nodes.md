@@ -81,7 +81,7 @@ proxy-update && proxy-nodes --domain example.com
 # Windows, new users
 $env:CLAUDE_PROXY_DOMAIN = 'example.com'; irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setup.ps1 | iex
 # Windows, current users
-proxy-update; . "$HOME\.claude-proxy.ps1"; proxy-nodes -Domain example.com
+proxy-update; . "$HOME\.claude-proxy.ps1"; proxy-nodes -domain example.com
 ```
 
 - **To add a VM:** add one `A` record and one `TXT` record with the next free slot. Users get it with their next `proxy-nodes --refresh`.

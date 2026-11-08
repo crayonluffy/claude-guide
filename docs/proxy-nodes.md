@@ -51,10 +51,10 @@ If you use only one node, nothing changes: `cc`, `cx` and `chrome-proxy` work as
 
 ```bash
 proxy-nodes                        # the list: * shows the active node, and which tunnels are up
-proxy-nodes --refresh              # get the list again + make the missing ssh aliases              (Windows: -Refresh)
-proxy-nodes --from jpvpn           # from now on, get the list privately from VM jpvpn over SSH      (Windows: -From jpvpn)
+proxy-nodes --refresh              # get the list again + make the missing ssh aliases              (Windows: -refresh)
+proxy-nodes --from jpvpn           # from now on, get the list privately from VM jpvpn over SSH      (Windows: -from jpvpn)
 proxy-nodes --from sgvpn           # ...or from a different VM that gives the list (for example, the old VM is removed)
-proxy-nodes --domain example.com   # ...or from the PUBLIC DNS of example.com                       (Windows: -Domain)
+proxy-nodes --domain example.com   # ...or from the PUBLIC DNS of example.com                       (Windows: -domain)
 proxy-nodes --from ''              # use the (empty) list of this guide again
 # The profile saves a new source only when it answers; --force (-Force) saves it anyway. Only one source at a time:
 # --from removes --domain, and --domain removes --from. The two spellings work on all systems (--from / -From, ...).
@@ -126,15 +126,15 @@ Chrome data folders: `~/.chrome-proxy-profile-<node>` (macOS), `~/.config/google
 
 ### Chrome opens `http://sg/` or reports `ERR_SOCKS_CONNECTION_FAILED`
 
-`sg` is a node name, not a website. If Chrome opens `http://sg/`, the `chrome-proxy` command gave the name to Chrome as a URL. It did not select the SG node. Two causes are possible: an old version of the command is still loaded in that PowerShell window, or the catalogue in that window does not contain the node. `proxy-nodes -Refresh` updates the catalogue. It does not update the command.
+`sg` is a node name, not a website. If Chrome opens `http://sg/`, the `chrome-proxy` command gave the name to Chrome as a URL. It did not select the SG node. Two causes are possible: an old version of the command is still loaded in that PowerShell window, or the catalogue in that window does not contain the node. `proxy-nodes -refresh` updates the catalogue. It does not update the command.
 
 On Windows, update and load the profile again in the window that has the problem:
 
 ```powershell
 proxy-update
 . "$HOME\.claude-proxy.ps1"
-proxy-nodes -From jpvpn    # use your JP SSH alias
-chrome-proxy sg -Profile sg https://www.google.com/
+proxy-nodes -from jpvpn    # use your JP SSH alias
+chrome-proxy sg -profile sg https://www.google.com/
 ```
 
 Make sure that the `[Launch]` line shows `sg`, uses `C:\ChromeVPNProfile-sg`, and usually shows the SOCKS port `1181` (base `1180` + SG slot `1`). If SG is the active node, it can use the main tunnel on port `1080`. Before you try again, close the Chrome windows of that node. A Chrome data folder that is already open keeps its old proxy settings.

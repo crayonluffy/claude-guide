@@ -270,7 +270,7 @@ Invoke-Case 'status separates normal overview from debug recovery fields' {
     function Write-NodeStatusLines { }
     function proxy-notify { }
     $normal = (proxy-status 6>&1 | Out-String)
-    $detail = (proxy-status -Debug 6>&1 | Out-String)
+    $detail = (proxy-status -debug 6>&1 | Out-String)
     Assert ($normal -match 'Active node ports') 'Normal status lacks port overview'
     Assert ($normal -notmatch '\[Recovery\] Logs') 'Normal status exposes raw recovery detail'
     Assert ($detail -match '\[Recovery\] Logs') 'Debug status lacks recovery detail'
@@ -324,7 +324,7 @@ foreach ($node in @('main','sg')) {
             $script:RestartTrace+="probe:$HttpPort"; return $true
         }
         function proxy-on { }
-        $out=if ($node -eq 'main') { proxy-restart 6>&1 | Out-String } else { proxy-restart -Node sg 6>&1 | Out-String }
+        $out=if ($node -eq 'main') { proxy-restart 6>&1 | Out-String } else { proxy-restart -node sg 6>&1 | Out-String }
         $expected=if ($node -eq 'main') { 'stop:main,start:8090,probe:8090' } else { 'stop:node-sg,start:9001,probe:9001' }
         Assert (($script:RestartTrace -join ',') -eq $expected) ($script:RestartTrace -join ',')
         Assert ($out -match 'Relaunch' -and $out -notmatch 'same ports') $out
@@ -350,7 +350,7 @@ Invoke-Case 'node restart keeps the named slot when saved settings make it the d
     }
     function Wait-ProxyTransport { param($Provider,$HttpPort,$SocksPort,$Identity) return $true }
     function proxy-on { $script:RestartTrace+='proxy-on' }
-    proxy-restart -Node sg 6>$null | Out-Null
+    proxy-restart -node sg 6>$null | Out-Null
     Assert (($script:RestartTrace -join ',') -eq 'stop:node-sg,start:node-sg:9001') ($script:RestartTrace -join ',')
     $main=Get-RecoveryStatus (Get-RecoveryIdentity) descriptor
     Assert ($main.HTTP_PORT -eq 8081) 'Named restart changed the main tunnel'

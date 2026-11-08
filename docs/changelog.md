@@ -2,6 +2,13 @@
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.8: Windows flags in lowercase
+
+- Every Windows command flag is now shown in lowercase, in the help, the
+  hints, the messages and the guide: `proxy-status -fix`, `proxy-restart -node sg`,
+  `cc-manual -copy tunnel`, `proxy-update -version 2.13.3`. Tab completion
+  also offers them in lowercase. PowerShell ignores case, so `-Fix` still works.
+
 ### 2.13.7: `cc-manual` is easy to copy
 
 - Each command is printed as **one complete line**, with no `#` and no indent,
@@ -203,11 +210,11 @@ Type `proxy-update`, then open a new terminal window. Release tag: `v2.12.2`.
   overwriting those changes.
 - **Consistent restart behavior.** A new window adopts the running main port
   before pinning Claude. Running nodes retain their ports after saved base
-  changes. `proxy-restart` applies saved settings; `proxy-restart -Node sg`
+  changes. `proxy-restart` applies saved settings; `proxy-restart -node sg`
   affects sg only. Conflicting ports are rejected before stopping a tunnel.
   Changed local ports require affected applications to be relaunched.
 - **Readable Windows status.** `proxy-status` leads with saved and active ports;
-  `proxy-status -Debug` adds recovery details.
+  `proxy-status -debug` adds recovery details.
 
 Type `proxy-update`, then open a new PowerShell window. Release tag: `v2.12.1`.
 Shell profiles keep their 2.12.0 behavior, with the version marker aligned.
@@ -387,8 +394,8 @@ Update and load the profile again in the terminal that has the problem:
 ```powershell
 proxy-update
 . "$HOME\.claude-proxy.ps1"
-proxy-nodes -Refresh
-chrome-proxy sg -Profile sg https://www.google.com/
+proxy-nodes -refresh
+chrome-proxy sg -profile sg https://www.google.com/
 ```
 
 ```bash

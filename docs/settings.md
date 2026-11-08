@@ -49,8 +49,8 @@ The same keys without the `CLAUDE_` prefix, in `~\.claude-proxy.conf.psd1`.
 | `SOCKS_PORT` | `1080` | The local SOCKS5 port (Chrome and other applications). |
 | `NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (`cc --node <node>`). Refer to [Nodes](proxy-nodes.md). |
 | `NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
-| `NODES_FROM` | `''` | The VM that gives the node list over SSH (`proxy-nodes -From` sets it). Refer to [Nodes](proxy-nodes.md). |
-| `PROXY_DOMAIN` | `''` | Get the node list from the public DNS of this domain (`proxy-nodes -Domain` sets it). |
+| `NODES_FROM` | `''` | The VM that gives the node list over SSH (`proxy-nodes -from` sets it). Refer to [Nodes](proxy-nodes.md). |
+| `PROXY_DOMAIN` | `''` | Get the node list from the public DNS of this domain (`proxy-nodes -domain` sets it). |
 | `CHROME_EXE` | `''` | Set it only if `chrome.exe` is not in Program Files or `%LOCALAPPDATA%`. |
 | `CHROME_BYPASS` | `'on'` | `on`: `chrome-proxy` reaches the `NO_PROXY` hosts (your local network) directly. `off`: everything goes through the proxy. |
 | `TELEMETRY` | `'on'` | `off`: `cc` runs Claude with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no telemetry, error reports or auto-update). |
@@ -107,7 +107,7 @@ On Windows, the equivalent keys are `HTTP_PORT`, `SOCKS_PORT`,
 `~\.claude-proxy.conf.psd1`, without the `CLAUDE_` prefix. The same commands
 `proxy-config edit`, `proxy-config set HTTP_PORT 8090` and
 `proxy-config use-active` work in PowerShell. Restart a specific node with
-`proxy-restart -Node sg`; use `proxy-status -Debug` for recovery details.
+`proxy-restart -node sg`; use `proxy-status -debug` for recovery details.
 Notepad edits a temporary copy and the profile validates it before replacing
 the saved file. If another window saves first, reopen the editor to include
 that change. Configuration files and their comments remain in the native

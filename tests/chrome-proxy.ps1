@@ -37,24 +37,24 @@ $catalogue = '{"nodes":[{"name":"jp","alias":"jpvpn","host":"jp.example.com","sl
 try {
     [System.IO.File]::WriteAllText($script:NODES_CACHE, $catalogue)
     Reset-Launch
-    chrome-proxy sg -Profile sg
+    chrome-proxy sg -profile sg
     Assert ($script:ChromeArgs -contains '--proxy-server=socks5://127.0.0.1:1181') 'SG must use its own SOCKS port'
     Assert ($script:ChromeArgs -contains '--profile-directory=sg') 'SG profile must be preserved'
     Assert ($script:ChromeArgs -contains '--user-data-dir=C:\ChromeVPNProfile-sg') 'SG needs a separate data folder'
     Assert ($script:ChromeArgs -notcontains 'sg') 'Node/profile names must never be passed as URLs'
 
     Reset-Launch
-    chrome-proxy -Profile work sg https://example.com/
+    chrome-proxy -profile work sg https://example.com/
     Assert ($script:ChromeArgs -contains '--profile-directory=work') 'Profile before node must work'
     Assert ($script:ChromeArgs -contains 'https://example.com/') 'Explicit URLs must be passed to Chrome'
 
     Reset-Launch
-    chrome-proxy sgg -Profile sg
+    chrome-proxy sgg -profile sg
     Assert ($script:ChromeArgs.Count -eq 0 -and $script:TunnelPorts.Count -eq 0) 'Unknown nodes must not open Chrome or a tunnel'
 
     [System.IO.File]::WriteAllText($script:NODES_CACHE, '{"nodes":[]}')
     Reset-Launch
-    chrome-proxy sg -Profile sg
+    chrome-proxy sg -profile sg
     Assert ($script:ChromeArgs.Count -eq 0) 'Missing catalogue entry must not become http://sg/'
 
     [System.IO.File]::WriteAllText($script:NODES_CACHE, $catalogue)
@@ -84,7 +84,7 @@ try {
     # -Check opens the leak tests.
     function Get-ProxyExitInfo { param($Port, $Field) if ($Field -eq 'ip') { '203.0.113.9' } else { 'Asia/Tokyo' } }
     Reset-Launch
-    chrome-proxy jp -Check 6>$null
+    chrome-proxy jp -check 6>$null
     Assert ($script:ChromeArgs -contains 'https://browserleaks.com/webrtc') '-Check opens the WebRTC test'
     Assert ($script:ChromeArgs -notcontains '-Check') '-Check is not a URL'
     Write-Host 'PASS: Chrome WebRTC/QUIC guards, LAN bypass, -Check'

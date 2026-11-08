@@ -1,4 +1,4 @@
-# proxy-update (2.13.4): latest release by TAG, -Version, no accidental downgrade,
+# proxy-update (2.13.4): latest release by TAG, -version, no accidental downgrade,
 # main-branch fallback when the API fails. Fake GitHub; no network.
 $ErrorActionPreference = 'Stop'
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../scripts/claude-proxy.ps1'), [ref]$null, [ref]$null)
@@ -50,11 +50,11 @@ try {
     Assert ((Installed) -eq '2.13.4') 'stale main downgraded the profile'
     'PASS: a stale older copy never downgrades; the API failure falls back to main'
 
-    proxy-update -Version 2.13.2 6>$null
+    proxy-update -version 2.13.2 6>$null
     Assert ((Installed) -eq '2.13.2') '-Version not installed'
     proxy-update --version v9.9.9 6>$null
     Assert ((Installed) -eq '2.13.2') 'unknown version changed the profile'
-    proxy-update -Version 2.x 6>$null
+    proxy-update -version 2.x 6>$null
     Assert ((Installed) -eq '2.13.2') 'bad version changed the profile'
     'PASS: -Version / --version picks a release (older on purpose too); bad or unknown versions are refused'
 

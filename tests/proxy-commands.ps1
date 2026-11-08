@@ -32,8 +32,8 @@ try {
     function Set-ProxyDefaultNode { param([string]$Name,[switch]$Force) $script:Trace+="use:${Name}:$([bool]$Force)" }
     function Show-ChromeProfiles { param([string]$Node) $script:Trace+="list:$Node" }
     function Set-ProxyKillswitch { param([string]$Action='status') $script:Trace+="ks:$Action" }
-    proxy-status -Fix; proxy-status --fix; proxy-nodes use sg --force; proxy-nodes use sg
-    chrome-proxy --list jp; chrome-proxy -List; proxy-config killswitch on; proxy-config killswitch
+    proxy-status -fix; proxy-status --fix; proxy-nodes use sg --force; proxy-nodes use sg
+    chrome-proxy --list jp; chrome-proxy -list; proxy-config killswitch on; proxy-config killswitch
     $expected='doctor,doctor,use:sg:True,use:sg:False,list:jp,list:,ks:on,ks:status'
     Assert (($script:Trace -join ',') -eq $expected) "new spellings: $($script:Trace -join ',')"
     $script:Trace=@()
@@ -42,12 +42,12 @@ try {
     function cc-stop { $script:Trace+="stop:$($args -join ' ')" }
     $hints=(& { proxy-doctor; proxy-node sg; chrome-profiles; proxy-killswitch off; cc-safe -c; cx-safe; cx-stop sg } 6>&1 | Out-String)
     Assert (($script:Trace -join ',') -eq 'doctor,use:sg:False,list:,ks:off,cc:-Safe -c,cx:-Safe,stop:sg') "old names: $($script:Trace -join ',')"
-    Assert ($hints -match "\[Renamed\] 'proxy-doctor' is now 'proxy-status -Fix'") "rename hint: $hints"
+    Assert ($hints -match "\[Renamed\] 'proxy-doctor' is now 'proxy-status -fix'") "rename hint: $hints"
     Assert (-not (Get-Command bridge-start -ErrorAction SilentlyContinue)) 'bridge-start should be removed'
     'PASS: merged commands and renamed names'
 
     $help=(cc-help 6>&1 | Out-String)
-    foreach ($word in @('Mode: managed','tunnel: not running','cc-stop','proxy-status -Fix','proxy-restart','cc-manual','proxy-nodes ','chrome-proxy','proxy-config','cc-help all')) {
+    foreach ($word in @('Mode: managed','tunnel: not running','cc-stop','proxy-status -fix','proxy-restart','cc-manual','proxy-nodes ','chrome-proxy','proxy-config','cc-help all')) {
         Assert ($help.Contains($word)) "cc-help lacks '$word'"
     }
     Assert (-not ($help -match 'tunnel-start|proxy-doctor|cc-safe')) 'cc-help shows non-core commands'
@@ -80,13 +80,13 @@ try {
     Assert ($chromeLine -match 'socks5://127\.0\.0\.1:1181' -and $chromeLine -match 'user-data-dir="[^"]*-sg"' -and $chromeLine -match 'disable_non_proxied_udp' -and $chromeLine -match 'proxy-bypass-list=') "chrome: $chromeLine"
     $script:Clip = $null
     function Set-Clipboard { param($Value, $ErrorAction) $script:Clip = $Value }
-    $null = cc-manual sg -Copy check 6>&1
+    $null = cc-manual sg -copy check 6>&1
     Assert ($script:Clip -eq ($cmds | Where-Object { $_ -like 'curl.exe *' })) "-Copy check: $script:Clip"
     $null = cc-manual --copy tunnel sg 6>&1
     Assert ($script:Clip -like 'ssh -N -C -L 8181:*sgvpn') "--copy tunnel (node after): $script:Clip"
-    $bad = (cc-manual -Copy bogus 6>&1 | Out-String)
+    $bad = (cc-manual -copy bogus 6>&1 | Out-String)
     Assert ($bad -match 'usage: cc-manual') "bad block: $bad"
-    'PASS: cc-manual: one-line valid commands, no # lines, -Copy / --copy'
+    'PASS: cc-manual: one-line valid commands, no # lines, -copy / --copy'
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
