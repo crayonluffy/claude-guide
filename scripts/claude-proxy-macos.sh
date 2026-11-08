@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=macos
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.5"
+CLAUDE_PROXY_VERSION="2.13.6"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -229,6 +229,49 @@ _port_in_use() {
 # Short command name of a PID ("" if gone).
 _proc_name() {
     ps -p "$1" -o comm= 2>/dev/null | tr -d ' '
+}
+
+# A tunnel ssh whose parent is a leftover loop of an older profile: a shell with
+# no terminal that launchd/init adopted after its window closed. Such a loop
+# restarts ssh as soon as it dies (it can run for weeks), so it is stopped first.
+# A shell with a terminal, or one whose parent is still alive, is never touched.
+_orphan_loop_parent() {  # <ssh pid> -> the loop's PID
+    local ppid pp tty uid comm gp
+    ppid=$(ps -o ppid= -p "$1" 2>/dev/null | tr -d ' ')
+    case "$ppid" in ''|0|1|*[!0-9]*) return 1;; esac
+    read -r pp tty uid comm <<< "$(ps -o ppid=,tty=,uid=,comm= -p "$ppid" 2>/dev/null)"
+    case "$tty" in '??'|'?'|'-'|'') ;; *) return 1;; esac
+    [ "$uid" = "$(id -u)" ] || return 1
+    case "${comm##*/}" in -zsh|zsh|-bash|bash|-sh|sh|-dash|dash) ;; *) return 1;; esac
+    # Adopted by PID 1, or by a per-user subreaper (systemd --user, launchd).
+    if [ "$pp" != 1 ]; then
+        gp=$(ps -o comm= -p "$pp" 2>/dev/null); gp=${gp##*/}
+        case "$gp" in systemd|launchd|init) ;; *) return 1;; esac
+    fi
+    echo "$ppid"
+}
+_stop_orphan_loop() {  # <pid>: TERM, then KILL (old loops trapped TERM)
+    local i=0
+    kill "$1" 2>/dev/null || :
+    while kill -0 "$1" 2>/dev/null && [ "$i" -lt 10 ]; do sleep .2; i=$((i+1)); done
+    kill -0 "$1" 2>/dev/null && kill -9 "$1" 2>/dev/null
+    i=0; while kill -0 "$1" 2>/dev/null && [ "$i" -lt 10 ]; do sleep .1; i=$((i+1)); done
+    ! kill -0 "$1" 2>/dev/null
+}
+# Accounts (other than this one) whose ssh forwards <port>: on a shared Mac the
+# second account must use PROXY_MODE shared instead of running its own tunnel.
+_port_other_account() {  # <port> -> user name(s)
+    ps -axo uid=,user=,command= 2>/dev/null | awk -v me="$(id -u)" -v p="$1" '
+        $1 != me && $3 ~ /(^|\/)ssh$/ {
+            line = " " $0 " "
+            if (line ~ (" -[LD] ?([^ ]*:)?" p "[: ]") || line ~ (" -[LD]" p "[: ]")) print $2
+        }' | sort -u | tr '\n' ' ' | sed 's/ $//'
+}
+_other_account_hint() {  # <port> -> one line, or nothing
+    local who
+    who=$(_port_other_account "$1")
+    [ -n "$who" ] || return 1
+    echo "Account '$who' runs its own proxy tunnel on port $1. On a shared computer only one account owns the tunnel: in '$who', run 'cc-stop --force', then 'proxy-config set PROXY_MODE shared'."
 }
 
 _is_ssh_name() {
@@ -666,7 +709,7 @@ _recovery_owner_stop() {
 # is replaced by one with an owner, on the same ports. Only that ssh and the old
 # watchdog are stopped; a foreign program on the ports is never touched.
 _recovery_migrate() {
-    local i=0 state port pid name key
+    local i=0 state port pid name key hint
     # As for nodes: a non-ssh program, or one this account can't see (another
     # user's), is never mistaken for an old tunnel.
     for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
@@ -678,7 +721,8 @@ _recovery_migrate() {
             return 1
         done
         if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
-            echo "[Err] Another user's program is on port $port, which the tunnel uses. Move the tunnel: proxy-config set $key <free port>" >&2
+            if hint=$(_other_account_hint "$port"); then echo "[Err] $hint" >&2
+            else echo "[Err] Another user's program is on port $port, which the tunnel uses. Move the tunnel: proxy-config set $key <free port>" >&2; fi
             return 1
         fi
     done
@@ -784,7 +828,7 @@ _recovery_port_conflict() {  # <owned ssh pid>
 }
 _recovery_worker() {
     local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel all_healthy conflict
-    local takeover cinfo conflict_seen=''
+    local takeover cinfo conflict_seen='' port hint
     local classified=1 sshclass='' lastclass=''
     local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope desktop_warned=0 desktop_notice
     # 'exec' is required: with any trap set (TRAPWINCH / trap WINCH from oh-my-zsh,
@@ -855,7 +899,12 @@ _recovery_worker() {
                 prior=$(printf '%s' "$old" | cut -d'|' -f9)
                 state="${state%|*}|$prior"
             elif [ "$event" != none ]; then
-                [ "$conflict" -eq 0 ] || echo '[Recovery] Local port conflict: keeping the fixed ports and leaving the other process untouched.'
+                if [ "$conflict" -eq 1 ]; then
+                    echo '[Recovery] Local port conflict: keeping the fixed ports and leaving the other process untouched.'
+                    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+                        if hint=$(_other_account_hint "$port"); then echo "[Recovery] $hint"; break; fi
+                    done
+                fi
                 printf '[%s] %s\n' "$provider" "$(_recovery_message "$event")"
             fi
             state=$(_recovery_retry_record "$state" "$retries" "$next")
@@ -2349,7 +2398,7 @@ tunnel-stop() {  # [node]
     # Kill every SSH process listening on either forwarded port (ours, including
     # stale leftovers), then verify. Non-ssh apps that happen to sit on a tunnel
     # port are NOT ours - they are reported and left alone.
-    local pid name port still p wd_msg
+    local pid name port still p wd_msg loop
     local ssh_pids=() survivors=()
 
     # The owner goes first, or it would just start ssh again (it takes its ssh with it).
@@ -2382,6 +2431,13 @@ tunnel-stop() {  # [node]
         return 0
     fi
 
+    # A leftover loop from an older profile would start ssh again at once.
+    for pid in ${ssh_pids[@]+"${ssh_pids[@]}"}; do
+        if loop=$(_orphan_loop_parent "$pid"); then
+            if _stop_orphan_loop "$loop"; then echo "[Kill] PID $loop (leftover tunnel loop from an older profile, no terminal)"
+            else echo "[Warn] Could not stop the leftover tunnel loop PID $loop - it will restart ssh. Try: kill -9 $loop"; fi
+        fi
+    done
     for pid in ${ssh_pids[@]+"${ssh_pids[@]}"}; do
         kill "$pid" 2>/dev/null
         echo "[Kill] PID $pid (ssh)"
@@ -3164,7 +3220,7 @@ _proxy_doctor() {
         echo "$ok  Tunnel runs on fallback port $dport (configured port was busy) - checks use it"
     fi
 
-    local http_pids socks_pids http_pid socks_pid
+    local http_pids socks_pids http_pid socks_pid dloop dhint
     http_pids=$(_listeners "$CLAUDE_HTTP_PORT")
     socks_pids=$(_listeners "$CLAUDE_SOCKS_PORT")
     http_pid=$(printf '%s\n' "$http_pids" | head -1)
@@ -3172,8 +3228,14 @@ _proxy_doctor() {
 
     if [ -n "$http_pid" ]; then
         echo "$ok  HTTP forward  :$CLAUDE_HTTP_PORT listening (PID $http_pid $(_proc_name "$http_pid"))"
+        if dloop=$(_orphan_loop_parent "$http_pid"); then
+            echo "$warn ssh PID $http_pid is kept alive by a leftover loop from an older profile (PID $dloop, no terminal). Fix: tunnel-stop (stops both), then cc"
+        fi
     else
         echo "$bad HTTP forward  :$CLAUDE_HTTP_PORT NOT listening - Claude has no proxy. Fix: tunnel-start (or cc)"
+        for dport in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+            if dhint=$(_other_account_hint "$dport"); then echo "       $dhint"; break; fi
+        done
         if [ -s "$CLAUDE_TUNNEL_LOG" ]; then
             echo "       Last ssh error ($CLAUDE_TUNNEL_LOG): $(tail -1 "$CLAUDE_TUNNEL_LOG")"
         fi

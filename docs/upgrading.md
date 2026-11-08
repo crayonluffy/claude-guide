@@ -38,6 +38,21 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.6 (macOS, Linux, WSL): leftover tunnel loops and a second account
+
+- **`cc-stop` / `tunnel-stop` stop a leftover tunnel loop from an older
+  profile.** When its terminal window closed, the background loop of a very old
+  profile could keep running for weeks (adopted by `launchd`), restarting ssh
+  the moment it was stopped, often on a fallback port such as 8081. The loop is
+  now stopped first (also when it ignores the normal stop signal), then its
+  ssh. Shells that still have a terminal are never touched.
+  `proxy-status --fix` points such a loop out.
+- **A second account's own tunnel is named.** When another account on the same
+  computer runs its own tunnel on your ports, `cc`, the tunnel log and
+  `proxy-status --fix` say which account it is and what to run there
+  (`cc-stop --force`, then `proxy-config set PROXY_MODE shared`), instead of
+  repeating "Local port conflict".
+
 ### 2.13.5: release lookup survives a GitHub API outage
 
 - When GitHub's release API fails (it returned 504 errors right after the
