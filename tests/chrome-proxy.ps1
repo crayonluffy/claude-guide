@@ -6,7 +6,7 @@ $source = $ProfilePath
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-ProxyNodePorts', 'Test-ProxyNodePortValue', 'Test-RecoverySharedProxy', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy', 'Get-ChromeLeakFlags', 'Get-ChromeDirectRules', 'Get-ProxyExitInfo', 'Invoke-WithAppEnv')
+$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-ProxyNodePorts', 'Test-ProxyNodePortValue', 'Test-RecoverySharedProxy', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy', 'Get-ChromeLeakFlags', 'Get-ChromeDirectRules', 'Get-ProxyExitInfo', 'Invoke-WithAppEnv', 'Find-ChromeExe')
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($f.Name -in $wanted) { Invoke-Expression $f.Extent.Text }
 }

@@ -66,6 +66,27 @@ try {
     Assert ($main.Contains('-L 8080:127.0.0.1:8888 -D 1080') -and -not $main.Contains('--settings')) "manual main: $main"
     Assert ([IO.File]::ReadAllText($script:CLAUDE_SETTINGS) -eq $before) 'cc-manual changed Claude settings'
     'PASS: cc-manual prints node and main fallbacks without changing anything'
+
+    # 2.13.7: one-line commands with no '#', each valid PowerShell; -Copy / --copy copy one.
+    $lines = @($manual -split "`r?`n")
+    Assert (-not ($lines | Where-Object { $_ -match '^\s*#' })) "cc-manual prints '#' lines: $manual"
+    $cmds = @($lines | Where-Object { $_ -match '^(ssh |curl\.exe |\$env:HTTPS_PROXY|& )' })
+    Assert ($cmds.Count -eq 5) "expected 5 commands, got $($cmds.Count): $manual"
+    foreach ($c in $cmds) {
+        $errs = $null; [void][System.Management.Automation.Language.Parser]::ParseInput($c, [ref]$null, [ref]$errs)
+        Assert ($errs.Count -eq 0) "not valid PowerShell: $c"
+    }
+    $chromeLine = $cmds | Where-Object { $_ -match 'proxy-server' }
+    Assert ($chromeLine -match 'socks5://127\.0\.0\.1:1181' -and $chromeLine -match 'user-data-dir="[^"]*-sg"' -and $chromeLine -match 'disable_non_proxied_udp' -and $chromeLine -match 'proxy-bypass-list=') "chrome: $chromeLine"
+    $script:Clip = $null
+    function Set-Clipboard { param($Value, $ErrorAction) $script:Clip = $Value }
+    $null = cc-manual sg -Copy check 6>&1
+    Assert ($script:Clip -eq ($cmds | Where-Object { $_ -like 'curl.exe *' })) "-Copy check: $script:Clip"
+    $null = cc-manual --copy tunnel sg 6>&1
+    Assert ($script:Clip -like 'ssh -N -C -L 8181:*sgvpn') "--copy tunnel (node after): $script:Clip"
+    $bad = (cc-manual -Copy bogus 6>&1 | Out-String)
+    Assert ($bad -match 'usage: cc-manual') "bad block: $bad"
+    'PASS: cc-manual: one-line valid commands, no # lines, -Copy / --copy'
 } finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
