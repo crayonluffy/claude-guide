@@ -38,6 +38,13 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.5: release lookup survives a GitHub API outage
+
+- When GitHub's release API fails (it returned 504 errors right after the
+  2.13.4 release) or is rate-limited, `proxy-update` and the installers read
+  the newest tag from the `github.com/<repo>/releases/latest` redirect, which
+  is not cached. Only when both fail do they fall back to the `main` branch.
+
 ### 2.13.4: updates fetch the exact release
 
 - **`proxy-update` asks GitHub for the latest release and downloads that tag.**

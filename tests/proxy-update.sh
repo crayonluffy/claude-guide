@@ -23,6 +23,7 @@ curl() {  # fake GitHub: raw files by ref, the releases API
     echo "$url" >> "$scratch/urls"
     case "$url" in
         https://api.github.com/repos/o/r/releases/latest) [ -e "$scratch/api-down" ] && return 22; cp "$scratch/latest.json" "$out" ;;
+        https://github.com/o/r/releases/latest) [ -e "$scratch/web-down" ] && return 7; printf 'https://github.com/o/r/releases/tag/v2.13.4' ;;
         https://raw.githubusercontent.com/o/r/*) local p=${url#https://raw.githubusercontent.com/o/r/}; [ -f "$scratch/gh/$p" ] || return 22; cp "$scratch/gh/$p" "$out" ;;
         *) return 6 ;;
     esac
@@ -44,8 +45,15 @@ grep -qx 'https://raw.githubusercontent.com/o/r/v2.13.4/scripts/claude-proxy.sh'
 case "$out" in *'latest release (v2.13.4)'*) ;; *) fail "message: $out";; esac
 echo 'PASS: proxy-update installs the latest release by its tag, not the cached branch'
 
-# API down -> main branch; its stale older copy must not downgrade.
-touch "$scratch/api-down"
+# API down -> the releases/latest redirect still names the tag.
+touch "$scratch/api-down"; : > "$scratch/urls"; profile 2.13.3 > "$CLAUDE_PROXY_SELF"; CLAUDE_PROXY_VERSION=2.13.3
+upd
+grep -q '"2.13.4"' "$CLAUDE_PROXY_SELF" || fail "redirect fallback: $out"
+grep -qx 'https://raw.githubusercontent.com/o/r/v2.13.4/scripts/claude-proxy.sh' "$scratch/urls" || fail 'redirect: not fetched by tag'
+echo 'PASS: with the API down, the releases/latest redirect still gives the tag'
+
+# Both down -> main branch; its stale older copy must not downgrade.
+touch "$scratch/web-down"
 upd
 grep -q '"2.13.4"' "$CLAUDE_PROXY_SELF" || fail 'stale main downgraded the profile'
 case "$out" in *'older than your v2.13.4'*'nothing changed'*) ;; *) fail "downgrade message: $out";; esac
@@ -57,7 +65,7 @@ grep -q '"2.13.2"' "$CLAUDE_PROXY_SELF" || fail "--version not installed: $out"
 upd --version v9.9.9 && fail 'unknown version accepted'
 case "$out" in *'Could not download v9.9.9'*releases*) ;; *) fail "unknown version message: $out";; esac
 upd --version 2.x && fail 'bad version accepted'
-rm -f "$scratch/api-down"; upd --check
+rm -f "$scratch/api-down" "$scratch/web-down"; upd --check
 case "$out" in *'v2.13.2 -> v2.13.4'*) ;; *) fail "check: $out";; esac
 grep -q '"2.13.2"' "$CLAUDE_PROXY_SELF" || fail '--check changed the profile'
 echo 'PASS: --version picks a release (older on purpose too); bad or unknown versions are refused'
