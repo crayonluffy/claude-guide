@@ -14,7 +14,7 @@ Claude Code is the coding agent of Anthropic. It runs in your terminal. The inst
 
 Node.js includes `npm`. `npm` installs the CLI. Use the section for **your operating system**.
 
-### 🪟 Windows
+### Windows
 
 In a PowerShell window, install Node.js with `winget`:
 
@@ -36,7 +36,7 @@ Or download the installer from [nodejs.org](https://nodejs.org/) and do its step
 
 3. Make sure that you see version numbers, for example `v22.x.x` or newer. Claude Code needs **Node.js 22 or newer**.
 
-### 🍎 macOS
+### macOS
 
 1. If you do not have [Homebrew](https://brew.sh/), install it:
 
@@ -57,7 +57,7 @@ node --version
 npm --version
 ```
 
-### 🐧 Linux
+### Linux
 
 NodeSource publishes current packages. For a specific release, replace `lts` with the release (for example `22.x`). Refer to [github.com/nodesource/distributions](https://github.com/nodesource/distributions).
 
@@ -112,7 +112,7 @@ cc
 
 At the first start, Claude shows the sign-in steps for your Anthropic account. A browser window opens. After the sign-in, Claude is ready.
 
-> **The browser page does not open?** The sign-in occurs in your browser. The browser does not use the tunnel automatically. Open the sign-in URL in a browser that uses the proxy: type `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there. Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
+> **The browser page does not open?** The sign-in occurs in your browser. The browser does not use the tunnel automatically. Open the sign-in URL in a browser that uses the proxy: type `chrome-proxy` (from the [proxy setup](proxy-profile.md)) and paste the URL there. Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#optional-browse-through-the-proxy-chrome).
 
 > **Note:** With the kill switch on (the default), plain `claude` always uses the tunnel. On a network that does not block Anthropic, you can type `proxy-config killswitch off`. Then plain `claude` connects directly.
 

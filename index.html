@@ -8,24 +8,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, minimum-scale=1.0">
   <meta name="theme-color" content="#f8fafc">
 
-  <!-- Theme: light by default; the toggle (top right) switches to dark and remembers it.
+  <!-- Theme: follows the system until the toggle (top right) picks one, which is remembered.
        Runs before any CSS so a dark-theme visitor never sees a light flash. -->
   <script>
     (function () {
-      var t = 'light';
-      try { if (localStorage.getItem('cg-theme') === 'dark') t = 'dark'; } catch (e) {}
+      // A saved choice wins; otherwise follow the system setting.
+      var t = 'light', saved = null;
+      try { saved = localStorage.getItem('cg-theme'); } catch (e) {}
+      if (saved === 'dark' || saved === 'light') t = saved;
+      else if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) t = 'dark';
       document.documentElement.setAttribute('data-theme', t);
     })();
   </script>
 
-  <link rel="stylesheet" href="//cdn.jsdelivr.net/npm/docsify@4/lib/themes/vue.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/themes/vue.css">
 
   <style>
     /* ============================================================
        Theme: same palette as the diagrams (docs/assets/*.svg) -
        slate greys + green / blue / amber accents, light AND dark.
-       Light is the default; html[data-theme="dark"] is set by the
-       toggle. color-scheme is inherited by the <img> diagrams, whose
+       The system setting picks the default; html[data-theme] is set
+       before first paint and by the toggle. color-scheme is inherited by the <img> diagrams, whose
        own palettes follow it (prefers-color-scheme inside an SVG image
        reflects the embedding element's color-scheme).
        ============================================================ */
@@ -349,12 +352,12 @@
       subMaxLevel: 2,
 
       search: {
-        placeholder: 'Search commands...',
+        placeholder: 'Search the guide...',
         noData: 'No results!',
         paths: 'auto',
         depth: 3,
         // Bump to invalidate visitors' cached (pre-multi-page) search index.
-        namespace: 'claude-codex-guide-v2'
+        namespace: 'claude-codex-guide-v3'
       },
 
       copyCode: {
@@ -389,7 +392,7 @@
     }
   </script>
 
-  <script src="//cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.8/dist/mermaid.min.js"></script>
   <script>
     // Theme toggle: light by default, choice remembered per browser.
     (function () {
@@ -437,12 +440,13 @@
     })();
   </script>
 
-  <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
+  <!-- Exact versions: an unpinned plugin silently loaded docsify 5 next to the docsify 4 core. -->
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/docsify.min.js"></script>
 
-  <script src="//cdn.jsdelivr.net/npm/docsify/lib/plugins/search.min.js"></script>
-  <script src="//cdn.jsdelivr.net/npm/docsify-copy-code/dist/docsify-copy-code.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4.13.1/lib/plugins/search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/docsify-copy-code@3.0.2/dist/docsify-copy-code.min.js"></script>
 
-  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
-  <script src="//cdn.jsdelivr.net/npm/prismjs@1/components/prism-powershell.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1.30.0/components/prism-powershell.min.js"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-# 💡 Claude Code & Codex Tips
+# Claude Code and Codex tips
 
 > This page agrees with Claude Code **v2.1.150** (May 2026). To see your version, type `claude --version`. To update, type `claude update`.
 
@@ -127,7 +127,7 @@ Current model IDs: `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`. O
 - When the context is full, type `/compact` to free space (or let auto-compact do it).
 - To send a file to Claude: `cat logs.txt | claude -p "summarize the errors"`.
 - To send the output of Claude to a different tool: `claude -p "query" | command`.
-- To remove changes and go back to a checkpoint, push `Esc Esc` or type `/rewind`.
+- To remove changes and go back to a checkpoint, press `Esc Esc` or type `/rewind`.
 - Before you commit, type `/diff` to examine all changes.
 - To work in a separate git worktree, type `claude -w`. This is good for parallel work.
 - For faster Opus output, type `/fast`. To set more or less reasoning, type `/effort`.

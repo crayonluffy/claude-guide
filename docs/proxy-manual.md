@@ -31,7 +31,7 @@ flowchart LR
 
 ---
 
-## 🪟 Windows (PowerShell)
+## Windows (PowerShell)
 
 ### Step 1: Open the tunnel (window 1, keep it open)
 
@@ -77,12 +77,12 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 ### Step 5: When you are done
 
-- **Window 1:** push `Ctrl+C` to close the tunnel.
+- **Window 1:** press `Ctrl+C` to close the tunnel.
 - **Window 2:** close the window. The proxy settings stop with the window.
 
 ---
 
-## 🍎 macOS / 🐧 Linux / WSL (bash or zsh)
+## macOS / Linux / WSL (bash or zsh)
 
 ### Step 1: Open the tunnel (terminal 1, keep it open)
 
@@ -135,18 +135,18 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 ### Step 5: When you are done
 
-- **Terminal 1:** push `Ctrl+C` to close the tunnel.
+- **Terminal 1:** press `Ctrl+C` to close the tunnel.
 - **Terminal 2:** close the terminal. Or type `unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY NO_PROXY` to use it without the proxy.
 
 > **Note:** If the profile is also installed and its kill switch is on, Claude's `settings.json` keeps `http://127.0.0.1:8080`. Then plain `claude` also uses this manual tunnel, and it cannot connect when the tunnel is closed.
 
 ---
 
-## 🌐 (Optional) Browse through the proxy (Chrome)
+## (Optional) Browse through the proxy (Chrome)
 
 > To open Chrome windows through **more regions at the same time** (JP + SG + US), refer to [Nodes → manual equivalent](proxy-nodes.md#no-profile-the-manual-equivalent). You need one more `ssh -D` for each region on its own port, and a different `--user-data-dir` for each window.
 
-The tunnel from step 1 already has a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). These commands open a **separate** Chrome through it. It has its own profile, and its DNS goes through the tunnel. WebRTC and QUIC cannot leak your real IP, and your local network (private ranges, `*.local`) still opens directly. Your normal browser does not change. [Profile guide: what each flag does](proxy-profile.md#-optional-browse-through-the-proxy). Use it when a sign-in page (Anthropic or OpenAI) does not open in your normal browser.
+The tunnel from step 1 already has a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). These commands open a **separate** Chrome through it. It has its own profile, and its DNS goes through the tunnel. WebRTC and QUIC cannot leak your real IP, and your local network (private ranges, `*.local`) still opens directly. Your normal browser does not change. [Profile guide: what each flag does](chrome.md). Use it when a sign-in page (Anthropic or OpenAI) does not open in your normal browser.
 
 **🪟 Windows (PowerShell)**
 

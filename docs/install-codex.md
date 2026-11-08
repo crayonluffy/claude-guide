@@ -57,7 +57,7 @@ cx
 ```
 
 1. At the first start, Codex asks how you want to sign in. Select **Sign in with ChatGPT**. This uses your ChatGPT Plus, Pro or Team plan. A browser window opens.
-2. If the browser page does not open, open the URL with `chrome-proxy`. (The browser does not use the tunnel automatically.) Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#-optional-browse-through-the-proxy-chrome).
+2. If the browser page does not open, open the URL with `chrome-proxy`. (The browser does not use the tunnel automatically.) Or use the Chrome commands in [Manual → Browse through the proxy](proxy-manual.md#optional-browse-through-the-proxy-chrome).
 
 **API key:** if you pay through the OpenAI platform and not through a ChatGPT plan, select the API key option in the sign-in prompt. Refer to the [Codex docs](https://developers.openai.com/codex/) for the current steps.
 
