@@ -1,7 +1,10 @@
 # macOS adapters. Included in the generated standalone profile at build time.
 _macos_port_bound() {
     command -v netstat >/dev/null 2>&1 || return 2
-    netstat -an -p tcp 2>/dev/null | awk -v port="$1" '$6 == "LISTEN" && $4 ~ ("[.:]" port "$") { found=1 } END { exit !found }'
+    # Only loopback or any-address listeners clash with the tunnel's 127.0.0.1 forward.
+    netstat -an -p tcp 2>/dev/null | awk -v port="$1" '
+        function lb(x) { sub(/\.[0-9]+$/, "", x); sub(/%.*/, "", x); return x ~ /^(127\.0\.0\.1|\*|::1|::|::ffff:127\.0\.0\.1)$/ }
+        $6 == "LISTEN" && $4 ~ ("[.:]" port "$") && lb($4) { found=1 } END { exit !found }'
 }
 _macos_uptime() {
     osascript -l JavaScript -e 'ObjC.import("Foundation"); Math.floor($.NSProcessInfo.processInfo.systemUptime);' 2>/dev/null
@@ -36,8 +39,15 @@ _macos_chrome_launch() {
     procs=$(ps -axo command= 2>/dev/null)
     printf '%s\n' "$procs" | grep -F -- "$bundle" | grep -qv -- '--user-data-dir=' \
         || dock_tip="open -n -a \"$app\""
-    open -n -a "$app" --args --proxy-server="$socks" \
-        --host-resolver-rules='MAP * ~NOTFOUND , EXCLUDE 127.0.0.1' \
+    _chrome_running_note "$pdir"
+    # 'open --env' (macOS 12+) hands Chrome its time zone; older macOS skips it.
+    local envs=()
+    if [ -n "${_CLAUDE_CHROME_LAUNCH_TZ:-}" ]; then
+        if open --help 2>&1 | grep -q -- '--env'; then envs=(--env "TZ=$_CLAUDE_CHROME_LAUNCH_TZ")
+        else echo "[Info] This macOS 'open' can't pass a time zone - Chrome uses the Mac's."; fi
+    fi
+    open -n ${envs[@]+"${envs[@]}"} -a "$app" --args --proxy-server="$socks" \
+        --host-resolver-rules="$(_chrome_direct_rules resolver)" \
         --user-data-dir="$pdir" --no-first-run "$@" || return 1
     [ -z "$profile" ] || label="$label, profile '$profile'"
     echo "[OK] Chrome launched through $label - $socks, data dir $pdir"

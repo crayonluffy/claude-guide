@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.1"
+CLAUDE_PROXY_VERSION="2.13.2"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -75,6 +75,9 @@ CLAUDE_NODE_SOCKS_BASE=1180
 CLAUDE_NODE_HTTP_BASE=8180
 CLAUDE_NODE_PORTS=''             # editable rows: node HTTP SOCKS; empty uses base + slot
 CLAUDE_CHROME_BIN=""             # Chrome binary/app, only if it isn't in the usual place (macOS: app name or path)
+CLAUDE_CHROME_TZ="auto"          # Chrome time zone: auto (the proxy exit IP's), an IANA name (Asia/Tokyo), or off
+CLAUDE_CHROME_BYPASS="on"        # on: Chrome reaches NO_PROXY hosts (your LAN) directly; off: all through the proxy
+CLAUDE_TELEMETRY="on"            # off: cc runs Claude with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # Where 'proxy-nodes --refresh' gets the node list from (set with 'proxy-nodes --from / --domain'):
 #   CLAUDE_NODES_FROM="jpvpn"        -> PRIVATE: asks that VM over SSH ('ssh jpvpn claude-proxy-nodes',
@@ -164,7 +167,7 @@ export CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT \
 CLAUDE_TUNNEL_PIDFILE="${CLAUDE_TUNNEL_LOG%.log}.watchdog.pid"
 
 # The keys a conf file may carry (used by proxy-config / migration).
-_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_NODE_PORTS CLAUDE_CHROME_BIN CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_MODE CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS CLAUDE_TERMINAL_NOTIFICATIONS"
+_CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_PORT CLAUDE_HTTP_PORT CLAUDE_REMOTE_PROXY_PORT CLAUDE_SOCKS_PORT CLAUDE_NODE_SOCKS_BASE CLAUDE_NODE_HTTP_BASE CLAUDE_NODE_PORTS CLAUDE_CHROME_BIN CLAUDE_CHROME_TZ CLAUDE_CHROME_BYPASS CLAUDE_TELEMETRY CLAUDE_NODES_FROM CLAUDE_PROXY_DOMAIN CLAUDE_SYNC_SETTINGS CLAUDE_SYNC_WINDOWS_SETTINGS CLAUDE_KILLSWITCH CLAUDE_PLAIN_COMMANDS CLAUDE_PROXY_MODE CLAUDE_PROXY_BANNER CLAUDE_TUNNEL_WATCHDOG CLAUDE_WATCHDOG_INTERVAL CLAUDE_WATCHDOG_IDLE_INTERVAL CLAUDE_WATCHDOG_FAILS CLAUDE_WATCHDOG_NOTICE_AFTER CLAUDE_WATCHDOG_PROBE_TIMEOUT CLAUDE_WATCHDOG_PROGRESS_INTERVAL CLAUDE_WATCHDOG_MAX_BACKOFF CLAUDE_WATCHDOG_STARTUP_GRACE CLAUDE_TUNNEL_LOG CLAUDE_DESKTOP_NOTIFICATIONS CLAUDE_TERMINAL_NOTIFICATIONS"
 
 # ============================================================
 # Helpers
@@ -172,9 +175,11 @@ _CLAUDE_CONF_KEYS="CLAUDE_SSH_HOST CLAUDE_SSH_USER CLAUDE_SSH_KEY CLAUDE_SSH_POR
 
 # PIDs listening on a TCP port, one per line (empty if none).
 # Minimal Linux images ship without lsof; ss -p names the same processes (our own).
+# awk condition: an ss line listening on <port> at loopback or any address.
+_SS_LOOPBACK_AWK='function lb(x) { sub(/:[0-9]+$/, "", x); sub(/%.*/, "", x); return x ~ /^(127\.0\.0\.1|0\.0\.0\.0|\*|\[::\]|\[::1\]|\[::ffff:127\.0\.0\.1\]|\[::ffff:0\.0\.0\.0\])$/ } NR > 1 && $4 ~ ("[:.]" port "$") && lb($4)'
 _listeners() {
     if command -v lsof >/dev/null 2>&1; then lsof -ti:"$1" -sTCP:LISTEN 2>/dev/null; return 0; fi
-    ss -ltnp 2>/dev/null | awk -v port="$1" 'NR > 1 && $4 ~ ("[:.]" port "$")' \
+    ss -ltnp 2>/dev/null | awk -v port="$1" "$_SS_LOOPBACK_AWK" \
         | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u
 }
 
@@ -196,9 +201,10 @@ _pid_listen_ports() {
 _port_bound() {
     local p=$1
     if command -v ss >/dev/null 2>&1; then
-        # $4 is "Local Address:Port" ([::1]:8080, 0.0.0.0:8080, *:8080).
-        # The [:.] guard stops :80 matching :8080.
-        ss -ltn 2>/dev/null | awk -v port="$p" '$4 ~ ("[:.]" port "$") { f = 1 } END { exit !f }'
+        # $4 is "Local Address:Port" ([::1]:8080, 0.0.0.0:8080, *:8080). Only a
+        # loopback or any-address listener clashes with the tunnel's 127.0.0.1
+        # forward; one on a LAN address (10.0.0.5:1080) does not.
+        ss -ltn 2>/dev/null | awk -v port="$p" "$_SS_LOOPBACK_AWK"' { f = 1 } END { exit !f }'
         return $?
     fi
     if type _platform_port_bound >/dev/null 2>&1; then
@@ -541,7 +547,22 @@ _recovery_owner_stop() {
 # is replaced by one with an owner, on the same ports. Only that ssh and the old
 # watchdog are stopped; a foreign program on the ports is never touched.
 _recovery_migrate() {
-    local i=0 state
+    local i=0 state port pid name key
+    # As for nodes: a non-ssh program, or one this account can't see (another
+    # user's), is never mistaken for an old tunnel.
+    for port in "$CLAUDE_HTTP_PORT" "$CLAUDE_SOCKS_PORT"; do
+        if [ "$port" = "$CLAUDE_HTTP_PORT" ]; then key=HTTP_PORT; else key=SOCKS_PORT; fi
+        for pid in $(_listeners "$port"); do
+            name=$(_proc_name "$pid")
+            _is_ssh_name "$name" && continue
+            echo "[Err] ${name:-another program} (PID $pid) is on port $port, which the tunnel uses. Close it, or move the tunnel: proxy-config set $key <free port>" >&2
+            return 1
+        done
+        if [ -z "$(_listeners "$port")" ] && _port_bound "$port"; then
+            echo "[Err] Another user's program is on port $port, which the tunnel uses. Move the tunnel: proxy-config set $key <free port>" >&2
+            return 1
+        fi
+    done
     state=$(_tunnel_health | awk '{print $1}')
     case "$state" in
         ok|stale|down) ;;
@@ -2492,10 +2513,15 @@ _launch_via_proxy() {
     # A per-terminal node sets the proxy for this one process only.
     if [ "$bin" = codex ] && _codex_no_daemon; then pre_args+=(--no-daemon); fi
     [ $safe -eq 1 ] || pre_args+=("$skip_flag")
+    # TELEMETRY=off: Claude only, this process only (no telemetry, error reports or auto-update).
+    local app_env=()
+    [ "$bin" != claude ] || [ "${CLAUDE_TELEMETRY:-on}" != off ] || app_env=(CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
     if [ -n "$url" ]; then
         if env http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" \
-               no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY" \
+               no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY" ${app_env[@]+"${app_env[@]}"} \
                "$(_bin_path "$bin")" ${pre_args[@]+"${pre_args[@]}"} ${app_args[@]+"${app_args[@]}"}; then rc=0; else rc=$?; fi
+    elif [ ${#app_env[@]} -gt 0 ]; then
+        if env "${app_env[@]}" "$(_bin_path "$bin")" ${pre_args[@]+"${pre_args[@]}"} ${app_args[@]+"${app_args[@]}"}; then rc=0; else rc=$?; fi
     elif command "$bin" ${pre_args[@]+"${pre_args[@]}"} ${app_args[@]+"${app_args[@]}"}; then rc=0; else rc=$?; fi
     [ -z "$subscriber" ] || _recovery_unsubscribe "$subscriber" "$subscriber_stamp"
     trap - INT
@@ -3472,6 +3498,65 @@ _chrome_base_dir() {
     _platform_chrome_base
 }
 
+# Browser leak guards (2.13.2). Chrome's SOCKS5 proxy carries TCP only, so:
+#  - WebRTC 'disable_non_proxied_udp': no direct UDP, which is how STUN reveals the
+#    real public IP. WebRTC then uses TCP through the proxy (TURN over TCP) or fails
+#    closed. Local IPs are hidden too. This is Chromium's documented policy for
+#    proxy users (the WebRtcIPHandling policy / chrome.privacy webRTCIPHandlingPolicy).
+#  - --disable-quic: no HTTP/3 (UDP) next to the proxy.
+_chrome_leak_flags() { echo '--force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic'; }
+
+# CLAUDE_NO_PROXY as Chrome's direct (no proxy) list. <mode>:
+#   bypass   -> --proxy-bypass-list value ('a;b;c'): the LAN stays reachable directly
+#   resolver -> --host-resolver-rules: 'MAP * ~NOTFOUND' (DNS only via the proxy) plus
+#               an EXCLUDE per bypassed host name, so those still resolve locally
+# 'example.com' covers its subdomains too (as in curl); bare IPv6 gets brackets;
+# a catch-all entry and anything with unusual characters is skipped.
+# CHROME_BYPASS=off: everything, the LAN included, goes through the proxy.
+_chrome_direct_rules() {  # <bypass|resolver>
+    local list=$CLAUDE_NO_PROXY
+    [ "${CLAUDE_CHROME_BYPASS:-on}" != off ] || list='localhost,127.0.0.1'
+    printf '%s\n' "$list" | tr ',' '\n' | awk -v mode="$1" '
+        function emit(v) { if (!(v in seen)) { seen[v]=1; out = out (out=="" ? "" : sep) v } }
+        BEGIN { sep = (mode=="bypass") ? ";" : " , "; if (mode!="bypass") emit("MAP * ~NOTFOUND") }
+        { gsub(/^[ \t]+|[ \t]+$/, "") }
+        # Never a catch-all ("*", "*.*"): that would send all of Chrome direct.
+        $0=="" || $0 !~ /^[][A-Za-z0-9.*:\/_-]+$/ || $0 ~ /^[*.]+$/ { next }
+        index($0, ":") && $0 !~ /^\[/ && $0 !~ /\// { $0 = "[" $0 "]" }
+        {
+            ip = ($0 ~ /\// || $0 ~ /^\[/ || $0 ~ /^[0-9.]+$/)
+            # "*.x" stays as is; "x" and ".x" mean x and its subdomains.
+            h = $0; wild = sub(/^\*\./, "", h); if (!wild) sub(/^\./, "", h)
+            if (ip) { if (mode=="bypass") emit($0); else if ($0=="127.0.0.1") emit("EXCLUDE 127.0.0.1"); next }
+            if (h ~ /\*/) { if (mode=="bypass") emit($0); next }
+            if (!wild) emit((mode=="bypass" ? "" : "EXCLUDE ") h)
+            emit((mode=="bypass" ? "" : "EXCLUDE ") "*." h)
+        }
+        END { print out }'
+}
+
+# The proxy's time zone for Chrome (CHROME_TZ): auto = the exit IP's zone (looked
+# up through the tunnel), an IANA name such as Asia/Tokyo, or off. A browser whose
+# clock zone doesn't match its IP is a common "VPN user" signal.
+_chrome_tz() {  # <socks port>
+    local tz
+    case "${CLAUDE_CHROME_TZ:-auto}" in
+        off|'') return 1 ;;
+        auto) tz=$(curl -q -s --max-time 6 --noproxy '' --proxy '' --socks5-hostname "127.0.0.1:$1" \
+                   https://ipinfo.io/timezone 2>/dev/null) || return 1 ;;
+        *) tz=$CLAUDE_CHROME_TZ ;;
+    esac
+    printf '%s\n' "$tz" | LC_ALL=C grep -Eqx '[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*' || return 1
+    printf '%s\n' "$tz"
+}
+
+# A Chrome already running on this data dir gets the new window, but keeps the
+# flags and time zone it started with.
+_chrome_running_note() {  # <data dir>
+    [ -L "$1/SingletonLock" ] || [ -e "$1/SingletonLock" ] || [ -e "$1/lockfile" ] || return 0
+    echo "[Info] This Chrome was already open, so it keeps the settings it started with. Quit it (all its windows) and run chrome-proxy again to apply the current leak guards."
+}
+
 # chrome-proxy [node] [--profile NAME] [url ...]
 #   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
 #   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
@@ -3483,7 +3568,7 @@ _chrome_base_dir() {
 chrome-proxy() {  # [node] [--profile name] [url] | --list [node]
     case "${1:-}" in --list|-l|list) shift; _chrome_profiles "$@"; return;; esac
     local a line node="" name idx alias host rest socks port label profile="" want_profile=0
-    local extra=() pargs=()
+    local extra=() pargs=() check=0 f tz='' ip
     for a in "$@"; do
         if [ $want_profile -eq 1 ]; then
             profile="$a"; want_profile=0
@@ -3492,6 +3577,7 @@ chrome-proxy() {  # [node] [--profile name] [url] | --list [node]
         case "$a" in
             -p|--profile) want_profile=1; continue ;;
             --profile=*)  profile="${a#--profile=}"; continue ;;
+            --check)      check=1; continue ;;
         esac
         if [ -z "$node" ] && { line=$(_node_lookup "$a") || { _ssh_config_has_alias "$a" && line="|$a|$a|"; }; }; then
             node="$a"
@@ -3548,7 +3634,28 @@ chrome-proxy() {  # [node] [--profile name] [url] | --list [node]
         return 1
     fi
 
-    _platform_chrome_launch "$name" "$socks" "$profile" "$label" ${pargs[@]+"${pargs[@]}"} ${extra[@]+"${extra[@]}"}
+    for f in $(_chrome_leak_flags); do pargs+=("$f"); done
+    pargs+=(--proxy-bypass-list="$(_chrome_direct_rules bypass)")
+    if [ "${CLAUDE_CHROME_TZ:-auto}" != off ]; then
+        if tz=$(_chrome_tz "$port"); then
+            echo "[Privacy] Chrome time zone: $tz ($( [ "${CLAUDE_CHROME_TZ:-auto}" = auto ] && echo "the proxy's exit IP" || echo CHROME_TZ ))"
+        else
+            tz=''
+            echo "[Warn] Couldn't look up the proxy's time zone - Chrome uses this computer's. Set one: proxy-config set CHROME_TZ Asia/Tokyo" >&2
+        fi
+    fi
+    if [ "$check" -eq 1 ]; then
+        ip=$(curl -q -s --max-time 8 --noproxy '' --proxy '' --socks5-hostname "127.0.0.1:$port" https://ipinfo.io/ip 2>/dev/null) || ip=''
+        echo "[Check] Opening leak tests. What a pass looks like:"
+        [ -n "$ip" ] || ip='the proxy IP'
+        echo "        IP      : $ip - not your own"
+        echo "        WebRTC  : no public IP other than $ip, and no local (192.168.x / 10.x) address"
+        echo "        DNS     : servers near the proxy, not your ISP's"
+        [ -z "$tz" ] || echo "        Time zone (JavaScript tab): $tz"
+        extra+=(https://browserleaks.com/ip https://browserleaks.com/webrtc https://browserleaks.com/dns https://browserleaks.com/javascript)
+    fi
+
+    _CLAUDE_CHROME_LAUNCH_TZ=$tz _platform_chrome_launch "$name" "$socks" "$profile" "$label" ${pargs[@]+"${pargs[@]}"} ${extra[@]+"${extra[@]}"}
 }
 
 # chrome-proxy --list [node]  - the Chrome profiles that exist in each node's data dir
@@ -3827,7 +3934,7 @@ cc-help() {  # [all]
 
   NODES, CHROME, SETTINGS
     proxy-nodes           list nodes (--refresh: update the list; use sg: make sg the default)
-    chrome-proxy [node]   Chrome through a node, own profile (--profile NAME, --list)
+    chrome-proxy [node]   Chrome through a node, own profile (--profile NAME, --list, --check)
     proxy-config          settings and ports (edit | set KEY VALUE | use-active | killswitch)
 
   Examples:  cc -c            continue the last Claude session
@@ -3907,7 +4014,9 @@ cc-manual() {  # [node]
         echo "#    Add your usual flags, e.g. --dangerously-skip-permissions (claude) or"
         echo "#    --dangerously-bypass-approvals-and-sandbox (codex), which cc / cx add for you."
         echo ""
-        echo "# Chrome by hand:  <chrome> --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder>"
+        echo "# Chrome by hand:  <chrome> --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder> \\"
+        echo "#   --host-resolver-rules='$(_chrome_direct_rules resolver)' \\"
+        echo "#   --proxy-bypass-list='$(_chrome_direct_rules bypass)' $(_chrome_leak_flags)"
         if _killswitch_on; then
             echo "# Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel"
             echo "# Claude fails closed instead of going direct. Check with: proxy-config killswitch"

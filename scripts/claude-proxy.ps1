@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.1'
+$script:PROFILE_VERSION = '2.13.2'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -117,6 +117,8 @@ $script:NO_PROXY_LIST = @(
 ) -join ","
 
 $script:BANNER         = 1     # one-line notice when a new window loads this profile (0 = silent)
+$script:CHROME_BYPASS  = 'on'  # on: Chrome reaches NO_PROXY hosts (your LAN) directly; off: all through the proxy
+$script:TELEMETRY      = 'on'  # off: cc runs Claude with CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 $script:NO_PROXY_EXTRA = ''    # appended to NO_PROXY_LIST
 
 $script:TUNNEL_WATCHDOG=1
@@ -136,7 +138,7 @@ $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
 # --- personal overrides (~\.claude-proxy.conf.psd1) ---------------------------
 $script:CONF_KEYS = @('SSH_HOST','SSH_USER','SSH_KEY','SSH_PORT','HTTP_PORT','REMOTE_PROXY_PORT',
-                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','NODE_PORTS','CHROME_EXE','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','PROXY_MODE','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS','TERMINAL_NOTIFICATIONS')
+                      'SOCKS_PORT','NODE_SOCKS_BASE','NODE_HTTP_BASE','NODE_PORTS','CHROME_EXE','CHROME_BYPASS','TELEMETRY','NODES_FROM','PROXY_DOMAIN','SYNC_SETTINGS','KILLSWITCH','PLAIN_COMMANDS','PROXY_MODE','BANNER','NO_PROXY_EXTRA','TUNNEL_WATCHDOG','WATCHDOG_INTERVAL','WATCHDOG_IDLE_INTERVAL','WATCHDOG_FAILS','WATCHDOG_NOTICE_AFTER','WATCHDOG_PROBE_TIMEOUT','WATCHDOG_PROGRESS_INTERVAL','WATCHDOG_MAX_BACKOFF','WATCHDOG_STARTUP_GRACE','TUNNEL_LOG','DESKTOP_NOTIFICATIONS','TERMINAL_NOTIFICATIONS')
 $script:CONFIG_DEFAULTS = @{}
 foreach ($configKey in $script:CONF_KEYS) {
     $script:CONFIG_DEFAULTS[$configKey] = Get-Variable -Name $configKey -Scope Script -ValueOnly
@@ -158,19 +160,24 @@ if ($script:NO_PROXY_EXTRA) { $script:NO_PROXY_LIST = "$($script:NO_PROXY_LIST),
 # Helper: Check if a port is in use
 # ============================================================
 
+# Listeners that clash with the tunnel's 127.0.0.1 forward: loopback or any
+# address (or unknown). One on a LAN address (10.0.0.5:1080) does not block the tunnel.
+function Get-LoopbackListener { param([int]$Port)
+    @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+      Where-Object { -not $_.LocalAddress -or $_.LocalAddress -in @('127.0.0.1', '0.0.0.0', '::', '::1', '::ffff:127.0.0.1') })
+}
 function Test-Port {
     param([int]$Port)
     # -State Listen: a port is only "in use" if something actually LISTENS on it.
     # Without it, half-dead connections make a broken tunnel look alive.
-    $conn = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    return ($null -ne $conn)
+    return ((Get-LoopbackListener $Port).Count -gt 0)
 }
 
 # First free port at or after $Start (returns 0 if none within 20).
 function Find-FreePort {
     param([int]$Start)
     for ($p = $Start; $p -lt $Start + 20; $p++) {
-        if (-not (Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue)) { return $p }
+        if (-not (Get-LoopbackListener $p).Count) { return $p }
     }
     return 0
 }
@@ -1195,6 +1202,15 @@ function Get-CodexPreArgs($Exe) {
 # Plain 'claude' / 'codex' with PLAIN_COMMANDS=auto: through the tunnel, in safe
 # mode (the app's own prompts), quietly - profile messages only on failure, on
 # stderr - so 'claude -p ... | ConvertFrom-Json' keeps working.
+# TELEMETRY = 'off': Claude only, for this one run (no telemetry, error reports or auto-update).
+# (Unusual parameter names: the script block reads the caller's $app, $pre, $exe.)
+function Invoke-WithAppEnv { param([string]$AppEnvName, [scriptblock]$AppEnvRun)
+    if ($AppEnvName -ne 'claude' -or $script:TELEMETRY -ne 'off') { & $AppEnvRun; return }
+    $appEnvOld = $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
+    $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+    try { & $AppEnvRun } finally { $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = $appEnvOld }
+}
+
 function Invoke-PlainLaunch {
     $name = "$($args[0])"
     $rest = @($args | Select-Object -Skip 1)
@@ -1219,7 +1235,7 @@ function Invoke-PlainLaunch {
     }
     Exit-RecoveryOperation
     if ($name -eq 'codex') { $rest = @(Get-CodexPreArgs $exe) + $rest }
-    try { & $exe @rest }
+    try { Invoke-WithAppEnv $name { & $exe @rest } }
     finally {
         $exitCode = $global:LASTEXITCODE
         Stop-RecoverySubscriber $subscriber
@@ -2317,7 +2333,7 @@ function cc {
     if ($ctx) { $pre += @('--settings', (Write-NodeSettingsFile $ctx)) }
     if (-not $o.Safe) { $pre += '--dangerously-skip-permissions' }
     $app = $o.App
-    if ($ctx) { Invoke-WithNodeEnv $ctx { & $exe @pre @app } } else { & $exe @pre @app }
+    Invoke-WithAppEnv claude { if ($ctx) { Invoke-WithNodeEnv $ctx { & $exe @pre @app } } else { & $exe @pre @app } }
     } finally {
         $exitCode=$global:LASTEXITCODE
         Stop-RecoverySubscriber $subscriber
@@ -3331,7 +3347,50 @@ function Get-ChromeProfileDir { param([string]$Base, [string]$Name)
     return $target
 }
 
-# chrome-proxy [node] [-Profile NAME] [url ...]
+# Browser leak guards (2.13.2), as in the Bash profile. Chrome's SOCKS5 proxy
+# carries TCP only: WebRTC 'disable_non_proxied_udp' stops direct UDP (STUN would
+# reveal the real public IP; local IPs stay hidden too), --disable-quic stops HTTP/3.
+function Get-ChromeLeakFlags { @('--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--disable-quic') }
+
+# NO_PROXY as Chrome's direct list: -Mode bypass -> --proxy-bypass-list ('a;b'),
+# resolver -> --host-resolver-rules (DNS via the proxy, except bypassed names).
+# 'x' and '.x' mean x and its subdomains; catch-alls and odd characters are skipped.
+function Get-ChromeDirectRules { param([ValidateSet('bypass','resolver')][string]$Mode, [string]$List = $script:NO_PROXY_LIST)
+    if ($script:CHROME_BYPASS -eq 'off') { $List = 'localhost,127.0.0.1' }
+    $out = [System.Collections.Generic.List[string]]::new()
+    $add = { param($v) if (-not $out.Contains($v)) { $out.Add($v) } }
+    if ($Mode -eq 'resolver') { & $add 'MAP * ~NOTFOUND' }
+    $pre = if ($Mode -eq 'bypass') { '' } else { 'EXCLUDE ' }
+    foreach ($raw in ($List -split ',')) {
+        $e = $raw.Trim()
+        if (-not $e -or $e -notmatch '^[][A-Za-z0-9.*:/_-]+$' -or $e -match '^[*.]+$') { continue }
+        if ($e.Contains(':') -and -not $e.StartsWith('[') -and -not $e.Contains('/')) { $e = "[$e]" }
+        if ($e -match '/' -or $e.StartsWith('[') -or $e -match '^[0-9.]+$') {
+            if ($Mode -eq 'bypass') { & $add $e } elseif ($e -eq '127.0.0.1') { & $add 'EXCLUDE 127.0.0.1' }
+            continue
+        }
+        $wild = $e.StartsWith('*.')
+        $h = if ($wild) { $e.Substring(2) } else { $e.TrimStart('.') }
+        if ($h.Contains('*')) { if ($Mode -eq 'bypass') { & $add $e }; continue }
+        if (-not $wild) { & $add "$pre$h" }
+        & $add "$pre*.$h"
+    }
+    $sep = if ($Mode -eq 'bypass') { ';' } else { ' , ' }
+    return ($out -join $sep)
+}
+
+# The proxy exit IP's time zone, looked up through the tunnel (for -Check: Windows
+# Chrome follows the Windows time zone, so it can only be suggested).
+function Get-ProxyExitInfo { param([int]$Port, [string]$Field)
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if (-not $curl) { return '' }
+    $v = (& $curl.Source -q -s --max-time 8 --noproxy '' --proxy '' --socks5-hostname "127.0.0.1:$Port" "https://ipinfo.io/$Field" 2>$null | Out-String).Trim()
+    if ($Field -eq 'timezone' -and $v -notmatch '^[A-Za-z][A-Za-z0-9_+-]*(/[A-Za-z0-9_+-]+)*$') { return '' }
+    if ($Field -eq 'ip' -and $v -notmatch '^[0-9A-Fa-f.:]+$') { return '' }
+    return $v
+}
+
+# chrome-proxy [node] [-Profile NAME] [-Check] [url ...]
 #   chrome-proxy            Chrome through the node cc/cx use (main tunnel; starts it if needed)
 #   chrome-proxy sg         Chrome through node 'sg' on its OWN SOCKS tunnel + profile -
 #                           the main tunnel and other nodes' windows are untouched
@@ -3351,7 +3410,7 @@ function chrome-proxy {
     }
     if (-not $chrome) { Write-Host "[Err] Chrome not found - if it lives somewhere unusual: proxy-config set CHROME_EXE 'D:\path\to\chrome.exe'" -ForegroundColor Red; return }
 
-    $node = $null; $extra = @(); $profileName = ''
+    $node = $null; $extra = @(); $profileName = ''; $check = $false
     $list = @($args)
     for ($i = 0; $i -lt $list.Count; $i++) {
         $a = "$($list[$i])"
@@ -3363,6 +3422,7 @@ function chrome-proxy {
             $i++; $profileName = "$($list[$i])"; continue
         }
         if ($a -match '^-{1,2}profile[=:](.+)$') { $profileName = $Matches[1]; continue }
+        if ($a -match '^-{1,2}check$') { $check = $true; continue }
         $n = if ($null -eq $node) { Find-ProxyNode $a } else { $null }
         if (-not $n -and $null -eq $node -and $a -match '^[A-Za-z][A-Za-z0-9._-]*$' -and (Test-SshAlias $a)) { $n = [pscustomobject]@{ Name=$a; Alias=$a } }
         if ($n) { $node = $n }
@@ -3411,11 +3471,25 @@ function chrome-proxy {
     $socks = "socks5://127.0.0.1:$port"
     $pdir  = Get-ChromeProfileDir $script:CHROME_BASE $name
     if ($profileName) { $label += ", profile '$profileName'" }
+    if ($check) {
+        $ip = Get-ProxyExitInfo $port ip; if (-not $ip) { $ip = 'the proxy IP' }
+        $tz = Get-ProxyExitInfo $port timezone
+        Write-Host "[Check] Opening leak tests. What a pass looks like:" -ForegroundColor Cyan
+        Write-Host "        IP      : $ip - not your own"
+        Write-Host "        WebRTC  : no public IP other than $ip, and no local (192.168.x / 10.x) address"
+        Write-Host "        DNS     : servers near the proxy, not your ISP's"
+        if ($tz) { Write-Host "        Time zone: Windows Chrome uses the Windows time zone; the proxy's is $tz" }
+        $extra += @('https://browserleaks.com/ip', 'https://browserleaks.com/webrtc', 'https://browserleaks.com/dns', 'https://browserleaks.com/javascript')
+    }
+    if (Test-Path -LiteralPath ([IO.Path]::Combine($pdir, 'lockfile'))) {
+        Write-Host "[Info] This Chrome was already open, so it keeps the settings it started with. Quit it (all its windows) and run chrome-proxy again to apply the current leak guards." -ForegroundColor Yellow
+    }
     Write-Host "[Launch] Opening Chrome through $label - $socks, data dir $pdir" -ForegroundColor Cyan
-    # --host-resolver-rules routes DNS through the tunnel too (avoids DNS leaks).
+    # DNS only through the tunnel, except the LAN names that bypass the proxy (NO_PROXY).
+    $flags = @(Get-ChromeLeakFlags) + @("--proxy-bypass-list=$(Get-ChromeDirectRules bypass)")
     & $chrome --proxy-server="$socks" `
-              --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
-              --user-data-dir="$pdir" @pargs --no-first-run @extra
+              --host-resolver-rules="$(Get-ChromeDirectRules resolver)" `
+              --user-data-dir="$pdir" @pargs --no-first-run @flags @extra
 }
 
 # chrome-proxy -List [node]  - the Chrome profiles that exist in each node's data dir
@@ -3715,7 +3789,7 @@ function cc-help {
 
   NODES, CHROME, SETTINGS
     proxy-nodes           list nodes (-Refresh: update the list; use sg: make sg the default)
-    chrome-proxy [node]   Chrome through a node, own profile (-Profile NAME, -List)
+    chrome-proxy [node]   Chrome through a node, own profile (-Profile NAME, -List, -Check)
     proxy-config          settings and ports (edit | set KEY VALUE | use-active | killswitch)
 
   Examples:  cc -c            continue the last Claude session
@@ -3802,7 +3876,9 @@ function cc-manual {
     Write-Host "#    Add your usual flags, e.g. --dangerously-skip-permissions (claude) or"
     Write-Host "#    --dangerously-bypass-approvals-and-sandbox (codex), which cc / cx add for you."
     Write-Host ""
-    Write-Host "# Chrome by hand:  chrome.exe --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder>"
+    Write-Host "# Chrome by hand:  chrome.exe --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder> ``"
+    Write-Host "#   --host-resolver-rules=`"$(Get-ChromeDirectRules resolver)`" ``"
+    Write-Host "#   --proxy-bypass-list=`"$(Get-ChromeDirectRules bypass)`" $((Get-ChromeLeakFlags) -join ' ')"
     if (Test-KillswitchOn) {
         Write-Host "# Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel"
         Write-Host "# Claude fails closed instead of going direct. Check with: proxy-config killswitch"

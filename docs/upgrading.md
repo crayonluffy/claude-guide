@@ -37,6 +37,34 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.2: browser leak guards, local network in Chrome
+
+- **WebRTC can no longer show your real IP.** Chrome's SOCKS5 proxy carries TCP
+  only, so WebRTC used to send UDP directly, and any site could read your own
+  public IP (and local addresses). `chrome-proxy` now starts Chrome with
+  `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, Chromium's
+  setting for proxy users: WebRTC uses TCP through the proxy or nothing.
+  `--disable-quic` also keeps HTTP/3 (UDP) off.
+- **Your local network still works in the proxied Chrome.** Hosts in
+  `NO_PROXY` (private ranges such as `192.168.0.0/16`, `*.local`, your
+  `*.mycorp.example`) go direct, and their names resolve on your own network.
+  Everything else, DNS included, still goes through the tunnel.
+  `CHROME_BYPASS = off` sends the local network through the proxy too.
+- **Time zone:** on macOS and Linux, Chrome runs in the time zone of the proxy's
+  exit IP (`CHROME_TZ = auto`), so the clock matches the IP. Set a zone
+  (`Asia/Tokyo`) or `off`. Windows Chrome follows the Windows time zone.
+- **`chrome-proxy --check`** opens IP, WebRTC, DNS and time zone leak tests and
+  says what a pass looks like.
+- **`TELEMETRY = off`** (optional) runs Claude with
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`: no telemetry, error reports or
+  auto-update, for `cc` runs only.
+- **Fix:** a program on a LAN address (`10.0.0.5:1080`), or one from another
+  account, was taken for an old tunnel; `cc` then tried to replace it and
+  failed. Only loopback or any-address listeners count as busy now.
+
+A Chrome window that was already open keeps its old flags: quit that Chrome and
+run `chrome-proxy` again.
+
 ### 2.13.1: audit fixes (safer node lists, keys and settings)
 
 From a review of the profiles, installers and docs
