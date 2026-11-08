@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.3'
+$script:PROFILE_VERSION = '2.13.4'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -3174,22 +3174,69 @@ function _fetch-file { param($Uri, $OutFile)
     Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile
 }
 
+# Updates come from a release TAG, not the main branch (as in the Bash profile):
+# GitHub's CDN caches a branch file for up to 5 minutes, so right after a release
+# 'main' can still serve the previous version. A tag's file never changes.
+function Get-UpdateRepo {   # owner/repo for the stock REPO_RAW; a custom mirror -> ''
+    if ("$($script:REPO_RAW)" -match '^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/main/scripts/*$') { return $Matches[1] }
+    return ''
+}
+function Invoke-UpdateFetch { param([string]$Uri, [string]$OutFile, [switch]$Quiet)
+    for ($i = 1; $i -le 3; $i++) {
+        try { _fetch-file $Uri $OutFile; return } catch { $err = $_; if ($i -lt 3) { Start-Sleep -Seconds 2 } }
+    }
+    # GitHub blocked or flaky on this network: try once more through the tunnel.
+    if (Test-Port -Port $script:HTTP_PORT) {
+        if (-not $Quiet) { Write-Host "[Update] Direct download failed - trying through the tunnel (HTTP :$($script:HTTP_PORT))..." -ForegroundColor Yellow }
+        $ProgressPreference = 'SilentlyContinue'
+        Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile -Proxy "http://127.0.0.1:$($script:HTTP_PORT)"
+        return
+    }
+    throw $err
+}
+function Get-UpdateLatestTag { param([string]$Repo)
+    $out = [System.IO.Path]::GetTempFileName()
+    try {
+        Invoke-UpdateFetch "https://api.github.com/repos/$Repo/releases/latest" $out -Quiet
+        $tag = "$((Get-Content -LiteralPath $out -Raw | ConvertFrom-Json).tag_name)"
+        if ($tag -match '^v\d+\.\d+\.\d+$') { return $tag }
+    } catch {} finally { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
+    return ''
+}
+
 function proxy-update {
-    param([switch]$Check, [switch]$Force)
-    foreach ($a in $args) {   # bash spellings too: --check / -n, --force / -f
-        switch -Regex ("$a") {
+    param([switch]$Check, [switch]$Force, [string]$Version)
+    $list = @($args)
+    for ($i = 0; $i -lt $list.Count; $i++) {   # bash spellings too: --check / -n, --force / -f, --version X
+        switch -Regex ("$($list[$i])") {
             '^-{1,2}(check|n)$' { $Check = $true }
             '^-{1,2}(force|f)$' { $Force = $true }
-            default { Write-Host "[Err] Unknown argument '$a'. usage: proxy-update [-Check] [-Force]" -ForegroundColor Red; return }
+            '^-{1,2}(version|v)$' { $i++; $Version = "$($list[$i])" }
+            '^--version=(.+)$' { $Version = $Matches[1] }
+            default { Write-Host "[Err] Unknown argument '$($list[$i])'. usage: proxy-update [-Check] [-Force] [-Version X.Y.Z]" -ForegroundColor Red; return }
         }
     }
+    $repo = Get-UpdateRepo; $ref = ''
+    if ($Version) {
+        $ref = "v$($Version.TrimStart('v'))"
+        if ($ref -notmatch '^v\d+\.\d+\.\d+$') { Write-Host "[Err] '$Version' is not a version like 2.13.3." -ForegroundColor Red; return }
+        if (-not $repo) { Write-Host "[Err] -Version needs the GitHub source; REPO_RAW is a custom mirror ($($script:REPO_RAW))." -ForegroundColor Red; return }
+        Write-Host "[Update] Fetching profile $ref from GitHub..." -ForegroundColor Cyan
+    } elseif ($repo -and ($ref = Get-UpdateLatestTag $repo)) {
+        Write-Host "[Update] Fetching the latest release ($ref) from GitHub..." -ForegroundColor Cyan
+    } else {
+        $ref = ''
+        if ($repo) { Write-Host "[Info] Couldn't ask GitHub for the latest release (offline or rate-limited) - using the main branch, which can lag a new release by a few minutes." -ForegroundColor Yellow }
+        Write-Host "[Update] Fetching latest profile from GitHub..." -ForegroundColor Cyan
+    }
+    $uri = if ($ref) { "https://raw.githubusercontent.com/$repo/$ref/scripts/claude-proxy.ps1" } else { "$($script:REPO_RAW)/claude-proxy.ps1" }
     $tmp = Join-Path ([System.IO.Path]::GetTempPath()) 'claude-proxy.ps1.new'
-    Write-Host "[Update] Fetching latest profile from GitHub..." -ForegroundColor Cyan
     try {
-        _fetch-file "$($script:REPO_RAW)/claude-proxy.ps1" $tmp
+        Invoke-UpdateFetch $uri $tmp
     } catch {
         Write-Host "[Err] Download failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again." -ForegroundColor Yellow
+        if ($Version) { Write-Host "       Is $ref a released version? See https://github.com/$repo/releases" -ForegroundColor Yellow }
+        else { Write-Host "       GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again." -ForegroundColor Yellow }
         return
     }
     # Sanity: must be this profile and must parse, or we'd brick every new window.
@@ -3202,6 +3249,15 @@ function proxy-update {
         return
     }
     $newver  = [regex]::Match($raw, "(?m)^\`$script:PROFILE_VERSION\s*=\s*'([^']*)'").Groups[1].Value
+    # Never step back by accident (a stale mirror); -Version or -Force may.
+    $older = $false
+    try { $older = $newver -and ([version]$newver -lt [version]$script:PROFILE_VERSION) } catch {}
+    if (-not $Version -and -not $Force -and $older) {
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Write-Host "[Info] GitHub served v$newver, older than your v$($script:PROFILE_VERSION) (a cache delay right after a release?) - nothing changed." -ForegroundColor Yellow
+        Write-Host "       Try again in a few minutes. To go back on purpose: proxy-update -Version $newver" -ForegroundColor Yellow
+        return
+    }
     # Compare with the installed profile ($PROFILE itself only holds the one-line loader).
     $current = if (Test-Path $script:PROFILE_PATH) { Get-Content $script:PROFILE_PATH -Raw } else { '' }
     if (-not $Force -and $current -eq $raw) {
@@ -3817,7 +3873,7 @@ function cc-help {
     Write-Host @'
 
   MAINTENANCE
-    proxy-update          update this profile; your settings are kept
+    proxy-update          update this profile; your settings are kept (-Version X.Y.Z: a given release)
     cc-install [-Check]   install / update Node.js, Claude Code and Codex
     proxy-shortcut        desktop shortcut that opens a window with cc/cx ready
     proxy-nodes -From jpvpn   fetch the node list privately over SSH

@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=linux
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.3"
+CLAUDE_PROXY_VERSION="2.13.4"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -3696,23 +3696,80 @@ _profile_download_name() {
     esac
 }
 
-proxy-update() {
-    local check=0 force=0
+# Updates come from a release TAG, not the main branch: GitHub's CDN caches a
+# branch file for up to 5 minutes per edge, so right after a release 'main'
+# can still serve the previous version. A tag's file never changes.
+#   _update_repo           owner/repo when CLAUDE_PROXY_REPO_RAW is the stock
+#                          raw.githubusercontent.com/<owner>/<repo>/main/scripts
+#                          (a custom mirror is used as is, without tags)
+#   _update_latest_tag     the newest release tag, from the GitHub API
+#   _update_fetch          curl with retries; through the tunnel if direct fails
+_update_repo() {
+    printf '%s\n' "$CLAUDE_PROXY_REPO_RAW" | sed -n 's#^https://raw\.githubusercontent\.com/\([A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*\)/main/scripts/*$#\1#p'
+}
+_update_valid_tag() { printf '%s\n' "$1" | LC_ALL=C grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+'; }
+_update_fetch() {  # <url> <out file>
+    curl -q -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 60 "$1" -o "$2" && return 0
+    # GitHub blocked or flaky on this network: try once more through the tunnel.
+    if _port_in_use "$CLAUDE_HTTP_PORT"; then
+        echo "[Update] Direct download failed - trying through the tunnel (HTTP :$CLAUDE_HTTP_PORT)..." >&2
+        curl -q -fsSL --retry 2 --connect-timeout 10 --max-time 60 --noproxy '' -x "http://127.0.0.1:$CLAUDE_HTTP_PORT" "$1" -o "$2" && return 0
+    fi
+    return 1
+}
+_update_latest_tag() {  # <owner/repo>
+    local out tag
+    out=$(mktemp) || return 1
+    if _update_fetch "https://api.github.com/repos/$1/releases/latest" "$out" 2>/dev/null; then
+        tag=$(sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' "$out" | head -1)
+    fi
+    rm -f "$out"
+    _update_valid_tag "${tag:-}" || return 1
+    printf '%s\n' "$tag"
+}
+# 0 when version $1 is older than $2 (x.y.z numbers).
+_version_lt() {
+    awk -v a="$1" -v b="$2" 'BEGIN { n=split(a,x,"."); m=split(b,y,"."); k=(n>m?n:m)
+        for (i=1;i<=k;i++) { if (x[i]+0<y[i]+0) exit 0; if (x[i]+0>y[i]+0) exit 1 }; exit 1 }'
+}
+
+proxy-update() {  # [--check] [--force] [--version X.Y.Z]
+    local check=0 force=0 want=''
     while [ $# -gt 0 ]; do
         case "$1" in
             --check|-n) check=1 ;;
             --force|-f) force=1 ;;
-            *) echo "usage: proxy-update [--check] [--force]"; return 1 ;;
+            --version|-v) shift; want="${1:-}"; [ -n "$want" ] || { echo "usage: proxy-update --version 2.13.3"; return 1; } ;;
+            --version=*) want="${1#--version=}" ;;
+            *) echo "usage: proxy-update [--check] [--force] [--version X.Y.Z]"; return 1 ;;
         esac
         shift
     done
 
-    local self="$CLAUDE_PROXY_SELF" tmp newver
+    local self="$CLAUDE_PROXY_SELF" tmp newver repo ref='' url
+    repo=$(_update_repo)
+    if [ -n "$want" ]; then
+        ref="v${want#v}"
+        _update_valid_tag "$ref" || { echo "[Err] '$want' is not a version like 2.13.3."; return 1; }
+        [ -n "$repo" ] || { echo "[Err] --version needs the GitHub source; CLAUDE_PROXY_REPO_RAW is a custom mirror ($CLAUDE_PROXY_REPO_RAW)."; return 1; }
+        echo "[Update] Fetching profile $ref from GitHub..."
+    elif [ -n "$repo" ] && ref=$(_update_latest_tag "$repo"); then
+        echo "[Update] Fetching the latest release ($ref) from GitHub..."
+    else
+        ref=''
+        [ -z "$repo" ] || echo "[Info] Couldn't ask GitHub for the latest release (offline or rate-limited) - using the main branch, which can lag a new release by a few minutes."
+        echo "[Update] Fetching latest profile from GitHub..."
+    fi
+    if [ -n "$ref" ]; then url="https://raw.githubusercontent.com/$repo/$ref/scripts/$(_profile_download_name)"
+    else url="$CLAUDE_PROXY_REPO_RAW/$(_profile_download_name)"; fi
     tmp=$(mktemp) || return 1
-    echo "[Update] Fetching latest profile from GitHub..."
-    if ! curl -fsSL "$CLAUDE_PROXY_REPO_RAW/$(_profile_download_name)" -o "$tmp"; then
+    if ! _update_fetch "$url" "$tmp"; then
         rm -f "$tmp"
-        echo "[Err] Download failed. GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again."
+        if [ -n "$want" ]; then
+            echo "[Err] Could not download $ref - is it a released version? See https://github.com/$repo/releases"
+        else
+            echo "[Err] Download failed. GitHub not reachable from here? Try 'proxy-up' first, then 'proxy-update' again."
+        fi
         return 1
     fi
     # Sanity: must be this profile and must parse, or we'd brick every new shell.
@@ -3722,6 +3779,14 @@ proxy-update() {
         return 1
     fi
     newver=$(sed -n 's/^CLAUDE_PROXY_VERSION="\(.*\)"/\1/p' "$tmp")
+
+    # Never step back by accident (a stale mirror); --version or --force may.
+    if [ -z "$want" ] && [ $force -eq 0 ] && [ -n "$newver" ] && _version_lt "$newver" "$CLAUDE_PROXY_VERSION"; then
+        rm -f "$tmp"
+        echo "[Info] GitHub served v$newver, older than your v$CLAUDE_PROXY_VERSION (a cache delay right after a release?) - nothing changed."
+        echo "       Try again in a few minutes. To go back on purpose: proxy-update --version $newver"
+        return 0
+    fi
 
     if [ $force -eq 0 ] && cmp -s "$tmp" "$self"; then
         rm -f "$tmp"
@@ -3742,7 +3807,8 @@ proxy-update() {
     fi
     if [ $check -eq 1 ]; then
         rm -f "$tmp"
-        echo "[Info] Update available: v$CLAUDE_PROXY_VERSION -> v$newver. Run 'proxy-update' to install it."
+        if [ -n "$want" ]; then echo "[Info] v$newver is available. Run 'proxy-update --version $newver' to install it."
+        else echo "[Info] Update available: v$CLAUDE_PROXY_VERSION -> v$newver. Run 'proxy-update' to install it."; fi
         return 0
     fi
 
@@ -4251,7 +4317,7 @@ EOF
     cat <<'EOF'
 
   MAINTENANCE
-    proxy-update          update this profile; your settings are kept
+    proxy-update          update this profile; your settings are kept (--version X.Y.Z: a given release)
     cc-install [--check]  install / update Node.js, Claude Code and Codex
     proxy-nodes --from jpvpn   fetch the node list privately over SSH
 

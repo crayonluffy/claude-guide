@@ -26,15 +26,19 @@ CONF="$HOME/.claude-proxy.conf"
 
 UPDATE_ONLY=0
 DOMAIN_ARG="${CLAUDE_PROXY_DOMAIN:-}"
+WANT_VERSION="${CLAUDE_PROXY_INSTALL_VERSION:-}"
 while [ $# -gt 0 ]; do
     case "$1" in
         --update|-u) UPDATE_ONLY=1 ;;
         --domain)    shift; DOMAIN_ARG="${1:-}" ;;
         --domain=*)  DOMAIN_ARG="${1#--domain=}" ;;
+        --version)   shift; WANT_VERSION="${1:-}" ;;
+        --version=*) WANT_VERSION="${1#--version=}" ;;
         -h|--help)
-            echo "usage: setup.sh [--update] [--domain <domain>]"
+            echo "usage: setup.sh [--update] [--domain <domain>] [--version X.Y.Z]"
             echo "  --update            keep the existing settings and only refresh ~/.claude-proxy.sh"
             echo "  --domain <domain>   take the proxy nodes from that domain's DNS (TXT _claude-proxy.<domain>)"
+            echo "  --version X.Y.Z     install that release (default: the latest release)"
             exit 0 ;;
     esac
     shift
@@ -190,7 +194,21 @@ case "$(uname -s)" in
     Linux) PROFILE_DOWNLOAD=claude-proxy-linux.sh;;
     *) echo '[Err] Supported platforms: macOS, Linux and WSL.'; exit 1;;
 esac
-if curl -fsSL "$REPO_RAW/$PROFILE_DOWNLOAD" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
+# The profile comes from a release tag: the main branch can be CDN-cached for a
+# few minutes after a release. A custom CLAUDE_PROXY_REPO_RAW mirror is used as is.
+PROFILE_URL="$REPO_RAW/$PROFILE_DOWNLOAD"
+gh_repo=$(printf '%s\n' "$REPO_RAW" | sed -n 's#^https://raw\.githubusercontent\.com/\([A-Za-z0-9_.-]*/[A-Za-z0-9_.-]*\)/main/scripts/*$#\1#p')
+if [ -n "$WANT_VERSION" ]; then
+    tag="v${WANT_VERSION#v}"
+    printf '%s\n' "$tag" | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo "[Err] '$WANT_VERSION' is not a version like 2.13.3."; exit 1; }
+    [ -n "$gh_repo" ] || { echo "[Err] --version needs the GitHub source, not the mirror $REPO_RAW."; exit 1; }
+elif [ -n "$gh_repo" ]; then
+    tag=$(curl -q -fsS --retry 2 --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$gh_repo/releases/latest" 2>/dev/null \
+        | sed -n 's/^ *"tag_name": *"\(v[0-9][0-9.]*\)".*/\1/p' | head -1)
+else tag=''; fi
+[ -z "${tag:-}" ] || PROFILE_URL="https://raw.githubusercontent.com/$gh_repo/$tag/scripts/$PROFILE_DOWNLOAD"
+[ -z "${tag:-}" ] || echo "[Setup] Profile release: $tag"
+if curl -q -fsSL --retry 3 --retry-delay 2 --connect-timeout 10 "$PROFILE_URL" -o "$tmp_profile" && bash -n "$tmp_profile" 2>/dev/null \
    && grep -q '^CLAUDE_PROXY_VERSION=' "$tmp_profile"; then
     PROFILE_OK=1
 fi
@@ -428,7 +446,7 @@ if [ "$PROFILE_OK" = 1 ]; then
     fi
 else
     rm -f "$tmp_profile"
-    echo "[Warn] Could not download a valid profile from $REPO_RAW - the existing one (if any) is untouched."
+    echo "[Warn] Could not download a valid profile from $PROFILE_URL - the existing one (if any) is untouched."
     echo "       Install it manually (guide: Proxy setup -> Set up by hand) or re-run this wizard later."
 fi
 
