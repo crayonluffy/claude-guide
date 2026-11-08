@@ -9,6 +9,7 @@ The profile keeps your settings in a separate file: `~/.claude-proxy.conf` (macO
    ```bash
    proxy-update            # download and install the newest profile; your settings stay
    proxy-update --check    # only tell me if a newer profile is available (Windows: proxy-update -Check)
+   proxy-update --version 2.13.3   # install that release, also to go back (Windows: -Version 2.13.3)
    ```
 
 2. Open a new terminal window. Or load the profile again: `source ~/.claude-proxy.sh` (Windows: `. $PROFILE`).
@@ -36,6 +37,23 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 ## Version history
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
+
+### 2.13.4: updates fetch the exact release
+
+- **`proxy-update` asks GitHub for the latest release and downloads that tag.**
+  Before, it took the `main` branch, which GitHub caches for up to 5 minutes per
+  server, so right after a release it could still get the previous version
+  ("Already up to date"). A tag's file never changes.
+- **`proxy-update --version 2.13.3`** (Windows: `-Version`) installs a given
+  release, also an older one. An unknown version says so and changes nothing.
+- **No accidental downgrade:** if GitHub serves an older profile than yours
+  (a stale cache), nothing changes; try again in a few minutes.
+- Downloads retry, and a blocked direct download is retried once through the
+  tunnel. If GitHub's release API is unreachable or rate-limited, the update
+  falls back to `main`.
+- The installers also install the latest release by its tag. A given release:
+  `bash <(curl -fsSL …/setup.sh) --version 2.13.3`, or on Windows set
+  `$env:CLAUDE_PROXY_INSTALL_VERSION = '2.13.3'` before the `irm … | iex` line.
 
 ### 2.13.3: quieter desktop alerts
 

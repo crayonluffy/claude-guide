@@ -236,7 +236,7 @@ These still work and are listed by `cc-help all`; you rarely need them.
 
 | Command | What it does |
 |---------|--------------|
-| `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. |
+| `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. `proxy-update --version 2.13.3` (`-Version` on Windows) installs that release, also an older one. |
 | `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
 | `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
 | `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |

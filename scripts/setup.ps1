@@ -88,7 +88,21 @@ $profileErr = $null
 $raw = ''
 try {
     # No progress bar: Windows PowerShell 5.1 can crash drawing it in some console windows.
-    & { $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri "$repoRaw/claude-proxy.ps1" -OutFile $tmpProfile }
+    # From a release tag: the main branch can be CDN-cached for a few minutes after
+    # a release. $env:CLAUDE_PROXY_INSTALL_VERSION picks one; a custom mirror is used as is.
+    $profileUrl = "$repoRaw/claude-proxy.ps1"
+    if ($repoRaw -match '^https://raw\.githubusercontent\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/main/scripts/*$') {
+        $ghRepo = $Matches[1]; $tag = ''
+        if ($env:CLAUDE_PROXY_INSTALL_VERSION) {
+            $tag = "v$("$env:CLAUDE_PROXY_INSTALL_VERSION".TrimStart('v'))"
+            if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "CLAUDE_PROXY_INSTALL_VERSION '$env:CLAUDE_PROXY_INSTALL_VERSION' is not a version like 2.13.3" }
+        } else {
+            try { $tag = "$((Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 "https://api.github.com/repos/$ghRepo/releases/latest").tag_name)" } catch { $tag = '' }
+            if ($tag -notmatch '^v\d+\.\d+\.\d+$') { $tag = '' }
+        }
+        if ($tag) { $profileUrl = "https://raw.githubusercontent.com/$ghRepo/$tag/scripts/claude-proxy.ps1"; Write-Host "[Setup] Profile release: $tag" }
+    }
+    & { $ProgressPreference = 'SilentlyContinue'; Invoke-WebRequest -UseBasicParsing -Uri $profileUrl -OutFile $tmpProfile }
     $raw  = Get-Content $tmpProfile -Raw
     $errs = $null
     [System.Management.Automation.Language.Parser]::ParseInput($raw, [ref]$null, [ref]$errs) | Out-Null
