@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=macos
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.6"
+CLAUDE_PROXY_VERSION="2.13.7"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -4400,52 +4400,96 @@ EOF
 }
 
 # Print a manual, profile-free way to run everything: the exact ssh tunnel, a
-# check, and claude/codex with proxy variables. Nothing is started or changed.
-cc-manual() {  # [node]
+# check, claude/codex with the proxy set, and Chrome. Nothing is started or
+# changed. Each command is ONE line with no '#' or indent, so it copies cleanly;
+# --copy <block> puts one command on the clipboard instead.
+_clipboard_copy() {  # stdin -> the system clipboard
+    if command -v pbcopy >/dev/null 2>&1; then pbcopy
+    elif command -v clip.exe >/dev/null 2>&1; then clip.exe
+    elif [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then wl-copy
+    elif command -v xclip >/dev/null 2>&1; then xclip -selection clipboard
+    elif command -v xsel >/dev/null 2>&1; then xsel --clipboard --input
+    else cat >/dev/null; return 1; fi
+}
+cc-manual() {  # [node] [--copy tunnel|check|claude|codex|chrome]
     (
-        local node="${1:-}" label http socks q_np claude_bin codex_bin pinned=$CLAUDE_HTTP_PORT settings=''
-        _cc_manual_quote() { case "$1" in *\'*) printf '%q' "$1";; *) printf "'%s'" "$1";; esac; }
+        local node='' copy='' label http socks np claude_bin codex_bin pinned=$CLAUDE_HTTP_PORT settings='' url
+        local name chrome pdir rules bypass found=0 b t c
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                --copy|-c) copy="${2:-}"; shift ;;
+                --copy=*) copy="${1#--copy=}" ;;
+                *) node=$1 ;;
+            esac
+            shift
+        done
+        case "$copy" in ''|tunnel|check|claude|codex|chrome) ;;
+            *) echo "usage: cc-manual [node] [--copy tunnel|check|claude|codex|chrome]" >&2; exit 1 ;; esac
+        # Bare when safe, else in single quotes (a ' inside becomes '\''): pastes in bash and zsh.
+        _q() { case "$1" in *[!A-Za-z0-9_./:@=,+-]*) printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")";; *) printf '%s' "$1";; esac; }
         if [ -n "$node" ]; then _node_ctx "$node" || exit 1; label="node $node"
         else _recovery_adopt >/dev/null 2>&1 || :; label="default node ($CLAUDE_SSH_HOST)"; fi
-        http=$CLAUDE_HTTP_PORT socks=$CLAUDE_SOCKS_PORT
-        q_np=$(_cc_manual_quote "$CLAUDE_NO_PROXY")
+        http=$CLAUDE_HTTP_PORT socks=$CLAUDE_SOCKS_PORT url="http://127.0.0.1:$CLAUDE_HTTP_PORT"
+        np=$(_q "$CLAUDE_NO_PROXY")
         # Claude's settings.json pins the main port and wins over shell variables,
         # so a named node needs its own --settings, exactly like cc --node does.
-        [ -z "$node" ] || settings=" --settings $(_cc_manual_quote "$(_node_settings_json "$http")")"
+        [ -z "$node" ] || settings=" --settings $(_q "$(_node_settings_json "$http")")"
         claude_bin=$(_bin_path claude 2>/dev/null); claude_bin=${claude_bin:-claude}
         codex_bin=$(_bin_path codex 2>/dev/null); codex_bin=${codex_bin:-codex}
-        echo ""
-        echo "=== Manual fallback for $label (copy and paste; nothing was run) ==="
-        echo ""
-        if _proxy_shared; then
-            echo "# 1) Tunnel: shared mode - the serving account runs it. Nothing to start here."
+        # Chrome as chrome-proxy starts it: this node's own data folder and the leak guards.
+        name=${node:-$(_node_active_name)}
+        pdir=$(_chrome_base_dir); [ -z "$name" ] || pdir="$pdir-$name"
+        rules=$(_chrome_direct_rules resolver); bypass=$(_chrome_direct_rules bypass)
+        if [ "$_CLAUDE_PROXY_PLATFORM" = macos ]; then
+            chrome="open -n -a $(_q "${CLAUDE_CHROME_BIN:-Google Chrome}") --args"
+        elif _is_wsl; then
+            chrome=${CLAUDE_CHROME_BIN:-'/mnt/c/Program Files/Google/Chrome/Application/chrome.exe'}
+            chrome=$(_q "$chrome"); pdir="C:\\${pdir#/mnt/c/}"
         else
-            _tunnel_ssh_args
-            echo "# 1) Start the SSH tunnel in its own terminal (Ctrl-C stops it):"
-            printf '   ssh'; printf ' %q' "${_CP_SSH_ARGS[@]}"; echo ""
-            echo "#    -L $http -> HTTP proxy on the VM (Claude/Codex)    -D $socks -> SOCKS5 (Chrome)"
-            echo "#    If the port is busy, an earlier tunnel is still running: proxy-status / lsof -i :$http"
+            chrome=${CLAUDE_CHROME_BIN:-$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || echo google-chrome)}
+            chrome=$(_q "$chrome")
+        fi
+        chrome="$chrome --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=$(_q "$pdir") --host-resolver-rules='$rules' --proxy-bypass-list='$bypass' $(_chrome_leak_flags) --no-first-run"
+        # name|title|command (command empty: nothing to run)
+        {
+            if _proxy_shared; then
+                printf 'tunnel|Tunnel: shared mode - the account serving this proxy runs it. Nothing to start here.|\n'
+            else
+                _tunnel_ssh_args
+                printf 'tunnel|1) Tunnel - run it in its own terminal and keep it open (Ctrl-C stops it). -L %s = HTTP proxy for Claude/Codex, -D %s = SOCKS5 for Chrome.|ssh' "$http" "$socks"
+                printf ' %s' "$(for a in "${_CP_SSH_ARGS[@]}"; do printf '%s\n' "$(_q "$a")"; done | tr '\n' ' ' | sed 's/ $//')"; echo
+            fi
+            printf "check|2) Check - prints a number such as 404 or 200 (000 means the tunnel is not up).|curl -sS -o /dev/null -w '%%{http_code}\\\\n' -x %s https://api.anthropic.com\n" "$url"
+            printf 'claude|3) Claude - in another terminal. Add --dangerously-skip-permissions to skip the prompts, as cc does.|HTTPS_PROXY=%s HTTP_PROXY=%s NO_PROXY=%s %s%s\n' "$url" "$url" "$np" "$(_q "$claude_bin")" "$settings"
+            printf 'codex|4) Codex - in another terminal. Add --dangerously-bypass-approvals-and-sandbox to skip the prompts, as cx does.|HTTPS_PROXY=%s HTTP_PROXY=%s NO_PROXY=%s %s\n' "$url" "$url" "$np" "$(_q "$codex_bin")"
+            printf 'chrome|5) Chrome (optional) - a separate Chrome through the SOCKS5 proxy, with the leak guards of chrome-proxy.|%s\n' "$chrome"
+        } > "${TMPDIR:-/tmp}/cc-manual.$$"
+        if [ -n "$copy" ]; then
+            while IFS='|' read -r b t c; do
+                [ "$b" = "$copy" ] || continue
+                found=1
+                if [ -z "$c" ]; then echo "$t"; exit 0; fi
+                if printf '%s' "$c" | _clipboard_copy; then echo "[OK] Copied the $b command to the clipboard - paste it into a terminal."
+                else echo "[Info] No clipboard tool here (pbcopy, clip.exe, wl-copy, xclip or xsel). The command:"; printf '%s\n' "$c"; fi
+            done < "${TMPDIR:-/tmp}/cc-manual.$$"
+            rm -f "${TMPDIR:-/tmp}/cc-manual.$$"
+            exit 0
         fi
         echo ""
-        echo "# 2) Check it (expect a number such as 404 or 200, not 000):"
-        printf '   curl -sS -o /dev/null -w %s -x http://127.0.0.1:%s https://api.anthropic.com\n' "'%{http_code}\\n'" "$http"
+        echo "=== Manual fallback for $label ==="
+        echo "Nothing was run. Each command below is one line: copy it whole, or let cc-manual copy it:"
+        echo "  cc-manual ${node:+$node }--copy tunnel   (also: check, claude, codex, chrome)"
+        while IFS='|' read -r b t c; do
+            echo ""
+            echo "$t"
+            [ -z "$c" ] || printf '%s\n' "$c"
+        done < "${TMPDIR:-/tmp}/cc-manual.$$"
+        rm -f "${TMPDIR:-/tmp}/cc-manual.$$"
         echo ""
-        echo "# 3) Launch through the proxy (these bypass the cc/cx shell functions):"
-        echo "   HTTPS_PROXY=http://127.0.0.1:$http HTTP_PROXY=http://127.0.0.1:$http NO_PROXY=$q_np \\"
-        printf '     %q%s\n' "$claude_bin" "$settings"
-        echo "   HTTPS_PROXY=http://127.0.0.1:$http HTTP_PROXY=http://127.0.0.1:$http NO_PROXY=$q_np \\"
-        printf '     %q\n' "$codex_bin"
-        echo "#    Add your usual flags, e.g. --dangerously-skip-permissions (claude) or"
-        echo "#    --dangerously-bypass-approvals-and-sandbox (codex), which cc / cx add for you."
-        echo ""
-        echo "# Chrome by hand:  <chrome> --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder> \\"
-        echo "#   --host-resolver-rules='$(_chrome_direct_rules resolver)' \\"
-        echo "#   --proxy-bypass-list='$(_chrome_direct_rules bypass)' $(_chrome_leak_flags)"
         if _killswitch_on; then
-            echo "# Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel"
-            echo "# Claude fails closed instead of going direct. Check with: proxy-config killswitch"
+            echo "Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel Claude fails closed instead of going direct (proxy-config killswitch)."
         else
-            echo "# Kill switch is OFF: plain claude/codex without these variables go direct."
+            echo "Kill switch is OFF: plain claude/codex without these variables go direct."
         fi
         echo ""
     )

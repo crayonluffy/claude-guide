@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.6'
+$script:PROFILE_VERSION = '2.13.7'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -3485,16 +3485,21 @@ function Get-ProxyExitInfo { param([int]$Port, [string]$Field)
 #                           of a node lives in that node's data dir, so all of them share its
 #                           tunnel and IP but keep their own logins/cookies/extensions.
 #   chrome-proxy sg URL     ...and open URL there (any other argument is passed to Chrome)
-function chrome-proxy {
-    if ("$(@($args)[0])" -match '^(-{1,2}(l|list)|list)$') { Show-ChromeProfiles -Node "$(@($args)[1])"; return }
-    # Locate Chrome first, so we don't start a tunnel only to find Chrome missing.
-    $chrome = $null
+# chrome.exe: CHROME_EXE, Program Files, or the per-user install. $null if none.
+function Find-ChromeExe {
     foreach ($c in @($script:CHROME_EXE,
                      "C:\Program Files\Google\Chrome\Application\chrome.exe",
                      "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
                      $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Google\Chrome\Application\chrome.exe" }))) {
-        if ($c -and (Test-Path $c)) { $chrome = $c; break }
+        if ($c -and (Test-Path $c)) { return $c }
     }
+    return $null
+}
+
+function chrome-proxy {
+    if ("$(@($args)[0])" -match '^(-{1,2}(l|list)|list)$') { Show-ChromeProfiles -Node "$(@($args)[1])"; return }
+    # Locate Chrome first, so we don't start a tunnel only to find Chrome missing.
+    $chrome = Find-ChromeExe
     if (-not $chrome) { Write-Host "[Err] Chrome not found - if it lives somewhere unusual: proxy-config set CHROME_EXE 'D:\path\to\chrome.exe'" -ForegroundColor Red; return }
 
     $node = $null; $extra = @(); $profileName = ''; $check = $false
@@ -3915,19 +3920,31 @@ function cc-help {
 }
 
 # Print a manual, profile-free way to run everything: the exact ssh tunnel, a
-# check, and claude/codex with proxy variables. Nothing is started or changed.
+# check, claude/codex with the proxy set, and Chrome. Nothing is started or
+# changed. Each command is ONE line with no '#' or indent, so it copies cleanly;
+# -Copy <block> puts one command on the clipboard instead.
 function cc-manual {
-    param([string]$Node)
-    $pinned=$script:HTTP_PORT; $settingsArg=''
+    # Arguments by hand: [node] [-Copy|--copy <block>], in any order.
+    $Node = ''; $Copy = ''; $list = @($args)
+    for ($i = 0; $i -lt $list.Count; $i++) {
+        $a = "$($list[$i])"
+        if ($a -match '^-{1,2}copy$') { $i++; $Copy = "$($list[$i])"; if (-not $Copy) { $Copy = '?' } }
+        elseif ($a -match '^-{1,2}copy[=:](.*)$') { $Copy = $Matches[1] }
+        else { $Node = $a }
+    }
+    if ($Copy -and $Copy -notin 'tunnel','check','claude','codex','chrome') {
+        Write-Host "usage: cc-manual [node] [-Copy tunnel|check|claude|codex|chrome]" -ForegroundColor Yellow; return
+    }
+    $pinned=$script:HTTP_PORT
     if ($Node) {
         $ctx=Get-NodeContext $Node
         if (-not $ctx) { return }
-        $label="node $Node"
+        $label="node $Node"; $chromeName=$Node
     } else {
         $null=Use-RecoveryRecord
         $ctx=@{SSH_HOST=$script:SSH_HOST;SSH_USER=$script:SSH_USER;SSH_KEY=$script:SSH_KEY;SSH_PORT=$script:SSH_PORT
                HTTP_PORT=$script:HTTP_PORT;SOCKS_PORT=$script:SOCKS_PORT;REMOTE_PROXY_PORT=$script:REMOTE_PROXY_PORT}
-        $label="default node ($($script:SSH_HOST))"
+        $label="default node ($($script:SSH_HOST))"; $chromeName=Get-ActiveNodeName
     }
     $http=$ctx.HTTP_PORT; $socks=$ctx.SOCKS_PORT; $url="http://127.0.0.1:$http"
     $dest=if ($ctx.SSH_USER) { "$($ctx.SSH_USER)@$($ctx.SSH_HOST)" } else { $ctx.SSH_HOST }
@@ -3936,41 +3953,48 @@ function cc-manual {
     $codex=Get-Command codex -CommandType Application,ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
     $claudeExe=if ($claude) { $claude.Source } else { 'claude' }
     $codexExe=if ($codex) { $codex.Source } else { 'codex' }
+    $proxyEnv="`$env:HTTPS_PROXY='$url'; `$env:HTTP_PROXY='$url'; `$env:NO_PROXY='$($script:NO_PROXY_LIST)'"
+    $claudeCmd="$proxyEnv; & `"$claudeExe`""
     if ($Node) {
         # Claude's settings.json pins the main port and wins over env, so a node needs --settings (a file: native-argument quoting is unreliable).
-        $settingsArg=" --settings `"$(Join-Path ([IO.Path]::GetTempPath()) "claude-$Node-settings.json")`""
-    }
-    Write-Host ""
-    Write-Host "=== Manual fallback for $label (copy and paste; nothing was run) ===" -ForegroundColor Cyan
-    Write-Host ""
-    if (Test-RecoverySharedProxy) { Write-Host "# 1) Tunnel: shared mode - the serving account runs it. Nothing to start here." }
-    else {
-        Write-Host "# 1) Start the SSH tunnel in its own window (Ctrl-C stops it):"
-        Write-Host "   ssh -N -C -L $($http):127.0.0.1:$($ctx.REMOTE_PROXY_PORT) -D $socks -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new$keyArgs $dest"
-        Write-Host "#    -L $http -> HTTP proxy on the VM (Claude/Codex)    -D $socks -> SOCKS5 (Chrome)"
-    }
-    Write-Host ""
-    Write-Host "# 2) Check it (expect a number such as 404 or 200, not 000):"
-    Write-Host "   curl.exe -sS -o NUL -w '%{http_code}' -x $url https://api.anthropic.com"
-    Write-Host ""
-    Write-Host "# 3) Launch through the proxy (bypasses the cc/cx functions; the window keeps these until closed):"
-    Write-Host "   `$env:HTTPS_PROXY='$url'; `$env:HTTP_PROXY='$url'; `$env:NO_PROXY='$($script:NO_PROXY_LIST)'"
-    if ($Node) {
+        $sf=Join-Path ([IO.Path]::GetTempPath()) "claude-$Node-settings.json"
         $json=@{ env=@{ HTTPS_PROXY=$url; HTTP_PROXY=$url; NO_PROXY=$script:NO_PROXY_LIST } } | ConvertTo-Json -Depth 4 -Compress
-        Write-Host "   Set-Content `"$(Join-Path ([IO.Path]::GetTempPath()) "claude-$Node-settings.json")`" '$json'"
+        $claudeCmd="$proxyEnv; Set-Content -LiteralPath `"$sf`" -Value '$json'; & `"$claudeExe`" --settings `"$sf`""
     }
-    Write-Host "   & `"$claudeExe`"$settingsArg"
-    Write-Host "   & `"$codexExe`""
-    Write-Host "#    Add your usual flags, e.g. --dangerously-skip-permissions (claude) or"
-    Write-Host "#    --dangerously-bypass-approvals-and-sandbox (codex), which cc / cx add for you."
+    # Chrome as chrome-proxy starts it: this node's own data folder and the leak guards.
+    $chromeExe=Find-ChromeExe; if (-not $chromeExe) { $chromeExe='C:\Program Files\Google\Chrome\Application\chrome.exe' }
+    $pdir=if ($chromeName) { "$($script:CHROME_BASE)-$chromeName" } else { $script:CHROME_BASE }
+    $chromeCmd="& `"$chromeExe`" --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=`"$pdir`" --host-resolver-rules=`"$(Get-ChromeDirectRules resolver)`" --proxy-bypass-list=`"$(Get-ChromeDirectRules bypass)`" $((Get-ChromeLeakFlags) -join ' ') --no-first-run"
+    $blocks=@()
+    if (Test-RecoverySharedProxy) { $blocks += [pscustomobject]@{Name='tunnel';Title='Tunnel: shared mode - the account serving this proxy runs it. Nothing to start here.';Command=''} }
+    else {
+        $blocks += [pscustomobject]@{Name='tunnel';Title="1) Tunnel - run it in its own window and keep it open (Ctrl+C stops it). -L $http = HTTP proxy for Claude/Codex, -D $socks = SOCKS5 for Chrome."
+            Command="ssh -N -C -L $($http):127.0.0.1:$($ctx.REMOTE_PROXY_PORT) -D $socks -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ConnectTimeout=15 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new$keyArgs $dest"}
+    }
+    $blocks += [pscustomobject]@{Name='check';Title='2) Check - prints a number such as 404 or 200 (000 means the tunnel is not up).';Command="curl.exe -sS -o NUL -w '%{http_code}' -x $url https://api.anthropic.com"}
+    $blocks += [pscustomobject]@{Name='claude';Title='3) Claude - in another window. Add --dangerously-skip-permissions to skip the prompts, as cc does.';Command=$claudeCmd}
+    $blocks += [pscustomobject]@{Name='codex';Title='4) Codex - in another window. Add --dangerously-bypass-approvals-and-sandbox to skip the prompts, as cx does.';Command="$proxyEnv; & `"$codexExe`""}
+    $blocks += [pscustomobject]@{Name='chrome';Title='5) Chrome (optional) - a separate Chrome through the SOCKS5 proxy, with the leak guards of chrome-proxy.';Command=$chromeCmd}
+    if ($Copy) {
+        $b = $blocks | Where-Object Name -eq $Copy | Select-Object -First 1
+        if (-not $b.Command) { Write-Host $b.Title; return }
+        try { Set-Clipboard -Value $b.Command -ErrorAction Stop; Write-Host "[OK] Copied the $Copy command to the clipboard - paste it into PowerShell." -ForegroundColor Green }
+        catch { Write-Host "[Info] The clipboard is not available here. The command:" -ForegroundColor Yellow; Write-Host $b.Command }
+        return
+    }
     Write-Host ""
-    Write-Host "# Chrome by hand:  chrome.exe --proxy-server=socks5://127.0.0.1:$socks --user-data-dir=<new folder> ``"
-    Write-Host "#   --host-resolver-rules=`"$(Get-ChromeDirectRules resolver)`" ``"
-    Write-Host "#   --proxy-bypass-list=`"$(Get-ChromeDirectRules bypass)`" $((Get-ChromeLeakFlags) -join ' ')"
+    Write-Host "=== Manual fallback for $label ===" -ForegroundColor Cyan
+    Write-Host "Nothing was run. Each command below is one line: copy it whole, or let cc-manual copy it:" -ForegroundColor DarkGray
+    Write-Host "  cc-manual $(if ($Node) { "$Node " })-Copy tunnel   (also: check, claude, codex, chrome)" -ForegroundColor DarkGray
+    foreach ($b in $blocks) {
+        Write-Host ""
+        Write-Host $b.Title -ForegroundColor Cyan
+        if ($b.Command) { Write-Host $b.Command }
+    }
+    Write-Host ""
     if (Test-KillswitchOn) {
-        Write-Host "# Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel"
-        Write-Host "# Claude fails closed instead of going direct. Check with: proxy-config killswitch"
-    } else { Write-Host "# Kill switch is OFF: plain claude/codex without these variables go direct." }
+        Write-Host "Kill switch: Claude's settings.json is pinned to HTTP :$pinned, so without a tunnel Claude fails closed instead of going direct (proxy-config killswitch)." -ForegroundColor DarkGray
+    } else { Write-Host "Kill switch is OFF: plain claude/codex without these variables go direct." -ForegroundColor DarkGray }
     Write-Host ""
 }
 

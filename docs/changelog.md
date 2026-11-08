@@ -2,6 +2,17 @@
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.7: `cc-manual` is easy to copy
+
+- Each command is printed as **one complete line**, with no `#` and no indent,
+  so it pastes as it is. Titles are plain lines above the commands.
+- **`cc-manual --copy tunnel`** (Windows: `-Copy tunnel`; also `check`,
+  `claude`, `codex`, `chrome`) puts that one command on the clipboard
+  (`Set-Clipboard`, `pbcopy`, `clip.exe`, `wl-copy`, `xclip` or `xsel`).
+- The Chrome command is a real one: the Chrome that `chrome-proxy` finds, the
+  node's own data folder, and the same leak guards.
+- Claude and Codex each get one line that sets the proxy and starts them.
+
 ### 2.13.6 (macOS, Linux, WSL): leftover tunnel loops and a second account
 
 - **`cc-stop` / `tunnel-stop` stop a leftover tunnel loop from an older

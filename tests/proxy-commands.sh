@@ -62,6 +62,19 @@ for sh in bash zsh; do
     case "$out" in *'-L 8080:127.0.0.1:8888 -D 1080'*'jpvpn'*) ;; *) fail "$sh manual main: $out";; esac
     case "$out" in *'--settings'*) fail "$sh manual main must not need --settings";; esac
     [ "$(cat "$scratch/settings.json")" = "$before" ] || fail "$sh cc-manual changed Claude settings"
+
+    # 2.13.7: one-line commands with no '#', each valid shell; --copy puts one on the clipboard.
+    out=$(run "$sh" 'cc-manual sg')
+    ! printf '%s\n' "$out" | grep -q '^[[:space:]]*#' || fail "$sh cc-manual prints '#' lines: $out"
+    cmds=$(printf '%s\n' "$out" | grep -E '^(ssh |curl |HTTPS_PROXY=|google-chrome|chromium|open |/)')
+    [ "$(printf '%s\n' "$cmds" | wc -l | tr -d ' ')" = 5 ] || fail "$sh expected 5 commands: $out"
+    while IFS= read -r c; do "$sh" -n -c "$c" || fail "$sh not valid shell: $c"; done <<< "$cmds"
+    printf '%s\n' "$cmds" | grep -q -- "--user-data-dir=[^ ]*-sg --host-resolver-rules='MAP \* ~NOTFOUND" || fail "$sh chrome data dir/rules: $cmds"
+    mkdir -p "$scratch/clip"; printf '#!/bin/sh\ncat > "%s"\n' "$scratch/clipboard" > "$scratch/clip/pbcopy"; chmod +x "$scratch/clip/pbcopy"
+    copied=$(PATH="$scratch/clip:$PATH" run "$sh" 'cc-manual sg --copy check')
+    case "$copied" in *'[OK] Copied the check command'*) ;; *) fail "$sh --copy: $copied";; esac
+    [ "$(cat "$scratch/clipboard")" = "$(printf '%s\n' "$cmds" | grep '^curl ')" ] || fail "$sh clipboard: $(cat "$scratch/clipboard")"
+    run "$sh" 'cc-manual --copy bogus' >/dev/null 2>&1 && fail "$sh bad --copy accepted"
     echo "PASS: $sh - merged commands, renamed names, cc-help and cc-manual"
 done
 
