@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=linux
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.2"
+CLAUDE_PROXY_VERSION="2.13.3"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -151,7 +151,7 @@ CLAUDE_WATCHDOG_MAX_BACKOFF=30
 # A freshly started ssh gets this long (its ConnectTimeout 15s + margin) to bring
 # the forwards up before failed checks count as an outage or get it killed.
 CLAUDE_WATCHDOG_STARTUP_GRACE=20
-CLAUDE_DESKTOP_NOTIFICATIONS=auto  # auto or off; never changes CLI input
+CLAUDE_DESKTOP_NOTIFICATIONS=auto  # auto (long outages only), verbose (every drop) or off; never changes CLI input
 CLAUDE_TERMINAL_NOTIFICATIONS=quiet  # quiet, verbose or off; actionable warnings always show
 
 # --- personal overrides ------------------------------------------------------
@@ -798,7 +798,7 @@ _recovery_worker() {
     local dir="$1" me spid='' stamp='' sshat=0 connecting now next=0 delay=2 retries=0 fails=0 provider sample state old event gen prior all_tunnel all_healthy conflict
     local takeover cinfo conflict_seen=''
     local classified=1 sshclass='' lastclass=''
-    local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope
+    local desktop_backend desktop_state='' desktop_event=none desktop_result=not-tested cs xs scope desktop_warned=0 desktop_notice
     # 'exec' is required: with any trap set (TRAPWINCH / trap WINCH from oh-my-zsh,
     # iTerm, p10k ...) zsh forks inside $( ) instead of exec'ing sh, so $PPID was a
     # helper that exits at once - the owner looked dead and every new tab replaced it.
@@ -878,14 +878,17 @@ _recovery_worker() {
         [ -z "$cs$xs" ] || desktop_state=$(_recovery_desktop_step "$desktop_state" "$cs" "$xs" "$now" "${CLAUDE_WATCHDOG_NOTICE_AFTER:-60}")
         case "$takeover:$cs$xs:${desktop_state##*|}" in
             1:*)
-                desktop_event=takeover
+                # The end of a takeover is announced too, as after a long outage.
+                desktop_event=takeover; desktop_warned=1
                 if [ "$desktop_backend" != off ]; then
                     if _recovery_desktop_send "$desktop_backend" takeover "$cinfo"; then desktop_result=submitted; else desktop_result=failed; fi
                 fi;;
             0::*) :;;
             *:lost|*:prolonged|*:restored)
-                desktop_event=${desktop_state##*|}; scope=$(_recovery_desktop_scope "$cs" "$xs")
-                if [ "$desktop_backend" != off ]; then
+                # auto: as the terminal - only an outage past NOTICE_AFTER, then its end.
+                IFS='|' read -r desktop_warned desktop_notice <<< "$(_recovery_desktop_notice "${CLAUDE_DESKTOP_NOTIFICATIONS:-auto}" "$desktop_state" "$desktop_warned")"
+                desktop_event=$desktop_notice; scope=$(_recovery_desktop_scope "$cs" "$xs")
+                if [ "$desktop_backend" != off ] && [ "$desktop_notice" != none ]; then
                     if _recovery_desktop_send "$desktop_backend" "$desktop_event" "$scope"; then desktop_result=submitted
                     else desktop_result=failed; echo '[Notify] Desktop submission unavailable or failed; terminal/status/log fallbacks remain enabled. Try proxy-notify test.'; fi
                 fi;;
@@ -1035,8 +1038,16 @@ _recovery_desktop_scope() {
         *) echo 'Claude and Codex';;
     esac
 }
+# Which outage events reach the desktop: auto = the terminal's quiet rule (an
+# outage past NOTICE_AFTER, then its end; brief drops after sleep or a Wi-Fi
+# change stay silent), verbose = every drop and recovery.
+_recovery_desktop_notice() {  # <mode> <desktop state> <warned 0|1> -> warned|notice
+    local phase="${2%%|*}" event="${2##*|}"
+    if [ "$1" = verbose ]; then printf '%s|%s\n' "$3" "$event"; return; fi
+    _recovery_terminal_step quiet "$phase" "$event" "$3"
+}
 _recovery_desktop_backend() {
-    case "${CLAUDE_DESKTOP_NOTIFICATIONS:-auto}" in off|0) echo off; return;; auto|1) :;; *) echo invalid-setting; return;; esac
+    case "${CLAUDE_DESKTOP_NOTIFICATIONS:-auto}" in off|0) echo off; return;; auto|1|verbose) :;; *) echo invalid-setting; return;; esac
     _platform_desktop_backend
 }
 _recovery_desktop_message() {
@@ -2783,7 +2794,13 @@ _launch_via_proxy() {
         [ -n "$url" ] || identity=$(_recovery_owner_start "$_CLAUDE_LAUNCH_PROVIDER") || return 1
         subscriber=$(_recovery_subscribe "$identity" "$_CLAUDE_LAUNCH_PROVIDER")
         subscriber_stamp=$(_recovery_process_identity "$subscriber") || subscriber_stamp=''
-        [ "$quiet" -eq 1 ] || echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Test visibility with proxy-notify test in another terminal."
+        # Said only when alerts can't be shown; 'proxy-notify' reports the backend.
+        if [ "$quiet" -ne 1 ]; then
+            case "$(_recovery_desktop_backend)" in
+                off|macos|linux) ;;
+                *) echo "[Notify] Desktop alerts: $(_recovery_desktop_backend). Terminal notices still work; see proxy-notify." ;;
+            esac
+        fi
     else
         echo '[Warn] Automatic recovery and live notifications are disabled.' >&2
     fi
@@ -4254,6 +4271,7 @@ EOF
 
   OPTIONS (proxy-config set KEY VALUE)
     TERMINAL_NOTIFICATIONS quiet|verbose|off   quiet (default) hides brief outages
+    DESKTOP_NOTIFICATIONS auto|verbose|off     auto (default) pops up only for long outages
     PROXY_MODE managed|shared   shared: use another account's tunnel on these ports
 EOF
     echo ""
