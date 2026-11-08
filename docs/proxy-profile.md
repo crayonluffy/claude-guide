@@ -1,4 +1,6 @@
-# Proxy — One-Command Setup (profile)
+# Installer details and setup by hand
+
+The [home page](/) has the short version. This page explains what the installer does on each platform, and how to do the same steps by hand.
 
 You install a small shell profile **one time**. After that, one command does all the steps:
 
@@ -20,249 +22,7 @@ You do **not** have to install Node.js, Claude Code or Codex first. The last ste
 
 ---
 
-## Recovery while Claude or Codex is running
-
-All terminals use **one recovery owner for each user** (2.8.0+). The owner writes a record of the tunnel that it runs (the server, user, key and ports). Each terminal uses this record. Thus a window with old settings uses the tunnel that runs. It does not start a second tunnel on the same ports.
-
-**While a `cc` or `cx` session is open:**
-
-- The owner examines the two providers about each five seconds (plus the time of the check).
-- If the SSH process stops, the owner starts it again.
-- After two tunnel failures in sequence, the owner restarts its own SSH process.
-- The owner keeps the same HTTP and SOCKS ports.
-
-**When no session is open,** the owner examines the tunnel one time each minute (`WATCHDOG_IDLE_INTERVAL`). Chrome can still use the tunnel. When `cc` or `cx` starts, the owner examines the tunnel at once.
-
-When SSH stops, the owner reads the cause from the error output of SSH. It tells you the fix in the terminal that started the tunnel, one time in each open session, in `proxy-status`, and in the log:
-
-| Cause | What you see | What to do |
-|---|---|---|
-| `auth` | `SSH login to <server> was refused` | Load your key (`ssh-add <key>`) or examine the user name. Then type `proxy-restart`. The owner tries again only each `WATCHDOG_MAX_BACKOFF` seconds. |
-| `hostkey` | `The host key of <server> changed` | If your admin expected this: type `ssh-keygen -R <server>`, then `ssh <server>` one time. |
-| `forward` | `A tunnel port is held by another program` | Type `proxy-status`. |
-| `network` | `Cannot reach <server>` | You do not have to do anything. The owner continues to try (a changed Wi-Fi, sleep mode, or a server that is down). |
-
-Before `cc` and `cx` start the application, an HTTPS connection through the HTTP proxy must work. `--no-verify` / `-NoVerify` does not skip this check. It skips only the optional check of the external IP address. An API error after a good CONNECT and TLS handshake counts as a working connection. The check does not send API credentials.
-
-If a different program uses a tunnel port, the profile reports a `conflict`. The recovery waits. It does not change the port and it does not stop the other program. If a different program takes a proxy port **while the tunnel is down**, Claude or Codex can send traffic to that program. Thus the owner shows one special alert in each open session, in the log, and on the desktop: `Another program (<name>, PID <pid>) took proxy port <port> while the tunnel was down ... exit this session now; nothing was stopped.` The owner does not stop that program. When the port is free, the recovery continues automatically.
-
-Terminal notices default to `quiet`: brief outages produce no messages inside
-Claude or Codex. After 60 seconds (`WATCHDOG_NOTICE_AFTER`), each affected
-terminal shows one warning. It shows one recovery message when connectivity
-returns, and no periodic progress messages. The owner keeps retrying and logs
-every event throughout. Desktop alerts are configured separately.
-
-Use `proxy-config set TERMINAL_NOTIFICATIONS off` to suppress routine terminal
-notices entirely, or `verbose` for immediate lost/restored and periodic progress
-messages. `quiet` restores the default. Authentication, host-key and port-takeover
-warnings remain visible in every mode. Reload the profile and relaunch the CLI
-to use the new subscriber policy; no proxy restart is needed. Applications that
-are already running retain their existing notifier until they exit normally.
-
-The owner does not close the application, send input to it, or change its proxy
-settings. You can stop the application in the usual way and continue later. The
-recovery does not make sure that the application sends a failed request again.
-If necessary, send the request again. If you start an application by hand after
-`proxy-up`, recovery works, but that session does not get terminal warnings.
-
-To see the two possible results without a real outage:
-
-```sh
-proxy-test recover --fast
-proxy-test prolonged --fast
-```
-
-PowerShell also accepts `-Fast`. Each line shows `[SIMULATION]`. 60 simulated seconds take six real seconds. The demonstration uses only data in memory. It does not touch the real SSH, an application, the settings, or the files of the owner. `Ctrl+C` stops it without an effect on real sessions. Without `--fast`, the demonstration uses the normal times.
-
-`proxy-status` shows the status of each provider, the duration of an outage, and the number of tries. It also shows the ports, the sessions, and the locations of the logs. Bash also writes events to `CLAUDE_TUNNEL_LOG`. PowerShell writes `events.log` in its recovery folder, and the SSH errors in `ssh.err`. These records stay available if the application covers a warning on the screen. The recovery state is private. It is in `${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery/main` (Bash) and `$HOME/.claude-proxy/recovery/main` (PowerShell). The folder contains the tunnel record, the last SSH errors (`ssh.err`) and one entry for each open session.
-
-| Setting (PowerShell) | Bash setting | Default |
-|---|---|---|
-| `TUNNEL_WATCHDOG` | `CLAUDE_TUNNEL_WATCHDOG` | `1` (on) |
-| `WATCHDOG_INTERVAL` | `CLAUDE_WATCHDOG_INTERVAL` | `5` seconds |
-| `WATCHDOG_IDLE_INTERVAL` | `CLAUDE_WATCHDOG_IDLE_INTERVAL` | `60` seconds while no `cc` or `cx` session is open |
-| `WATCHDOG_FAILS` | `CLAUDE_WATCHDOG_FAILS` | `2` checks |
-| `WATCHDOG_NOTICE_AFTER` | `CLAUDE_WATCHDOG_NOTICE_AFTER` | `60` seconds |
-| `TERMINAL_NOTIFICATIONS` | `CLAUDE_TERMINAL_NOTIFICATIONS` | `quiet`: prolonged warning once, then recovery once; `verbose` or `off` are also available |
-| `WATCHDOG_PROBE_TIMEOUT` | `CLAUDE_WATCHDOG_PROBE_TIMEOUT` | `3` seconds for each check |
-| `WATCHDOG_PROGRESS_INTERVAL` | `CLAUDE_WATCHDOG_PROGRESS_INTERVAL` | `30` seconds in logs and verbose terminal mode |
-| `WATCHDOG_MAX_BACKOFF` | `CLAUDE_WATCHDOG_MAX_BACKOFF` | `30` seconds |
-| `WATCHDOG_STARTUP_GRACE` | `CLAUDE_WATCHDOG_STARTUP_GRACE` | `20` seconds. A new SSH connection gets this time before failed checks count. |
-
-- To change a setting, use `proxy-config`. Your old values for intervals and failure counts stay.
-- The time between tries starts at two seconds and doubles until it gets to the maximum.
-- If the recovery is off, `cc` and `cx` tell you at the start.
-- The background SSH uses `BatchMode=yes`. Load keys that have a passphrase into your SSH agent first.
-- The next `cc`, `cx` or `tunnel-start` replaces a tunnel from an older profile automatically, on the same ports. Open sessions connect again in a few seconds. The profile does not touch a program on the ports that is not SSH.
-- Bash makes sure that the old watchdog is the parent of the tunnel SSH before it stops it. If this is not possible, stop the watchdog from the old shell and try again.
-- `tunnel-stop` stops the owner from each terminal. After that, the tunnel stays stopped.
-- A restart keeps the proxy settings and the Claude settings.
-
-Bash uses `/proc/uptime` on Linux, or `osascript` and the system uptime on macOS. PowerShell uses the .NET Stopwatch to measure time. The tests include Bash, zsh and PowerShell 7 on Linux with simulated SSH and connections, and an end-to-end run with a real SSH server (`tests/e2e/run.sh`). Windows PowerShell 5.1 with OpenSSH, and the macOS console, still need manual tests.
-
-## Kill switch (2.9.0+)
-
-The kill switch keeps Claude and Codex from connecting directly. When the tunnel is down, they cannot connect. They do not use your own IP address. The kill switch is on by default.
-
-What the kill switch does:
-
-1. It keeps the proxy in Claude's `~/.claude/settings.json`. `proxy-off` and `cc-stop` remove the proxy from your terminal only. Claude reads its settings file before your terminal, so plain `claude` and the IDE extensions use the tunnel. If the tunnel is down, they show "connection refused".
-2. It examines each `cc` and `cx` before the start. It stops the start and tells you the fix if:
-   - `NO_PROXY` sends an API host directly (for example `*` or `*.com`).
-   - Another program uses the proxy port.
-   - The profile cannot write the proxy into Claude's settings file.
-3. It does not move the tunnel to a different port. If another program uses the proxy port, `tunnel-start` stops and tells you the program and the fix.
-
-Plain `codex` reads only the proxy in your terminal. To protect it, type `proxy-config set PLAIN_COMMANDS auto`. Then plain `claude` and `codex` start through the tunnel, the same as `cc --safe` and `cx --safe`. Only the application writes to the output, so `claude -p "..." | jq` continues to work.
-
-| Command | What it does |
-|---|---|
-| `proxy-config killswitch` | Shows the status: Claude settings, Codex, `NO_PROXY`. |
-| `proxy-config killswitch on` | Sets the kill switch on and writes the proxy into Claude's settings. |
-| `proxy-config killswitch off` | Sets the kill switch off. This is the behavior before 2.9.0. |
-
-The kill switch does not protect the Claude Desktop app, web browsers, or other applications. `chrome-proxy` has its own rules. The kill switch is not a firewall: a program that ignores proxy settings can still connect directly.
-
-| Setting (PowerShell) | Bash setting | Default |
-|---|---|---|
-| `KILLSWITCH` | `CLAUDE_KILLSWITCH` | `on` (all values other than `off` mean on) |
-| `PLAIN_COMMANDS` | `CLAUDE_PLAIN_COMMANDS` | `off`. The setup wizard asks. |
-
-## Desktop alerts while the CLI owns the terminal
-
-From PowerShell 2.6.0 and Bash 2.7.0, the profile shows desktop alerts. Thus a Codex or Claude screen cannot hide the only warning. One shared tunnel owner sends the alerts. More `cc` or `cx` tabs do not make more alerts.
-
-Since 2.13.3 the desktop alerts are quiet by default (`DESKTOP_NOTIFICATIONS = auto`), as the terminal is. A brief drop, for example after the Mac wakes up or the Wi-Fi changes, shows **no** alert: the owner reconnects by itself. Only a long outage alerts you, once, and then its end:
-
-| Condition | Alert | What to do |
-|---|---|---|
-| The tunnel is still down after the limit (default 60 seconds, `WATCHDOG_NOTICE_AFTER`) | **Proxy still unavailable**: the owner continues to try | Wait, or stop the application in the usual way. |
-| It works again after that long outage | **Proxy connection restored**: send a failed request again if necessary | Continue your work. |
-| Another program takes the proxy port | **Proxy port taken** (always shown, at once), then **restored** when the tunnel has its port back | Exit the Claude/Codex sessions. |
-
-`DESKTOP_NOTIFICATIONS = verbose` brings back the alert for every drop (**Proxy connection lost**) and every recovery. `off` stops the desktop alerts; the terminal still warns about a long outage.
-
-The owner collects the Claude and Codex failures into one desktop outage. If only one provider works again, there is no "restored" alert. The outage timer does not start again, and the long-outage warning does not show again. The progress of the tries shows only in the terminal and the log. It does not make a desktop alert at each check. An alert does not take the focus, does not open a dialog, does not send keys, and does not stop a session.
-
-| Platform | Desktop alert | Availability |
-|---|---|---|
-| Windows PowerShell / pwsh | A Windows taskbar notification with a tray icon: a warning while the owner connects, information after the restore | Uses .NET WinForms. You do not need the BurntToast module. The icon shows after the first alert and goes away when its owner stops. |
-| macOS Bash / zsh | A Notification Center banner through `osascript` | The notification permissions and the Focus settings of the user apply. |
-| Linux Bash | A desktop notification through `notify-send` | Needs the libnotify client, a session D-Bus and a notification service. |
-| Headless SSH / WSL without a desktop notification service | Terminal warnings, status and logs | Cannot show an alert on the computer only because it opened the SSH connection. On Windows, use the Windows profile for desktop alerts. |
-
-Windows uses the [NotifyIcon taskbar notification API](https://learn.microsoft.com/en-us/dotnet/api/system.windows.forms.notifyicon.showballoontip). macOS uses the [scripted Notification Center interface](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/DisplayNotifications.html) of Apple. Linux uses the [desktop notification service model](https://specifications.freedesktop.org/notification/latest-single/).
-
-- The accessibility settings and the notification settings of Windows control if and how long an alert shows.
-- Focus and Do Not Disturb can hide alerts.
-- "Submitted" means that the operating system accepted the alert. It does not mean that you saw it.
-- The tray icon is only an addition. Windows can hide it in the overflow area.
-
-### Check visibility while `cx` is running
-
-1. Keep `cx` open in one terminal.
-2. In a second terminal with the new profile, type:
-
-   ```sh
-   proxy-notify status
-   proxy-notify test
-   ```
-
-3. Make sure that you can see the alert while Codex stays open.
-
-`test` sends one **[TEST]** desktop alert. It does not touch SSH, the network settings or the application. On Windows, it keeps its test tray icon for ten seconds, then removes it. If you do not see the alert, examine the notification permissions, Do Not Disturb, and if the shell has a desktop session. `status` shows the selected adapter and the last result of the owner. The selected adapter alone does not show that a notification service is available.
-
-To see the three alerts without a real outage:
-
-```sh
-proxy-test prolonged --fast --desktop
-```
-
-PowerShell also accepts `-Fast -Desktop`. These alerts show **[SIMULATION]**. This command sends real desktop alerts, but all proxy, network and session actions are simulated. Windows waits ten more seconds for the last alert before it removes the test icon. `Ctrl+C` stops only the notifier of the demonstration. Without `--desktop`, the simulation sends no desktop alerts and does not touch the owner.
-
-### Settings and updating an existing owner
-
-Desktop alerts are `auto` (long outages only) by default. `verbose` shows every drop and recovery. To set them off:
-
-```powershell
-proxy-config set DESKTOP_NOTIFICATIONS off
-```
-
-```bash
-proxy-config set DESKTOP_NOTIFICATIONS off
-```
-
-Bash saves this as `CLAUDE_DESKTOP_NOTIFICATIONS=off`. PowerShell saves `DESKTOP_NOTIFICATIONS = 'off'`. To set them on again, use `auto`. Then load the profile again and type `proxy-restart` one time, so that a running owner uses the new setting. This keeps the proxy settings and keeps the sessions open, but you possibly must send requests again. The terminal warnings and the logs stay on when the desktop alerts are off or fail.
-
-The automated tests examine the alert sequence, the command arguments, failed alerts, the cleanup of the notifier, and the isolation of the demonstration. The real display on Windows and macOS, and the Windows tray icon, need the manual check above.
-
-## Two accounts on one Mac: shared mode (2.13.0+)
-
-Two macOS accounts cannot both run a tunnel on the same ports. If one account (for example `Kimmy`) already runs the tunnel on HTTP `8080` / SOCKS `1080`, the second account (for example `Ming`) can use it:
-
-```bash
-proxy-config set PROXY_MODE shared   # in the second account only
-cc                                    # uses 127.0.0.1:8080 from the first account
-```
-
-- In shared mode the profile **never starts, stops or restarts** a tunnel. It checks that the configured ports answer through HTTPS, then starts Claude or Codex. The kill switch and `NO_PROXY` checks still apply.
-- `cc-stop` only clears the proxy in this terminal. `proxy-restart` and `proxy-nodes use` refuse and tell you that the owning account controls the tunnel.
-- `cc --node sg` works if the owning account has the tunnel of `sg` running.
-- Use shared mode only with an account you trust: Claude and Codex send their traffic through whatever program listens on these ports.
-- `proxy-config set PROXY_MODE managed` returns to the normal behavior.
-
-## The commands you get
-
-You only need these eight. `cc` already starts the tunnel, sets the proxy, checks the connection and repairs an old tunnel, so you do not run those steps yourself. `cc-help` shows this list with your current mode, node, ports and tunnel state; `cc-help all` also shows the rest.
-
-| Command | What it does |
-|---------|--------------|
-| `cc` | Proxy ON, then starts **Claude** (`--dangerously-skip-permissions`). It repairs the tunnel: it stops an old `ssh` and starts a new one. If a different program uses the port, `cc` stops and tells you the fix (kill switch on). With the kill switch off, it uses the next free port. Arguments go to `claude`: `cc -c` continues the last session, `cc -r` shows a list, `cc --resume <id>`, `cc "fix the tests"`. |
-| `cx` | The same for **Codex** (no approval prompts). Arguments go to Codex: `cx resume`. |
-| `cc --safe` / `cx --safe` | Keeps the app's own permission / approval prompts. |
-| `cc --node sg` / `cx --node sg` | Starts Claude or Codex through node `sg` in **this terminal only**. The node has its own self-healing tunnel on fixed ports. Other terminals and the default node do not change. |
-| `cc-stop` | Proxy OFF for `cc` and `cx`, for all nodes. It stops each tunnel (other programs stay) and tells you the result. It refuses while Claude or Codex runs in a different window (they use the same tunnel). Use `proxy-restart`, or `cc-stop --force`. `cc-stop sg` stops only node `sg`. |
-| `proxy-status` | Shows what runs and its ports. `--debug` (`-Debug` on Windows) adds recovery details. |
-| `proxy-status --fix` | Examines each part (tunnel, ports, proxy settings, Claude settings, kill switch, API connection) and tells you each problem and its fix. |
-| `proxy-restart` | Replaces the tunnel for **all** terminal windows if it does not work. It does not change the proxy settings or `settings.json`, so Claude and Codex in other tabs continue. `proxy-restart sg` replaces only node `sg`. |
-| `proxy-nodes` | Shows the nodes (JP / JP2 / SG / US …) and the active node. `--refresh` (`-Refresh`) gets the catalogue again and makes the `ssh` aliases. `proxy-nodes use sg` makes `sg` the default for `cc` / `cx` (it refuses while a session uses the default node; `--force`). `--from jpvpn` (`-From`) gets the list privately from one of your VMs over SSH (`--domain` / `-Domain`: public DNS). Refer to [Nodes](proxy-nodes.md). |
-| `chrome-proxy` | Opens Chrome through the SOCKS5 proxy (a separate profile; it starts the tunnel if necessary). `chrome-proxy sg` uses node `sg` on its **own** tunnel and profile, so more regions can be open at the same time. `chrome-proxy sg https://…` also opens a URL. `--profile work` (`-Profile`) picks a different Chrome profile; `--list` shows the existing ones. |
-| `proxy-config` | Shows settings. `edit` includes editable ports and every active node's port snapshot; `use-active` saves the main tunnel's running ports; `set SSH_HOST myvm` saves one value; `killswitch [on\|off]` shows or changes the [kill switch](#kill-switch-290). |
-| `cc-manual` | **Manual fallback.** Prints, without running anything, the exact `ssh` tunnel command, a `curl` check, and `claude` / `codex` commands with `HTTPS_PROXY` set, so you can do everything by hand if the profile misbehaves. `cc-manual sg` prints them for node `sg` (including the `--settings` override Claude needs for a node). |
-
-### Maintenance and low-level commands
-
-These still work and are listed by `cc-help all`; you rarely need them.
-
-| Command | What it does |
-|---------|--------------|
-| `proxy-update` | Downloads the newest profile from this guide and installs it. **Your settings stay.** `proxy-update --check` (`-Check` on Windows) only tells you if a newer profile is available. `proxy-update --version 2.13.3` (`-Version` on Windows) installs that release, also an older one. |
-| `cc-install` | Examines **Node.js**, **Claude Code** and **Codex**. It installs or updates the missing or old ones (it asks first; the downloads go through the proxy). `cc-install --check` (`-Check`) only reports. `cc-install claude` does only that tool. `-y` answers yes. The setup wizard runs it as its last step. |
-| `proxy-up` | Proxy ON (tunnel, proxy settings, IP check), but it does not start an application. |
-| `tunnel-start` / `tunnel-stop` | Starts or stops only the SSH tunnel of the default node. `tunnel-start sg` / `tunnel-stop sg` do this for node `sg` only. |
-| `proxy-on` / `proxy-off` | Sets or clears the proxy settings in the terminal. With the kill switch on, `~/.claude/settings.json` keeps the proxy. |
-| `proxy-notify status` / `proxy-notify test` | Shows if desktop alerts are available / sends one real test alert. It does not change the proxy. |
-| `proxy-test prolonged --fast --desktop` | Shows the desktop alerts of an outage and a restore, with simulated network actions. |
-
-### Renamed commands
-
-The old names still work in this release and print the new name.
-
-| Old | New |
-|-----|-----|
-| `cc-safe`, `cx-safe` | `cc --safe`, `cx --safe` |
-| `cx-stop` | `cc-stop` |
-| `proxy-doctor` | `proxy-status --fix` |
-| `proxy-node sg` | `proxy-nodes use sg` |
-| `chrome-profiles` | `chrome-proxy --list` |
-| `proxy-killswitch` | `proxy-config killswitch` |
-| `bridge-start`, `bridge-stop` | Removed (they did nothing since the VM runs the HTTP proxy). |
-
-> **Codex note:** Codex reads the standard `HTTP(S)_PROXY` settings of the terminal, so it uses the same tunnel. It does not read a settings file. Plain `codex` uses the tunnel only with `PLAIN_COMMANDS=auto`. Claude also gets the proxy in `settings.json`, so plain `claude` uses the tunnel from all shells.
-
----
-
-## 🪟 Windows
+## Windows
 
 ### Step 1 — Put your SSH key in Downloads
 
@@ -279,13 +39,14 @@ irm https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts/setu
 The wizard asks for your server, user and alias. Then it:
 
 - installs and locks the key,
+- keeps an existing different key of the same name in `~/.ssh`, and installs yours as `<name>-claude-proxy`,
 - writes the `~/.ssh/config` alias (then `ssh jpvpn` works),
 - saves your settings in `~\.claude-proxy.conf.psd1`, with the kill switch on,
 - asks if plain `claude` and `codex` must also start through the proxy,
 - installs the `cc`/`cx` profile,
 - tests the connection.
 
-If you already did the setup, run the same command again. It finds your settings and asks **"Keep these settings and only update the cc/cx profile?"**. Push Enter. You get the newest profile and you do not type anything again.
+If you already did the setup, run the same command again. It finds your settings and asks **"Keep these settings and only update the cc/cx profile?"**. Press Enter. You get the newest profile and you do not type anything again.
 
 > **Where the files go:** the profile goes to **`~\.claude-proxy.ps1`** (your home folder), and your settings go to `~\.claude-proxy.conf.psd1`. `$PROFILE` (in Documents) gets only **one loader line**. The other content of `$PROFILE` stays.
 >
@@ -308,7 +69,7 @@ The tunnel works. **Next: [install Claude Code](install-claude.md)** (and, if yo
 
 ---
 
-## 🍎 macOS / 🐧 Linux
+## macOS and Linux
 
 These steps are for **zsh** (the macOS default) or **bash** (most Linux and WSL systems).
 
@@ -328,13 +89,14 @@ The wizard asks for your server, user and alias. Then it:
 
 - installs `jq` and `lsof` (the tools that the profile needs),
 - installs and locks the key (and adds it to the macOS Keychain),
+- keeps an existing different key of the same name in `~/.ssh`, and installs yours as `<name>-claude-proxy`,
 - writes the `~/.ssh/config` alias (then `ssh jpvpn` works),
 - saves your settings in `~/.claude-proxy.conf`, with the kill switch on,
 - asks if plain `claude` and `codex` must also start through the proxy,
 - adds the `cc`/`cx` profile to your shell startup file,
 - tests the connection.
 
-If you already did the setup, run the same command again. It finds your settings and asks **"Keep these settings and only update the cc/cx profile?"**. Push Enter. You get the newest profile and you do not type anything again. (To skip that question too, add `--update`: `bash <(curl -fsSL …/setup.sh) --update`.)
+If you already did the setup, run the same command again. It finds your settings and asks **"Keep these settings and only update the cc/cx profile?"**. Press Enter. You get the newest profile and you do not type anything again. (To skip that question too, add `--update`: `bash <(curl -fsSL …/setup.sh) --update`.)
 
 **✅ Check:** the wizard ends with `[OK] SSH connection works.` and `Done!`.
 
@@ -351,11 +113,11 @@ cc-stop   # proxy OFF (both)
 
 **✅ Check:** `proxy-up`, `cc` and `cx` show your external IP address. It must be the IP address of the **VM**, not your own. If something is not correct, type `proxy-status --fix`.
 
-The tunnel works. **Next: [install Claude Code](install-claude.md)** (and, if you want, [Codex](install-codex.md)). Their sign-in goes through this proxy, so keep it up. To set up the proxy **by hand**, refer to [Set up by hand — macOS / Linux](#set-up-by-hand--macos--linux) below.
+The tunnel works. **Next: [install Claude Code](install-claude.md)** (and, if you want, [Codex](install-codex.md)). Their sign-in goes through this proxy, so keep it up. To set up the proxy **by hand**, refer to [Set up by hand — macOS / Linux](#set-up-by-hand--macos-and-linux) below.
 
 ---
 
-## 🐧 WSL (Windows Subsystem for Linux)
+## WSL (Windows Subsystem for Linux)
 
 If you work in **WSL** (Ubuntu) on Windows, do the **macOS / Linux** steps above *in the WSL terminal*. (WSL is the recommended way to run Codex on Windows.) You do not have to install anything on the Windows side. The differences are:
 
@@ -366,19 +128,6 @@ If you work in **WSL** (Ubuntu) on Windows, do the **macOS / Linux** steps above
 - **Claude on Windows too:** Windows can use the tunnel at `http://127.0.0.1:8080`. Thus Claude Code in *Windows* PowerShell can also use it. Type `proxy-config set SYNC_WINDOWS_SETTINGS 1`. Then the profile also writes the proxy into the Windows `%USERPROFILE%\.claude\settings.json`, the same as for WSL. With the kill switch on, the profile keeps it there. This needs the default `localhostForwarding` of WSL2. `proxy-status --fix` shows if this setting is on.
 
 All other commands (`cc -c`, `proxy-update`, `proxy-config`, `proxy-status --fix`) are the same as on Linux.
-
----
-
-## 🔄 Updating the profile later
-
-The profile contains **no personal settings**. They are in your settings file. Thus one command updates the profile, on all operating systems:
-
-```bash
-proxy-update            # download and install the newest profile; your settings stay
-proxy-update --check    # only tell me if a newer profile is available   (Windows: proxy-update -Check)
-```
-
-Then open a new terminal (or type `source ~/.claude-proxy.sh` / `. "$HOME\.claude-proxy.ps1"`). The setup wizard does the same and also offers to keep your settings. If your profile is older than 2.0 and has no `proxy-update`, run the wizard one time. It reads the settings from the old profile. On Windows, it also moves the profile from `$PROFILE` to `~\.claude-proxy.ps1` and leaves a loader line. Thus a locked Documents folder does not block later updates.
 
 ---
 
@@ -466,28 +215,7 @@ Add-Content -Path $PROFILE -Value 'if (Test-Path "$HOME\.claude-proxy.ps1") { . 
 
 > **`Access denied` in step 4, or `running scripts is disabled` in step 5?** Documents is locked, or a group policy blocks scripts. (Documents: Defender **Controlled folder access**, at Windows Security → Virus & threat protection → Ransomware protection → *Allow an app through Controlled folder access* → add PowerShell; or OneDrive or a company policy.) You do not need step 4. Skip it and type **`proxy-shortcut`** one time after step 5. If step 5 is also blocked, first type `Invoke-Expression (Get-Content -Raw "$HOME\.claude-proxy.ps1")`. No policy stops this command. `proxy-shortcut` puts a **"Claude Proxy Shell"** shortcut on your Desktop. It opens PowerShell with `cc` and `cx`.
 
-The profile reads the connection from your `jpvpn` alias (step 1). Thus the settings file only points to it. You do not type the key, user or host again. The table shows all the keys of the settings file. A key that you do not write keeps its default value. `proxy-config` shows the current values. `proxy-config set KEY VALUE` changes one value.
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `SSH_HOST` | `'jpvpn'` | The alias from step 1, or a host name or IP address. |
-| `SSH_USER` / `SSH_KEY` | `''` | Only when `SSH_HOST` is a host, not an alias. |
-| `SSH_PORT` | `22` | |
-| `HTTP_PORT` | `8080` | The local HTTP port. The tunnel forwards it to the VM proxy (Claude and Codex). |
-| `REMOTE_PROXY_PORT` | `8888` | The tinyproxy port on the VM (webproxy-manager). |
-| `SOCKS_PORT` | `1080` | The local SOCKS5 port (Chrome and other applications). |
-| `NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (`cc --node <node>`). Refer to [Nodes](proxy-nodes.md). |
-| `NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
-| `NODES_FROM` | `''` | The VM that gives the node list over SSH (`proxy-nodes -From` sets it). Refer to [Nodes](proxy-nodes.md). |
-| `PROXY_DOMAIN` | `''` | Get the node list from the public DNS of this domain (`proxy-nodes -Domain` sets it). |
-| `CHROME_EXE` | `''` | Set it only if `chrome.exe` is not in Program Files or `%LOCALAPPDATA%`. |
-| `CHROME_BYPASS` | `'on'` | `on`: `chrome-proxy` reaches the `NO_PROXY` hosts (your local network) directly. `off`: everything goes through the proxy. |
-| `TELEMETRY` | `'on'` | `off`: `cc` runs Claude with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no telemetry, error reports or auto-update). |
-| `SYNC_SETTINGS` | `1` | Also write the proxy into `~/.claude/settings.json`. `0` stops this. |
-| `KILLSWITCH` | `'on'` | Claude and Codex cannot connect directly. Refer to [Kill switch](#kill-switch-290). |
-| `PLAIN_COMMANDS` | `'off'` | `'auto'`: plain `claude` and `codex` also start through the tunnel. |
-| `NO_PROXY_EXTRA` | `''` | Company intranet ranges or domains that do not use the proxy, for example `'172.20.0.0/24,*.mycorp.example'`. Do not add an API host. |
-| `BANNER` | `1` | One line when a new window opens. `0` stops it. |
+The settings file only needs to point at your alias. All keys and their defaults: [Settings](settings.md).
 
 📄 The full profile is in the repository: [`scripts/claude-proxy.ps1`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.ps1). The download command above gets this file.
 
@@ -505,7 +233,7 @@ Then use `cc` and `cx` as usual.
 
 ---
 
-## Set up by hand — macOS / Linux
+## Set up by hand — macOS and Linux
 
 ### Step 1 — Install your SSH key + alias
 
@@ -584,30 +312,7 @@ source ~/.zshrc      # or: source ~/.bashrc
 
 📄 The full script is in the repository: [`scripts/claude-proxy.sh`](https://github.com/crayonluffy/claude-guide/blob/main/scripts/claude-proxy.sh). The `curl` command above downloads this file. It works in **zsh and bash**.
 
-The table shows all the keys of the settings file. A key that you do not write keeps its default value. `proxy-config` shows the current values. `proxy-config set KEY VALUE` changes one value. `proxy-config edit` opens the file.
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `CLAUDE_SSH_HOST` | `"jpvpn"` | The alias from step 1, or a host name or IP address. |
-| `CLAUDE_SSH_USER` / `CLAUDE_SSH_KEY` | `""` | Only when `CLAUDE_SSH_HOST` is a host, not an alias. |
-| `CLAUDE_SSH_PORT` | `22` | |
-| `CLAUDE_HTTP_PORT` | `8080` | The local HTTP port. The tunnel forwards it to the VM proxy (Claude and Codex). |
-| `CLAUDE_REMOTE_PROXY_PORT` | `8888` | The tinyproxy port on the VM (webproxy-manager). |
-| `CLAUDE_SOCKS_PORT` | `1080` | The local SOCKS5 port (Chrome and other applications). |
-| `CLAUDE_NODE_HTTP_BASE` | `8180` | The first HTTP port for the node tunnels (`cc --node <node>`). Refer to [Nodes](proxy-nodes.md). |
-| `CLAUDE_NODE_SOCKS_BASE` | `1180` | The first SOCKS port for the node tunnels (`chrome-proxy <node>`). Refer to [Nodes](proxy-nodes.md). |
-| `CLAUDE_NODES_FROM` | `""` | The VM that gives the node list over SSH (`proxy-nodes --from` sets it). Refer to [Nodes](proxy-nodes.md). |
-| `CLAUDE_PROXY_DOMAIN` | `""` | Get the node list from the public DNS of this domain (`proxy-nodes --domain` sets it). |
-| `CLAUDE_CHROME_BIN` | `""` | Set it only if Chrome is not in the usual location (macOS: the application name or path; WSL: `/mnt/c/.../chrome.exe`). |
-| `CLAUDE_CHROME_TZ` | `auto` | The time zone of `chrome-proxy`: `auto` (the proxy exit IP's), a zone such as `Asia/Tokyo`, or `off`. Windows Chrome (also from WSL) follows Windows. |
-| `CLAUDE_CHROME_BYPASS` | `on` | `on`: `chrome-proxy` reaches the `NO_PROXY` hosts (your local network) directly. `off`: everything goes through the proxy. |
-| `CLAUDE_TELEMETRY` | `on` | `off`: `cc` runs Claude with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` (no telemetry, error reports or auto-update). |
-| `CLAUDE_SYNC_SETTINGS` | `1` | Also write the proxy into `~/.claude/settings.json` (needs `jq`). `0` stops this. |
-| `CLAUDE_SYNC_WINDOWS_SETTINGS` | `0` | **WSL only:** `1` also writes the proxy into the settings of Claude on *Windows* (`%USERPROFILE%\.claude\settings.json`). Refer to [WSL](#-wsl-windows-subsystem-for-linux). |
-| `CLAUDE_KILLSWITCH` | `on` | Claude and Codex cannot connect directly. Refer to [Kill switch](#kill-switch-290). |
-| `CLAUDE_PLAIN_COMMANDS` | `off` | `auto`: plain `claude` and `codex` also start through the tunnel. |
-| `CLAUDE_NO_PROXY` | private ranges, `*.local`, … | The hosts that do not use the proxy. To add more: `CLAUDE_NO_PROXY="$CLAUDE_NO_PROXY,172.20.0.0/24,*.mycorp.example"`. Do not add an API host. |
-| `CLAUDE_PROXY_BANNER` | `1` | One line when a new shell opens. `0` stops it. |
+All keys and their defaults: [Settings](settings.md).
 
 ### Step 3 — First connection
 
@@ -621,130 +326,24 @@ Type `yes` when SSH asks, then exit. Now use `cc` and `cx` as usual.
 
 ---
 
-## 🔁 Changing your server or user later
-
-Your `jpvpn` alias is in `~/.ssh/config`. Thus `ssh jpvpn`, `cc` and `cx` need no key path, user or host. The setup made the alias. If your server IP address or user changes, edit that file. Or run the wizard again, answer **n** to "keep these settings", push Enter for the values that stay, and type only the values that changed.
-
-```
-Host jpvpn
-    HostName <your-host-or-ip>
-    User <your-ssh-user>
-    IdentityFile ~/.ssh/<your-key>
-    AddKeysToAgent yes
-    UseKeychain yes      # macOS only
-```
-
-On all platforms, `proxy-config edit` shows editable HTTP, SOCKS, remote proxy
-and SSH ports, plus node HTTP/SOCKS base ports. Its header lists every running
-node owner's server and HTTP/SOCKS/remote ports, including nodes opened with
-`cc --node`, `cx --node` or `chrome-proxy`. That table is informational; check
-connection health with `proxy-status`.
-
-Edit `CLAUDE_HTTP_PORT` / `CLAUDE_SOCKS_PORT` for the main tunnel. Other nodes
-use `CLAUDE_NODE_HTTP_BASE` / `CLAUDE_NODE_SOCKS_BASE` plus their catalogue slot.
-Changing a node base affects subsequent starts of all non-default nodes;
-restart each affected node explicitly with `proxy-restart <node>` when ready.
-
-```bash
-proxy-config use-active          # save the main tunnel's running ports
-proxy-config set HTTP_PORT 8090  # save another port
-proxy-restart                   # reconnect main tunnel using saved settings
-```
-
-`edit` and `set` save without restarting tunnels. A restart on unchanged ports
-briefly reconnects sessions; `proxy-restart sg` affects only sg. If local ports
-change, relaunch affected Claude/Codex/Chrome instances because they retain the
-old proxy URLs. In other shells, source `~/.claude-proxy.sh` before relaunching.
-Conflicts with another active node are rejected before any tunnel is stopped.
-A new terminal keeps adopting a running owner's ports until that owner is
-restarted. Failed editors or invalid ports leave the saved file unchanged.
-
-To use another alias, save `proxy-config set SSH_HOST other-vm` and run
-`proxy-restart`. If your admin publishes more nodes, `proxy-nodes use sg` changes
-the default for you. Refer to **[Nodes](proxy-nodes.md)**.
-
-On Windows, the equivalent keys are `HTTP_PORT`, `SOCKS_PORT`,
-`REMOTE_PROXY_PORT`, `SSH_PORT`, `NODE_HTTP_BASE` and `NODE_SOCKS_BASE` in
-`~\.claude-proxy.conf.psd1`, without the `CLAUDE_` prefix. The same commands
-`proxy-config edit`, `proxy-config set HTTP_PORT 8090` and
-`proxy-config use-active` work in PowerShell. Restart a specific node with
-`proxy-restart -Node sg`; use `proxy-status -Debug` for recovery details.
-Notepad edits a temporary copy and the profile validates it before replacing
-the saved file. If another window saves first, reopen the editor to include
-that change. Configuration files and their comments remain in the native
-format for each platform.
-
----
-
-## 🌐 (Optional) Browse through the proxy
-
-With the profile installed, type **`chrome-proxy`**. It opens a **separate** Chrome through the **SOCKS5** proxy on `127.0.0.1:1080`. Your normal browser does not change. `chrome-proxy` starts the tunnel if necessary. It uses a separate `--user-data-dir` (separate logins, cookies and history). It sends the DNS lookups through the tunnel (no DNS leaks). In WSL, it starts **Windows** Chrome.
-
-It also guards against the usual browser leaks (2.13.2):
-
-- **WebRTC** never sends UDP directly, so sites cannot see your real public IP or your local addresses. Video calls still work where the service can relay over TCP.
-- **QUIC / HTTP/3** is off, so no UDP traffic goes around the proxy.
-- **Your local network stays reachable.** Hosts in `NO_PROXY` (private ranges, `*.local`, any `*.mycorp.example` you add) go direct, and their names resolve on your network. Set `CHROME_BYPASS` to `off` to send them through the proxy too. A short name without a dot (`http://nas/`) cannot resolve; use its IP or full name.
-- **Time zone** (macOS, Linux): Chrome uses the time zone of the proxy's exit IP, so the clock matches the IP. `CHROME_TZ` sets a fixed zone (`Asia/Tokyo`) or `off`. Windows Chrome follows the Windows time zone.
-- **`chrome-proxy --check`** opens leak tests (IP, WebRTC, DNS, time zone) and prints what a pass looks like.
-
-A Chrome window that was already open for that node keeps the flags it started with. Quit it, then run `chrome-proxy` again.
-
-- **More regions at the same time:** `chrome-proxy jp`, `chrome-proxy sg`, … each open a Chrome through that node, on its own tunnel and data folder.
-- **More accounts on the same node:** `chrome-proxy jp --profile work`. Refer to **[Nodes](proxy-nodes.md)**.
-
-Without the profile, use these commands. The **tunnel must be up** first (`proxy-up`, or the manual step 1 `ssh` command, which gives the `-D 1080` SOCKS forward):
-
-**🪟 Windows (PowerShell)**
-
-```powershell
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" `
-    --proxy-server="socks5://127.0.0.1:1080" `
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" `
-    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" `
-    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic `
-    --user-data-dir="C:\ChromeVPNProfile" --no-first-run
-```
-
-**🍎 macOS**
-
-```bash
-open -n --env TZ=Asia/Tokyo -a "Google Chrome" --args \
-    --proxy-server="socks5://127.0.0.1:1080" \
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" \
-    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" \
-    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic \
-    --user-data-dir="$HOME/.chrome-proxy-profile" --no-first-run
-```
-
-**🐧 Linux** (if you do not have `google-chrome`, use `chromium`)
-
-```bash
-TZ=Asia/Tokyo google-chrome \
-    --proxy-server="socks5://127.0.0.1:1080" \
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" \
-    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" \
-    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic \
-    --user-data-dir="$HOME/.config/google-chrome-vpn" --no-first-run &
-```
-
-**🐧 WSL:** use the **Windows PowerShell** command above. WSL2 forwards `127.0.0.1:1080` to Windows automatically. (Or use `chrome-proxy`. It finds Windows Chrome for you.)
-
-What the flags do:
-
-- `--proxy-server` sends all traffic through the SOCKS5 forward.
-- `--host-resolver-rules` also sends the **DNS** lookups through the tunnel (no DNS leaks). Each `EXCLUDE` lets a local name resolve on your network.
-- `--proxy-bypass-list` lets your local network go direct (no proxy).
-- `--force-webrtc-ip-handling-policy=disable_non_proxied_udp` stops WebRTC from showing your real IP; `--disable-quic` keeps HTTP/3 (UDP) off.
-- `TZ=` (macOS: `open --env TZ=`) gives Chrome the proxy region's time zone; use the zone of your VM's region.
-- `--user-data-dir` keeps this Chrome a **separate profile**. Your normal browser does not change.
-
-If you changed `SOCKS_PORT`, use that port in place of `1080`. `proxy-status` shows the port.
-
----
-
 ## Next
 
 - **[Install Claude Code](install-claude.md)** (then, if you want, **[Codex](install-codex.md)**). The sign-in goes through this proxy, so do it *after* this page.
 - Something does not work? Refer to **[Troubleshooting](troubleshooting.md)** (start with `proxy-status --fix`).
 - You do not want a profile? Refer to **[Manual — no profile](proxy-manual.md)**.
+
+---
+
+## Moved sections
+
+These sections used to be on this page:
+
+- <a id="the-commands-you-get"></a>The commands: [Commands](commands.md)
+- <a id="kill-switch-290"></a>Kill switch: [Kill switch, recovery and alerts](kill-switch.md#kill-switch)
+- <a id="recovery-while-claude-or-codex-is-running"></a>Recovery while Claude or Codex runs: [Kill switch, recovery and alerts](kill-switch.md#recovery-while-claude-or-codex-is-running)
+- <a id="desktop-alerts-while-the-cli-owns-the-terminal"></a>Desktop alerts: [Kill switch, recovery and alerts](kill-switch.md#desktop-alerts-while-the-cli-owns-the-terminal)
+- <a id="two-accounts-on-one-mac-shared-mode-2130"></a>Two accounts on one Mac: [Shared mode](shared-mode.md)
+- <a id="-optional-browse-through-the-proxy"></a>Browse through the proxy: [Chrome](chrome.md)
+- <a id="-changing-your-server-or-user-later"></a>Changing your server, user or ports: [Settings](settings.md#changing-your-server-user-or-ports)
+- <a id="-updating-the-profile-later"></a>Updating the profile: [Updating](upgrading.md)
+
