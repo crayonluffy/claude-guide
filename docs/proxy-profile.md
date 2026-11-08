@@ -132,11 +132,15 @@ The kill switch does not protect the Claude Desktop app, web browsers, or other 
 
 From PowerShell 2.6.0 and Bash 2.7.0, the profile shows desktop alerts. Thus a Codex or Claude screen cannot hide the only warning. One shared tunnel owner sends the alerts. More `cc` or `cx` tabs do not make more alerts.
 
+Since 2.13.3 the desktop alerts are quiet by default (`DESKTOP_NOTIFICATIONS = auto`), as the terminal is. A brief drop, for example after the Mac wakes up or the Wi-Fi changes, shows **no** alert: the owner reconnects by itself. Only a long outage alerts you, once, and then its end:
+
 | Condition | Alert | What to do |
 |---|---|---|
-| The first check fails | **Proxy connection lost**: the owner connects again; the sessions stay open | Wait. |
-| The tunnel is still down after the limit (default 60 seconds) | **Proxy still unavailable**: the owner continues to try | Wait, or stop the application in the usual way. |
-| All affected providers work again | **Proxy connection restored**: send a failed request again if necessary | Continue your work. |
+| The tunnel is still down after the limit (default 60 seconds, `WATCHDOG_NOTICE_AFTER`) | **Proxy still unavailable**: the owner continues to try | Wait, or stop the application in the usual way. |
+| It works again after that long outage | **Proxy connection restored**: send a failed request again if necessary | Continue your work. |
+| Another program takes the proxy port | **Proxy port taken** (always shown, at once), then **restored** when the tunnel has its port back | Exit the Claude/Codex sessions. |
+
+`DESKTOP_NOTIFICATIONS = verbose` brings back the alert for every drop (**Proxy connection lost**) and every recovery. `off` stops the desktop alerts; the terminal still warns about a long outage.
 
 The owner collects the Claude and Codex failures into one desktop outage. If only one provider works again, there is no "restored" alert. The outage timer does not start again, and the long-outage warning does not show again. The progress of the tries shows only in the terminal and the log. It does not make a desktop alert at each check. An alert does not take the focus, does not open a dialog, does not send keys, and does not stop a session.
 
@@ -178,7 +182,7 @@ PowerShell also accepts `-Fast -Desktop`. These alerts show **[SIMULATION]**. Th
 
 ### Settings and updating an existing owner
 
-Desktop alerts are `auto` by default. To set them off:
+Desktop alerts are `auto` (long outages only) by default. `verbose` shows every drop and recovery. To set them off:
 
 ```powershell
 proxy-config set DESKTOP_NOTIFICATIONS off

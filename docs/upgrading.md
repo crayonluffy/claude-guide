@@ -37,6 +37,20 @@ On Windows, the profile moves from `$PROFILE` (Documents) to `~\.claude-proxy.ps
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.3: quieter desktop alerts
+
+- **Brief drops no longer pop up on the desktop.** Waking the Mac or a Wi-Fi
+  change used to show "Proxy connection lost" and then "restored" each time.
+  The desktop now follows the terminal's quiet rule: an alert only when the
+  tunnel is still down after `WATCHDOG_NOTICE_AFTER` (60 seconds), and one when
+  it is back. A port takeover still alerts at once.
+  `DESKTOP_NOTIFICATIONS = verbose` brings back every alert; `off` stops them.
+- `cc` / `cx` no longer print the "Desktop alerts: …" line at every start; it
+  shows only when alerts cannot be shown. `proxy-notify status` still reports it.
+
+A running tunnel owner keeps its old rule until `proxy-restart` (or the next
+time it starts).
+
 ### 2.13.2: browser leak guards, local network in Chrome
 
 - **WebRTC can no longer show your real IP.** Chrome's SOCKS5 proxy carries TCP

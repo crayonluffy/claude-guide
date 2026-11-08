@@ -89,6 +89,7 @@ Write-Host 'PASS: worker survives an exception in its loop'
 
 # 2) A fresh ssh that is still connecting is not "lost": no outage event, no
 #    desktop alert, no kill until the startup grace has passed.
+$script:DESKTOP_NOTIFICATIONS='verbose'   # these checks follow every outage event
 function New-RecoveryDesktopContext {[pscustomobject]@{Backend='tray';LastSubmission='not-tested'}}
 function Get-RecoveryDesktopStatus {param($Context)@{backend=$Context.Backend}}
 function Stop-RecoveryDesktopContext {param($Context)}

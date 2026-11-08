@@ -12,6 +12,12 @@ foreach($case in @(@(0,'healthy','healthy','none'),@(5,'recovering','recovering'
  $s=$r.State
 }
 'PASS: combined desktop outage, partial recovery, and one prolonged warning'
+$n=Get-RecoveryDesktopNotice auto lost recovering $false; Assert ($n.Event -eq 'none') 'auto shows a brief drop'
+$n=Get-RecoveryDesktopNotice auto restored healthy $false; Assert ($n.Event -eq 'none') 'auto shows the end of a brief drop'
+$n=Get-RecoveryDesktopNotice auto prolonged prolonged $false; Assert ($n.Event -eq 'prolonged' -and $n.Warned) 'auto hides a long outage'
+$n=Get-RecoveryDesktopNotice auto restored healthy $true; Assert ($n.Event -eq 'restored' -and -not $n.Warned) 'auto hides the end of a long outage'
+$n=Get-RecoveryDesktopNotice verbose lost recovering $false; Assert ($n.Event -eq 'lost') 'verbose hides a drop'
+'PASS: brief drops stay off the desktop in auto; verbose keeps every alert'
 $script:DESKTOP_NOTIFICATIONS='off'
 $script:WATCHDOG_IDLE_INTERVAL=0   # an idle owner would otherwise wait 60s per healthy pass
 $c=New-RecoveryDesktopContext
@@ -74,7 +80,8 @@ function Test-RecoveryTransport {
 }
 try {
  Invoke-RecoveryWorker (Join-Path $dir 'descriptor.json')
- Assert ($script:TestDesktopContext.Queue.Count -eq 3) 'shared owner must emit lost/prolonged/restored exactly once'
+ $events=@($script:TestDesktopContext.Queue.ToArray() | ForEach-Object { $_.Event }) -join ','
+ Assert ($events -eq 'prolonged,restored') "auto: a long outage alerts once, then its end; got $events"
  Assert ($script:TestDesktopContext.Disposed) 'desktop resources were not disposed at shutdown'
  Assert ((Get-RecoveryStatus $dir desktop).submission -eq 'queued') 'owner notification status not recorded'
  Remove-Item (Join-Path $dir 'stopped')

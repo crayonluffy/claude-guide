@@ -10,6 +10,7 @@ scratch=$(mktemp -d); trap 'rm -rf "$scratch"' EXIT
 CLAUDE_HTTP_PORT=18080 CLAUDE_SOCKS_PORT=11080
 CLAUDE_WATCHDOG_INTERVAL=0 CLAUDE_WATCHDOG_FAILS=2 CLAUDE_WATCHDOG_NOTICE_AFTER=60 CLAUDE_WATCHDOG_STARTUP_GRACE=20
 _recovery_desktop_backend() { echo linux; }
+CLAUDE_DESKTOP_NOTIFICATIONS=verbose   # these checks follow every outage event
 _recovery_desktop_send() { printf '%s\n' "$2" >> "$scratch/desktop"; }
 _listeners() { :; }
 _port_bound() { return 1; }

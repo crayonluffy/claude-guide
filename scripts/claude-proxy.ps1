@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.2'
+$script:PROFILE_VERSION = '2.13.3'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -132,7 +132,7 @@ $script:WATCHDOG_MAX_BACKOFF=30
 # A freshly launched ssh gets this long (ssh ConnectTimeout 15s + margin) to bring
 # its forwards up before failed probes count as an outage or get it killed.
 $script:WATCHDOG_STARTUP_GRACE=20
-$script:DESKTOP_NOTIFICATIONS='auto' # auto or off
+$script:DESKTOP_NOTIFICATIONS='auto' # auto (long outages only), verbose (every drop) or off
 $script:TERMINAL_NOTIFICATIONS='quiet' # quiet, verbose or off; actionable warnings always show
 $script:TUNNEL_LOG=Join-Path $HOME '.claude-proxy-ssh.log'
 
@@ -548,7 +548,7 @@ function Invoke-RecoveryWorker {
     $dir = Split-Path -Parent $DescriptorPath
     $lease = Open-RecoveryLock $dir
     if (-not $lease) { return }
-    $ssh = $null; $started=''; $sshAt=0; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null
+    $ssh = $null; $started=''; $sshAt=0; $states=@{}; $next=0; $delay=2; $retries=0; $fails=0; $desktop=$null; $desktopState=$null; $desktopWarned=$false
     $classified=$true; $lastClass=''; $errFile=Join-Path $dir 'ssh.err'; $conflictSeen=''
     try {
         $cfg = [IO.File]::ReadAllText($DescriptorPath) | ConvertFrom-Json
@@ -627,6 +627,11 @@ function Invoke-RecoveryWorker {
             # Nothing observed yet (ssh still connecting) is not "unavailable".
             $attention=if ($states.Count) {Get-RecoveryDesktopTransition -State $desktopState -States $states -Now $now -NoticeAfter $script:WATCHDOG_NOTICE_AFTER} else {@{State=$desktopState;Event='none'}}
             $desktopState=$attention.State
+            if ($attention.Event -in @('lost','prolonged','restored')) {
+                $dn=Get-RecoveryDesktopNotice "$script:DESKTOP_NOTIFICATIONS" $attention.Event $desktopState.phase $desktopWarned
+                $desktopWarned=$dn.Warned; $attention=@{State=$desktopState;Event=$dn.Event}
+            }
+            if ($takeover) { $desktopWarned=$true }   # its end is announced too
             if ($takeover -and $desktop.Backend -ne 'off') {
                 if (-not (Send-RecoveryDesktopNotification $desktop takeover "$($conflict.Pid)|$($conflict.Name)|$($conflict.Port)")) { $desktop.LastSubmission='failed' }
             }
@@ -709,6 +714,16 @@ function Get-RecoveryDesktopTransition {
     $kind=if ($States.claude.phase -eq 'healthy' -and $States.codex.phase -eq 'healthy') {'healthy'}else{'unavailable'}
     return (Get-RecoveryTransition -State $State -Sample @{kind=$kind} -Now $Now -NoticeAfter $NoticeAfter)
 }
+# Which outage events reach the desktop: auto = the terminal's quiet rule (an
+# outage past NOTICE_AFTER, then its end; brief drops after sleep or a Wi-Fi
+# change stay silent), verbose = every drop and recovery.
+function Get-RecoveryDesktopNotice {
+    param([string]$Mode,[string]$Event,[string]$Phase,[bool]$Warned)
+    if ($Mode -eq 'verbose') { return @{Event=$Event;Warned=$Warned} }
+    if ($Event -eq 'prolonged' -and -not $Warned) { return @{Event='prolonged';Warned=$true} }
+    if ($Event -eq 'restored' -and $Phase -eq 'healthy' -and $Warned) { return @{Event='restored';Warned=$false} }
+    return @{Event='none';Warned=$Warned}
+}
 function Get-RecoveryDesktopScope {
     param([hashtable]$States)
     if ($States.claude.phase -eq 'healthy' -and $States.codex.phase -ne 'healthy') {return 'Codex'}
@@ -732,7 +747,7 @@ function New-RecoveryDesktopContext {
     $mode=if ($null -eq $script:DESKTOP_NOTIFICATIONS) {'auto'}else{"$script:DESKTOP_NOTIFICATIONS"}
     $ctx=@{Backend='unavailable';Reason='Windows desktop notifications require an interactive Windows session. Linux/macOS use the Bash profile.';LastSubmission='not-tested';PowerShell=$null;Runspace=$null}
     if ($mode -in @('off','0')) {$ctx.Backend='off';$ctx.Reason='Disabled in settings.';return $ctx}
-    if ($mode -notin @('auto','1')) {$ctx.Reason='Use DESKTOP_NOTIFICATIONS=auto or off.';return $ctx}
+    if ($mode -notin @('auto','1','verbose')) {$ctx.Reason='Use DESKTOP_NOTIFICATIONS=auto, verbose or off.';return $ctx}
     if ($env:OS -ne 'Windows_NT' -or -not [Environment]::UserInteractive) {return $ctx}
     try {
         $ctx.Queue=New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
@@ -2323,7 +2338,8 @@ function cc {
     if ($script:TUNNEL_WATCHDOG -and -not (Test-RecoverySharedProxy)) {
         $identity=if ($ctx) { $ctx.Identity } else { Start-RecoveryOwner claude }
         $subscriber=Start-RecoverySubscriber $identity claude
-        Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
+        $desktopBackend=(Get-RecoveryStatus $identity desktop).backend
+        if ($desktopBackend -and $desktopBackend -notin @('off','windows-tray')) { Write-Host "[Notify] Desktop alerts: $desktopBackend. Terminal notices still work; see proxy-notify." }
     }
     elseif (Test-RecoverySharedProxy) { Write-Host '[Shared] Recovery is managed by the account serving this proxy.' }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
@@ -2382,7 +2398,8 @@ function cx {
     if ($script:TUNNEL_WATCHDOG -and -not (Test-RecoverySharedProxy)) {
         $identity=if ($ctx) { $ctx.Identity } else { Start-RecoveryOwner codex }
         $subscriber=Start-RecoverySubscriber $identity codex
-        Write-Host "[Notify] Desktop alerts: $((Get-RecoveryStatus $identity desktop).backend). Test visibility with proxy-notify test in another terminal."
+        $desktopBackend=(Get-RecoveryStatus $identity desktop).backend
+        if ($desktopBackend -and $desktopBackend -notin @('off','windows-tray')) { Write-Host "[Notify] Desktop alerts: $desktopBackend. Terminal notices still work; see proxy-notify." }
     }
     elseif (Test-RecoverySharedProxy) { Write-Host '[Shared] Recovery is managed by the account serving this proxy.' }
     else { Write-Warning 'Automatic recovery and live notifications are disabled.' }
@@ -3821,6 +3838,7 @@ function cc-help {
 
   OPTIONS (proxy-config set KEY VALUE)
     TERMINAL_NOTIFICATIONS quiet|verbose|off   quiet (default) hides brief outages
+    DESKTOP_NOTIFICATIONS auto|verbose|off     auto (default) pops up only for long outages
     PROXY_MODE managed|shared   shared: use another account's tunnel on these ports
 
 '@

@@ -111,9 +111,18 @@ _recovery_desktop_backend() { echo linux; }
 _recovery_desktop_send() { printf '%s\n' "$2" >> "$scratch/desktop.calls"; }
 _recovery_worker "$scratch/worker" > "$scratch/worker.log"
 assert test -s "$scratch/desktop.calls"
-assert test "$(cat "$scratch/desktop.calls")" = "$(printf 'lost\nprolonged\nrestored')"
+# auto (default): a long outage alerts once, then its end; the first drop is silent.
+assert test "$(cat "$scratch/desktop.calls")" = "$(printf 'prolonged\nrestored')"
 assert grep -q 'submitted.*restored' "$scratch/worker/desktop.status"
-echo 'PASS: real owner emits three desktop alerts across two providers and records submission status'
+echo 'PASS: real owner alerts a long outage and its end across two providers and records submission status'
+# A brief drop (sleep, Wi-Fi change) shows nothing in auto; verbose shows every event.
+d=$(_recovery_step '' 'proxy|x' 0 60); w=0
+IFS='|' read -r w n <<< "$(_recovery_desktop_notice auto "$d" "$w")"; assert test "$n" = none
+d=$(_recovery_step "$d" 'healthy|x' 10 60)
+IFS='|' read -r w n <<< "$(_recovery_desktop_notice auto "$d" "$w")"; assert test "$n|$w" = 'none|0'
+IFS='|' read -r w n <<< "$(_recovery_desktop_notice verbose "$d" 0)"; assert test "$n" = restored
+IFS='|' read -r w n <<< "$(_recovery_desktop_notice verbose "$(_recovery_step '' 'proxy|x' 0 60)" 0)"; assert test "$n" = lost
+echo 'PASS: brief drops stay off the desktop in auto; verbose keeps every alert'
 # Default demo stays silent on the desktop; opt-in demo labels every real OS alert.
 
 _recovery_demo_sleep() { :; }
