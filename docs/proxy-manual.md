@@ -146,14 +146,16 @@ codex --dangerously-bypass-approvals-and-sandbox
 
 > To open Chrome windows through **more regions at the same time** (JP + SG + US), refer to [Nodes → manual equivalent](proxy-nodes.md#no-profile-the-manual-equivalent). You need one more `ssh -D` for each region on its own port, and a different `--user-data-dir` for each window.
 
-The tunnel from step 1 already has a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). These commands open a **separate** Chrome through it. It has its own profile, and its DNS goes through the tunnel. Your normal browser does not change. Use it when a sign-in page (Anthropic or OpenAI) does not open in your normal browser.
+The tunnel from step 1 already has a **SOCKS5** forward on `127.0.0.1:1080` (the `-D 1080` part). These commands open a **separate** Chrome through it. It has its own profile, and its DNS goes through the tunnel. WebRTC and QUIC cannot leak your real IP, and your local network (private ranges, `*.local`) still opens directly. Your normal browser does not change. [Profile guide: what each flag does](proxy-profile.md#-optional-browse-through-the-proxy). Use it when a sign-in page (Anthropic or OpenAI) does not open in your normal browser.
 
 **🪟 Windows (PowerShell)**
 
 ```powershell
 & "C:\Program Files\Google\Chrome\Application\chrome.exe" `
     --proxy-server="socks5://127.0.0.1:1080" `
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" `
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" `
+    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" `
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic `
     --user-data-dir="C:\ChromeVPNProfile" --no-first-run
 ```
 
@@ -162,7 +164,9 @@ The tunnel from step 1 already has a **SOCKS5** forward on `127.0.0.1:1080` (the
 ```bash
 open -n -a "Google Chrome" --args \
     --proxy-server="socks5://127.0.0.1:1080" \
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" \
+    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" \
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic \
     --user-data-dir="$HOME/.chrome-proxy-profile" --no-first-run
 ```
 
@@ -171,7 +175,9 @@ open -n -a "Google Chrome" --args \
 ```bash
 google-chrome \
     --proxy-server="socks5://127.0.0.1:1080" \
-    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+    --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1 , EXCLUDE *.local" \
+    --proxy-bypass-list="127.0.0.1;10.0.0.0/8;172.16.0.0/12;192.168.0.0/16;*.local" \
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp --disable-quic \
     --user-data-dir="$HOME/.config/google-chrome-vpn" --no-first-run &
 ```
 

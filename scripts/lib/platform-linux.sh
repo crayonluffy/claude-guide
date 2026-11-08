@@ -45,16 +45,20 @@ _linux_chrome_launch() {
             [ -n "$c" ] && [ -x "$c" ] && { bin="$c"; break; }
         done
         [ -n "$bin" ] || { echo "[Err] Windows Chrome not found - set CHROME_BIN with proxy-config edit."; return 1; }
+        _chrome_running_note "$pdir"
+        # Windows Chrome takes its time zone from Windows, not from TZ.
+        [ -z "${_CLAUDE_CHROME_LAUNCH_TZ:-}" ] || echo "[Info] Windows Chrome uses the Windows time zone; to match the proxy, set Windows to ${_CLAUDE_CHROME_LAUNCH_TZ}."
         pdir="C:\\${pdir#/mnt/c/}"
         "$bin" --proxy-server="$socks" \
-            --host-resolver-rules='MAP * ~NOTFOUND , EXCLUDE 127.0.0.1' \
+            --host-resolver-rules="$(_chrome_direct_rules resolver)" \
             --user-data-dir="$pdir" --no-first-run "$@" >/dev/null 2>&1 &
     else
         bin="$CLAUDE_CHROME_BIN"
         [ -n "$bin" ] || bin=$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser)
         [ -n "$bin" ] || { echo '[Err] Chrome/Chromium not found - set CHROME_BIN with proxy-config edit.'; return 1; }
-        nohup "$bin" --proxy-server="$socks" \
-            --host-resolver-rules='MAP * ~NOTFOUND , EXCLUDE 127.0.0.1' \
+        _chrome_running_note "$pdir"
+        nohup env ${_CLAUDE_CHROME_LAUNCH_TZ:+"TZ=$_CLAUDE_CHROME_LAUNCH_TZ"} "$bin" --proxy-server="$socks" \
+            --host-resolver-rules="$(_chrome_direct_rules resolver)" \
             --user-data-dir="$pdir" --no-first-run "$@" >/dev/null 2>&1 &
     fi
     [ -z "$profile" ] || label="$label, profile '$profile'"

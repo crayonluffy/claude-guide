@@ -6,7 +6,7 @@ $source = $ProfilePath
 $tokens = $null; $errors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile($source, [ref]$tokens, [ref]$errors)
 if ($errors.Count) { throw ($errors | Out-String) }
-$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-ProxyNodePorts', 'Test-ProxyNodePortValue', 'Test-RecoverySharedProxy', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy')
+$wanted = @('Get-ProxyNodes', 'Find-ProxyNode', 'Get-ActiveNodeName', 'Get-NodeSocksPort', 'Get-NodeSlot', 'Test-NodeProvisioned', 'Get-NodeContext', 'Get-ProxyNodePorts', 'Test-ProxyNodePortValue', 'Test-RecoverySharedProxy', 'Get-NodeLocalSlot', 'Test-SshAlias', 'chrome-proxy', 'Get-ChromeLeakFlags', 'Get-ChromeDirectRules', 'Get-ProxyExitInfo', 'Invoke-WithAppEnv')
 foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     if ($f.Name -in $wanted) { Invoke-Expression $f.Extent.Text }
 }
@@ -28,6 +28,8 @@ function Start-NodeTunnelOwner { param($Node) $script:TunnelPorts += $Node; retu
 function Reset-Launch { $script:ChromeArgs = @(); $script:TunnelPorts = @() }
 $script:CHROME_EXE = 'chrome-proxy-test-browser'
 $script:CHROME_BASE = 'C:\ChromeVPNProfile'
+$script:CHROME_BYPASS = 'on'; $script:TELEMETRY = 'on'
+$script:NO_PROXY_LIST = 'localhost,127.0.0.1,::1,10.0.0.0/8,192.168.0.0/16,*.local,.mycorp.example,*'
 $script:SSH_HOST = 'jpvpn'; $script:HTTP_PORT = 8080; $script:SOCKS_PORT = 1080
 $script:NODE_HTTP_BASE = 8180; $script:NODE_SOCKS_BASE = 1180; $script:NODE_PORTS = $null; $script:REMOTE_PROXY_PORT = 8888
 $script:NODES_CACHE = [System.IO.Path]::GetTempFileName()
@@ -66,6 +68,36 @@ try {
     Assert ($script:ChromeArgs -contains '--proxy-server=socks5://127.0.0.1:1181') 'Named SG must retain its stable node port'
     Assert ($script:TunnelPorts -contains 'sg') 'Named SG must ensure its independent tunnel'
     Write-Host 'PASS: six Chrome/node/profile scenarios'
+
+    # Leak guards, LAN bypass with local DNS for bypassed names; '*' is never a bypass.
+    Reset-Launch
+    chrome-proxy jp
+    Assert ($script:ChromeArgs -contains '--force-webrtc-ip-handling-policy=disable_non_proxied_udp') 'WebRTC must not use direct UDP'
+    Assert ($script:ChromeArgs -contains '--disable-quic') 'QUIC must be off'
+    Assert ($script:ChromeArgs -contains '--proxy-bypass-list=localhost;*.localhost;127.0.0.1;[::1];10.0.0.0/8;192.168.0.0/16;*.local;mycorp.example;*.mycorp.example') "LAN bypass: $($script:ChromeArgs -join ' | ')"
+    Assert ($script:ChromeArgs -contains '--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE localhost , EXCLUDE *.localhost , EXCLUDE 127.0.0.1 , EXCLUDE *.local , EXCLUDE mycorp.example , EXCLUDE *.mycorp.example') 'Bypassed names resolve locally'
+    $script:CHROME_BYPASS = 'off'
+    Reset-Launch
+    chrome-proxy jp
+    Assert ($script:ChromeArgs -contains '--proxy-bypass-list=localhost;*.localhost;127.0.0.1') 'CHROME_BYPASS=off proxies the LAN'
+    $script:CHROME_BYPASS = 'on'
+    # -Check opens the leak tests.
+    function Get-ProxyExitInfo { param($Port, $Field) if ($Field -eq 'ip') { '203.0.113.9' } else { 'Asia/Tokyo' } }
+    Reset-Launch
+    chrome-proxy jp -Check 6>$null
+    Assert ($script:ChromeArgs -contains 'https://browserleaks.com/webrtc') '-Check opens the WebRTC test'
+    Assert ($script:ChromeArgs -notcontains '-Check') '-Check is not a URL'
+    Write-Host 'PASS: Chrome WebRTC/QUIC guards, LAN bypass, -Check'
+
+    # TELEMETRY=off: only Claude, only during the run.
+    $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = $null
+    $script:TELEMETRY = 'off'
+    $seen = Invoke-WithAppEnv claude { $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC }
+    $cx = Invoke-WithAppEnv codex { $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC }
+    Assert ($seen -eq '1' -and -not $cx -and -not $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC) 'TELEMETRY=off is scoped to Claude runs'
+    $script:TELEMETRY = 'on'
+    Assert (-not (Invoke-WithAppEnv claude { $env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC })) 'TELEMETRY=on leaves Claude alone'
+    Write-Host 'PASS: TELEMETRY=off scoped to Claude'
 } finally {
     Remove-Item -LiteralPath $script:NODES_CACHE -Force
 }
