@@ -44,7 +44,7 @@ try {
     $rejected=$false; try { proxy-restart } catch { $rejected=$true }
     Assert $rejected 'Shared client accepted tunnel restart'
     Assert (-not (proxy-node jp)) 'Shared client accepted default-node switch'
-    cc-stop -Force
+    cc-stop -force
     Assert ($script:ManagementCalls -eq 0) 'Shared control touched owner lifecycle'
     'PASS: PowerShell shared clients launch without foreign PID visibility and preserve transport/pinning safeguards'
 } finally { Remove-Item -LiteralPath $scratch -Recurse -Force }

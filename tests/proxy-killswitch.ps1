@@ -112,9 +112,9 @@ try {
  function Use-RecoveryRecord { param($Identity) $false }
  function proxy-on { $script:ProxyOn++ }
  $script:ProxyOn=0; $script:Holders[8080]=777
- Assert ((proxy-up -NoVerify 6>$null) -eq $false -and $script:ProxyOn -eq 0) 'proxy-up launched with a foreign port holder'
+ Assert ((proxy-up -noverify 6>$null) -eq $false -and $script:ProxyOn -eq 0) 'proxy-up launched with a foreign port holder'
  $script:Holders[8080]=$PID
- Assert ((proxy-up -NoVerify 6>$null) -eq $true -and $script:ProxyOn -eq 1) 'proxy-up refused a clean setup'
+ Assert ((proxy-up -noverify 6>$null) -eq $true -and $script:ProxyOn -eq 1) 'proxy-up refused a clean setup'
  'PASS: proxy-up refuses before setting anything, and launches when clean'
 
  # tunnel-start: no silent fallback around a foreign program.

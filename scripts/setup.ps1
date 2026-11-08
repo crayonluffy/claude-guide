@@ -411,14 +411,14 @@ if ($profileInstalled) {
         & {
             $ErrorActionPreference = 'Continue'
             if (-not $script:PROXY_DOMAIN -and -not $script:NODES_FROM) {
-                proxy-nodes -From $Alias
+                proxy-nodes -from $Alias
                 if ($script:NODES_FROM) { return }
-                Write-Host "[Info] $Alias doesn't serve a node list (yet) - fine for now. Once your admin sets it up: proxy-nodes -From $Alias" -ForegroundColor DarkGray
+                Write-Host "[Info] $Alias doesn't serve a node list (yet) - fine for now. Once your admin sets it up: proxy-nodes -from $Alias" -ForegroundColor DarkGray
             }
-            proxy-nodes -Refresh
+            proxy-nodes -refresh
         }
     } catch {
-        Write-Host "[Info] Node catalogue not loaded (optional) - later: proxy-nodes -Refresh" -ForegroundColor DarkGray
+        Write-Host "[Info] Node catalogue not loaded (optional) - later: proxy-nodes -refresh" -ForegroundColor DarkGray
     }
 }
 

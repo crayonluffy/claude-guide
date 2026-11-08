@@ -27,7 +27,7 @@ try {
  $out=@(claude -p hi 6>&1)
  Assert ($out.Count -eq 1 -and $out[0] -eq 'claude ARGS:-p hi') "output not only the app's: $($out -join ' / ')"
  Assert ($LASTEXITCODE -eq 3) "exit code $LASTEXITCODE"
- Assert ((Get-Content "$scratch/up.calls") -contains 'True claude') 'proxy-up not called with -NoVerify'
+ Assert ((Get-Content "$scratch/up.calls") -contains 'True claude') 'proxy-up not called with -noverify'
  $out=@(codex exec ls 6>&1)
  Assert ($out[-1] -eq 'codex ARGS:exec ls') "codex: $($out -join ' / ')"
  'PASS: plain claude/codex go through the tunnel quietly, exit code kept'

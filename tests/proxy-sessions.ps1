@@ -79,13 +79,13 @@ try {
  $script:Probes=0
  function Test-RecoveryTransport {param($Provider,$HttpPort,$SocksPort) $script:Probes++; if($script:Probes -lt 3){@{kind='tunnel'}}else{@{kind='healthy'}}}
  $script:WATCHDOG_STARTUP_GRACE=5
- $ok=proxy-up -NoVerify 6>$null
+ $ok=proxy-up -noverify 6>$null
  Assert ($ok -eq $true) 'proxy-up refused although the owner healed within the grace'
  Assert (Test-Path (Join-Path $dir 'wake')) 'proxy-up did not wake the owner'
  Assert ($script:Probes -eq 3) "probes: $($script:Probes)"
  function Test-RecoveryTransport {param($Provider,$HttpPort,$SocksPort) @{kind='tunnel'}}
  $script:WATCHDOG_STARTUP_GRACE=1
- Assert ((proxy-up -NoVerify 6>$null) -eq $false) 'proxy-up launched over a dead tunnel'
+ Assert ((proxy-up -noverify 6>$null) -eq $false) 'proxy-up launched over a dead tunnel'
  'PASS: proxy-up wakes the owner, waits for health, and still refuses a dead tunnel'
 
  # 6) cc-stop refuses while a registered session runs (npm Claude is node.exe).

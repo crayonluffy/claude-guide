@@ -144,7 +144,7 @@ How the kill switch uses Claude's `settings.json`: [Kill switch, recovery and al
 | `Could not get the node list from <vm>: …` | The last line is the error from ssh. Type `ssh <vm>` to examine the connection. The list download cannot ask for a passphrase, so load a key with a passphrase into `ssh-agent`. `proxy-nodes --refresh` also tries the other VMs in your list. |
 | `<vm> didn't answer - took the list from <other> instead` | This is for your information only. Your VM did not answer, and a different VM answered. To use that VM permanently, type `proxy-nodes --from <other>`. |
 | `No valid 'v=cp1' TXT records at _claude-proxy.<domain>` | The domain is incorrect, or your admin did not publish the records. To examine them, type `dig +short TXT _claude-proxy.<domain>` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.<domain>`). The profile did not change the saved domain or your node list. To save the domain anyway (for example, before the admin publishes the records), add `--force` (`-Force`). To use the list of this guide again, type `proxy-nodes --domain ''`. |
-| `PROXY_DOMAIN = '--domain' saved` (Windows, profile 2.2.1 or older) | Old Windows profiles know only `-Domain`. Type `proxy-update`. Then type `proxy-nodes -Domain ''` to remove the incorrect value. From 2.2.2, `--domain` also works, and the profile refuses incorrect values. |
+| `PROXY_DOMAIN = '--domain' saved` (Windows, profile 2.2.1 or older) | Old Windows profiles know only `-Domain`. Type `proxy-update`. Then type `proxy-nodes -domain ''` to remove the incorrect value. From 2.2.2, `--domain` also works, and the profile refuses incorrect values. |
 | `proxy-nodes` shows `jp`, `sg`, `us` as `<not provisioned>` | This was the old example list of this guide (profile 2.2.1 or older). Type `proxy-update` and `proxy-nodes --refresh`. The list of this guide is now empty. Your nodes come from `proxy-nodes --domain <your company domain>`. |
 | `ssh alias 'jpvpn' points to X, the catalogue says Y` | Your alias is older than the domain setup. Change `HostName` in `~/.ssh/config`. Or delete that `Host` block and type `proxy-nodes --refresh`. |
 | `Several nodes share slot(s) …` | Two nodes have the same `slot`. Tell your admin. Until the admin corrects it, do not open Chrome through these two nodes at the same time. |
@@ -183,7 +183,7 @@ and run `proxy-restart`. The kill switch refuses a conflicting program rather
 than silently moving the proxy. Use `proxy-status --fix` for connection failures and
 `proxy-status --debug` for raw recovery records.
 
-On Windows, use `proxy-status -Debug` and `proxy-restart -Node sg`; reload another
+On Windows, use `proxy-status -debug` and `proxy-restart -node sg`; reload another
 window with `. "$HOME\.claude-proxy.ps1"`. `proxy-config edit` opens Notepad.
 If it reports that the file changed in another window, reopen the editor;
 the other window's saved changes have been kept. More: [Settings](settings.md).

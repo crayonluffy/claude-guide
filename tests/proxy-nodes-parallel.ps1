@@ -1,6 +1,6 @@
 $ErrorActionPreference='Stop'
 # Parallel node tunnels (PowerShell). Mirrors tests/proxy-nodes-parallel.sh:
-# node slots and ports, one owner per node, cc/cx -Node for one window,
+# node slots and ports, one owner per node, cc/cx -node for one window,
 # proxy-node guard, chrome-proxy on the node tunnel, cc-stop / status for all.
 $tokens=$null;$errors=$null
 $ast=[System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot '../scripts/claude-proxy.ps1'),[ref]$tokens,[ref]$errors)
@@ -60,19 +60,19 @@ try {
  Assert ($dm -eq (Join-Path (Get-RecoveryRoot) 'main')) 'default node must use main'
  'PASS: each node gets its own owner with its own descriptor; the window keeps its settings'
 
- # 3) tunnel-stop -Node stops only that node; plain tunnel-stop leaves node tunnels.
+ # 3) tunnel-stop -node stops only that node; plain tunnel-stop leaves node tunnels.
  function Stop-RecoveryOwner { param($Identity,$WaitSeconds) $script:Stopped+=(Split-Path -Leaf $Identity); Remove-Item (Join-Path $Identity 'owner.up') -ErrorAction SilentlyContinue }
  function Use-RecoveryRecord { param($Identity) $false }
  $script:Stopped=@()
- $null=tunnel-stop -Node sg 6>$null
+ $null=tunnel-stop -node sg 6>$null
  Assert ($script:Stopped -join ',' -eq 'node-sg') "tunnel-stop sg stopped: $($script:Stopped -join ',')"
  $null=Start-RecoveryOwner claude sg; $script:Stopped=@()
  $null=tunnel-stop 6>$null
  Assert ($script:Stopped -contains 'main' -and $script:Stopped -notcontains 'node-sg') "plain tunnel-stop stopped: $($script:Stopped -join ',')"
- 'PASS: tunnel-stop -Node stops one node; plain tunnel-stop leaves node tunnels running'
+ 'PASS: tunnel-stop -node stops one node; plain tunnel-stop leaves node tunnels running'
 
  # 4) Migration: an old Chrome tunnel (ssh) on a node port is replaced; a foreign program refused.
- $null=tunnel-stop -Node sg 6>$null
+ $null=tunnel-stop -node sg 6>$null
  $script:Holder=@{Pid=4444;Name='ssh'}; $script:Killed=@()
  function Get-NetTCPConnection { param($LocalPort,$State,$ErrorAction) if($LocalPort -eq 1181 -and $script:Holder){[pscustomobject]@{OwningProcess=$script:Holder.Pid}} }
  function Get-Process { param($Id,$Name,$ErrorAction) if($Id -eq 4444){[pscustomobject]@{ProcessName=$script:Holder.Name;Id=4444}} else {Microsoft.PowerShell.Management\Get-Process @PSBoundParameters} }
@@ -80,14 +80,14 @@ try {
  function Test-Port { param($Port) [bool](Get-NetTCPConnection -LocalPort $Port) }
  $null=Start-RecoveryOwner claude sg 6>$null
  Assert ($script:Killed -contains 4444) 'old Chrome tunnel not replaced'
- $null=tunnel-stop -Node sg 6>$null
+ $null=tunnel-stop -node sg 6>$null
  $script:Holder=@{Pid=4444;Name='python3'}; $script:Killed=@(); $err=''
  try { $null=Start-RecoveryOwner claude sg 6>$null } catch { $err=$_.Exception.Message }
  Assert ($script:Killed.Count -eq 0 -and $err -match 'python3 \(PID 4444\)' -and $err -match 'NODE_SOCKS_BASE') "foreign: killed=$($script:Killed) err=$err"
  $script:Holder=$null
  'PASS: an old Chrome tunnel on a node port is replaced; a foreign program is refused'
 
- # 5) cc / cx -Node: this window only.
+ # 5) cc / cx -node: this window only.
  foreach($b in 'claude','codex'){
   [IO.File]::WriteAllText((Join-Path $scratch "$b.ps1"),"Set-Content '$scratch/$b.argv' -Value `$args; Set-Content '$scratch/$b.proxy' -Value `$env:HTTPS_PROXY; `$global:LASTEXITCODE=0")
  }
@@ -98,32 +98,32 @@ try {
  function Test-KillswitchLaunch { param($HttpPort,$SocksPort,$Identity) $script:Checked+="$HttpPort|$(if($Identity){Split-Path -Leaf $Identity}else{'main'})"; $true }
  function proxy-on { $env:HTTPS_PROXY='http://127.0.0.1:8080' }
  $script:Started=@(); $script:Probed=@(); $script:Checked=@(); $env:HTTPS_PROXY=$null
- cc -Node sg -NoVerify -p hi 6>$null
+ cc -node sg -noverify -p hi 6>$null
  $argv=@(Get-Content "$scratch/claude.argv")
  Assert ($argv[0] -eq '--settings') "claude argv: $($argv -join ' | ')"
  $node=Get-Content $argv[1] -Raw | ConvertFrom-Json
  Assert ($node.env.HTTPS_PROXY -eq 'http://127.0.0.1:8181' -and $node.env.HTTP_PROXY -eq 'http://127.0.0.1:8181' -and $node.env.NO_PROXY -eq 'localhost,127.0.0.1') "settings file: $($node|ConvertTo-Json -Compress)"
  Assert (($argv[2..4] -join ' ') -eq '--dangerously-skip-permissions -p hi') "claude app args: $($argv -join ' | ')"
  Assert ((Get-Content "$scratch/claude.proxy") -eq 'http://127.0.0.1:8181') 'claude did not get the node proxy'
- Assert (-not $env:HTTPS_PROXY) "cc -Node changed the window: $env:HTTPS_PROXY"
+ Assert (-not $env:HTTPS_PROXY) "cc -node changed the window: $env:HTTPS_PROXY"
  Assert ($script:Started -contains 'sg' -and $script:Probed -contains 8181 -and $script:Checked -contains '8181|node-sg') "node checks: started=$($script:Started) probed=$($script:Probed) checked=$($script:Checked)"
- 'PASS: cc -Node sg runs Claude through sg (--settings file + env) and leaves the window alone'
+ 'PASS: cc -node sg runs Claude through sg (--settings file + env) and leaves the window alone'
 
  $env:HTTPS_PROXY='http://127.0.0.1:8080'
  cx --node sg --no-verify exec ls 6>$null
  Assert ((Get-Content "$scratch/codex.proxy") -eq 'http://127.0.0.1:8181') 'codex did not get the node proxy'
  Assert (@(Get-Content "$scratch/codex.argv") -notcontains '--settings') 'codex got --settings'
- Assert ($env:HTTPS_PROXY -eq 'http://127.0.0.1:8080') "cx -Node did not restore the window: $env:HTTPS_PROXY"
+ Assert ($env:HTTPS_PROXY -eq 'http://127.0.0.1:8080') "cx -node did not restore the window: $env:HTTPS_PROXY"
  'PASS: cx --node sg runs Codex through sg and restores the window'
 
  $env:HTTPS_PROXY=$null
- $ok=proxy-up -Node sg -NoVerify 6>$null
- Assert ($ok -eq $true -and $env:HTTPS_PROXY -eq 'http://127.0.0.1:8181' -and $script:SSH_HOST -eq 'jpvpn') "proxy-up -Node: ok=$ok env=$env:HTTPS_PROXY host=$($script:SSH_HOST)"
+ $ok=proxy-up -node sg -noverify 6>$null
+ Assert ($ok -eq $true -and $env:HTTPS_PROXY -eq 'http://127.0.0.1:8181' -and $script:SSH_HOST -eq 'jpvpn') "proxy-up -node: ok=$ok env=$env:HTTPS_PROXY host=$($script:SSH_HOST)"
  $env:HTTPS_PROXY=$null
  Remove-Item "$scratch/claude.argv"
- cc -Node jp -NoVerify -p hi 6>$null
+ cc -node jp -noverify -p hi 6>$null
  Assert ((@(Get-Content "$scratch/claude.argv"))[0] -eq '--settings') 'explicit current-default node needs its stable node settings'
- 'PASS: proxy-up -Node sets this window only; -Node <default node> is plain cc'
+ 'PASS: proxy-up -node sets this window only; -Node <default node> is plain cc'
 
  # 6) proxy-node refuses to move running sessions.
  $sd=Join-Path (Get-RecoveryIdentity) 'sessions'; $null=New-Item -ItemType Directory $sd -Force
@@ -132,10 +132,10 @@ try {
  $out=(proxy-node sg 6>&1) -join ' '
  Assert ($script:SSH_HOST -eq 'jpvpn' -and $out -match '1 session' -and $out -match 'cc --node sg' -and $out -match '-Force') "guard: $out"
  function Get-TunnelHealth { @{Status='down'} }
- $null=proxy-node sg -Force 6>$null
- Assert ($script:SSH_HOST -eq 'sgvpn') 'proxy-node -Force did not switch'
+ $null=proxy-node sg -force 6>$null
+ Assert ($script:SSH_HOST -eq 'sgvpn') 'proxy-node -force did not switch'
  $script:SSH_HOST='jpvpn'; Remove-Item $sd -Recurse -Force
- 'PASS: proxy-node refuses to move running sessions unless -Force'
+ 'PASS: proxy-node refuses to move running sessions unless -force'
 
  # 7) cc-stop: sessions on every slot; every owner; old Chrome tunnels last.
  $nsd=Join-Path (Get-RecoveryIdentity -Slot node-sg) 'sessions'; $null=New-Item -ItemType Directory $nsd -Force
@@ -175,7 +175,7 @@ try {
  
  # 10) Plain ssh aliases (not in the node list): fixed local slots from 100.
  $script:LOCAL_NODES=Join-Path $scratch 'local-nodes'
- $script:REMOTE_PROXY_PORT=8888   # proxy-node sg -Force (section 6) switched it to sg's port
+ $script:REMOTE_PROXY_PORT=8888   # proxy-node sg -force (section 6) switched it to sg's port
  function Test-SshAlias { param([string]$Alias) $Alias -in @('devbox','lab2') }
  Assert ((Get-NodeSlot devbox) -eq 'node-devbox') 'alias slot'
  $c=Get-NodeContext devbox
@@ -194,7 +194,7 @@ try {
  [IO.File]::WriteAllText((Join-Path $nsd "$PID-c"),"$PID|$((Microsoft.PowerShell.Management\Get-Process -Id $PID).StartTime.ToUniversalTime().Ticks)")
  $script:Stops=@()
  $out=(cc-stop sg 6>&1) -join ' '
- Assert ($script:Stops.Count -eq 0 -and $out -match '1 Claude/Codex session' -and $out -match 'cc-stop sg -Force') "guard: $out / $($script:Stops)"
+ Assert ($script:Stops.Count -eq 0 -and $out -match '1 Claude/Codex session' -and $out -match 'cc-stop sg -force') "guard: $out / $($script:Stops)"
  cc-stop sg --force 6>$null
  Assert (($script:Stops -join ',') -eq 'sg') "forced (bash spelling): $($script:Stops -join ',')"
  Remove-Item $nsd -Recurse -Force

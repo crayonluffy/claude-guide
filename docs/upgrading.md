@@ -8,8 +8,8 @@ The profile keeps your settings in a separate file: `~/.claude-proxy.conf` (macO
 
    ```bash
    proxy-update            # download and install the newest profile; your settings stay
-   proxy-update --check    # only tell me if a newer profile is available (Windows: proxy-update -Check)
-   proxy-update --version 2.13.3   # install that release, also to go back (Windows: -Version 2.13.3)
+   proxy-update --check    # only tell me if a newer profile is available (Windows: proxy-update -check)
+   proxy-update --version 2.13.3   # install that release, also to go back (Windows: -version 2.13.3)
    ```
 
 2. Open a new terminal window. Or load the profile again: `source ~/.claude-proxy.sh` (Windows: `. $PROFILE`).
