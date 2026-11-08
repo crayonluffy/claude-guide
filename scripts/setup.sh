@@ -204,7 +204,10 @@ if [ -n "$WANT_VERSION" ]; then
     [ -n "$gh_repo" ] || { echo "[Err] --version needs the GitHub source, not the mirror $REPO_RAW."; exit 1; }
 elif [ -n "$gh_repo" ]; then
     tag=$(curl -q -fsS --retry 2 --connect-timeout 10 --max-time 20 "https://api.github.com/repos/$gh_repo/releases/latest" 2>/dev/null \
-        | sed -n 's/^ *"tag_name": *"\(v[0-9][0-9.]*\)".*/\1/p' | head -1)
+        | tr ',' '\n' | sed -n 's/^[{ ]*"tag_name": *"\(v[0-9][0-9.]*\)".*/\1/p' | head -1)
+    # API down or rate-limited: the releases/latest page redirects to the tag (not cached).
+    [ -n "$tag" ] || tag=$(curl -q -sS -o /dev/null --retry 2 --connect-timeout 10 --max-time 20 -w '%{redirect_url}' \
+        "https://github.com/$gh_repo/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/\(v[0-9][0-9.]*\)$#\1#p')
 else tag=''; fi
 [ -z "${tag:-}" ] || PROFILE_URL="https://raw.githubusercontent.com/$gh_repo/$tag/scripts/$PROFILE_DOWNLOAD"
 [ -z "${tag:-}" ] || echo "[Setup] Profile release: $tag"

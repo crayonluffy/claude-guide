@@ -22,6 +22,8 @@ function _fetch-file { param($Uri, $OutFile)
     [IO.File]::WriteAllText($OutFile, $script:Files[$Uri])
 }
 function Start-Sleep {}
+$script:WebDown = $false
+function Get-UpdateRedirectTag { param($Uri) if ($script:WebDown -or $Uri -ne 'https://github.com/o/r/releases/latest') { return '' }; 'v2.13.4' }
 function Test-Port { param($Port) $false }
 function _ensure-loader { 'ok' }
 function _conf-write-all {}
@@ -37,7 +39,13 @@ try {
     Assert ($script:Urls -contains 'https://raw.githubusercontent.com/o/r/v2.13.4/scripts/claude-proxy.ps1') 'not fetched by tag'
     'PASS: proxy-update installs the latest release by its tag, not the cached branch'
 
-    $script:ApiDown = $true
+    $script:ApiDown = $true; [IO.File]::WriteAllText($script:PROFILE_PATH, (Profile '2.13.3')); $script:PROFILE_VERSION = '2.13.3'; $script:Urls = @()
+    proxy-update 6>$null
+    Assert ((Installed) -eq '2.13.4') 'redirect fallback did not install the tag'
+    Assert ($script:Urls -contains 'https://raw.githubusercontent.com/o/r/v2.13.4/scripts/claude-proxy.ps1') 'redirect: not fetched by tag'
+    'PASS: with the API down, the releases/latest redirect still gives the tag'
+
+    $script:WebDown = $true
     proxy-update 6>$null
     Assert ((Installed) -eq '2.13.4') 'stale main downgraded the profile'
     'PASS: a stale older copy never downgrades; the API failure falls back to main'

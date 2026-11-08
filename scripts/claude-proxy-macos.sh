@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=macos
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.4"
+CLAUDE_PROXY_VERSION="2.13.5"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -3706,13 +3706,19 @@ _update_fetch() {  # <url> <out file>
     return 1
 }
 _update_latest_tag() {  # <owner/repo>
-    local out tag
+    local out tag=''
     out=$(mktemp) || return 1
     if _update_fetch "https://api.github.com/repos/$1/releases/latest" "$out" 2>/dev/null; then
-        tag=$(sed -n 's/^ *"tag_name": *"\([^"]*\)".*/\1/p' "$out" | head -1)
+        tag=$(tr ',' '\n' < "$out" | sed -n 's/^[{ ]*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
     fi
     rm -f "$out"
-    _update_valid_tag "${tag:-}" || return 1
+    # The API can be down or rate-limited: github.com/<repo>/releases/latest
+    # redirects to .../releases/tag/<tag> and is not cached.
+    if ! _update_valid_tag "$tag"; then
+        tag=$(curl -q -sS -o /dev/null --retry 2 --connect-timeout 10 --max-time 20 -w '%{redirect_url}' \
+              "https://github.com/$1/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/##p')
+    fi
+    _update_valid_tag "$tag" || return 1
     printf '%s\n' "$tag"
 }
 # 0 when version $1 is older than $2 (x.y.z numbers).

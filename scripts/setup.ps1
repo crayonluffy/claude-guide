@@ -98,6 +98,13 @@ try {
             if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "CLAUDE_PROXY_INSTALL_VERSION '$env:CLAUDE_PROXY_INSTALL_VERSION' is not a version like 2.13.3" }
         } else {
             try { $tag = "$((Invoke-RestMethod -UseBasicParsing -TimeoutSec 20 "https://api.github.com/repos/$ghRepo/releases/latest").tag_name)" } catch { $tag = '' }
+            if ($tag -notmatch '^v\d+\.\d+\.\d+$') {   # API down or rate-limited: the releases/latest page redirects to the tag
+                try {
+                    $req = [System.Net.HttpWebRequest]::Create("https://github.com/$ghRepo/releases/latest")
+                    $req.AllowAutoRedirect = $false; $req.Timeout = 20000   # GET: HEAD can hang in .NET
+                    $resp = $req.GetResponse(); try { if ("$($resp.Headers['Location'])" -match '/releases/tag/([^/?#]+)$') { $tag = $Matches[1] } } finally { $resp.Close() }
+                } catch { $tag = '' }
+            }
             if ($tag -notmatch '^v\d+\.\d+\.\d+$') { $tag = '' }
         }
         if ($tag) { $profileUrl = "https://raw.githubusercontent.com/$ghRepo/$tag/scripts/claude-proxy.ps1"; Write-Host "[Setup] Profile release: $tag" }

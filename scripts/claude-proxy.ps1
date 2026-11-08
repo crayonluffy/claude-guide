@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.4'
+$script:PROFILE_VERSION = '2.13.5'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -3194,6 +3194,16 @@ function Invoke-UpdateFetch { param([string]$Uri, [string]$OutFile, [switch]$Qui
     }
     throw $err
 }
+function Get-UpdateRedirectTag { param([string]$Uri)   # the tag a releases/latest link redirects to
+    try {
+        $req = [System.Net.HttpWebRequest]::Create($Uri)
+        $req.AllowAutoRedirect = $false; $req.Timeout = 20000   # GET: HEAD can hang in .NET
+        $resp = $req.GetResponse()
+        try { $loc = "$($resp.Headers['Location'])" } finally { $resp.Close() }
+        if ($loc -match '/releases/tag/([^/?#]+)$') { return $Matches[1] }
+    } catch {}
+    return ''
+}
 function Get-UpdateLatestTag { param([string]$Repo)
     $out = [System.IO.Path]::GetTempFileName()
     try {
@@ -3201,6 +3211,10 @@ function Get-UpdateLatestTag { param([string]$Repo)
         $tag = "$((Get-Content -LiteralPath $out -Raw | ConvertFrom-Json).tag_name)"
         if ($tag -match '^v\d+\.\d+\.\d+$') { return $tag }
     } catch {} finally { Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue }
+    # The API can be down or rate-limited: github.com/<repo>/releases/latest
+    # redirects to .../releases/tag/<tag> and is not cached.
+    $tag = Get-UpdateRedirectTag "https://github.com/$Repo/releases/latest"
+    if ($tag -match '^v\d+\.\d+\.\d+$') { return $tag }
     return ''
 }
 
