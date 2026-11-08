@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.0'
+$script:PROFILE_VERSION = '2.13.1'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -761,7 +761,13 @@ function New-RecoveryDesktopContext {
             finally {if ($icon) {$icon.Visible=$false;$icon.Dispose()};$sync.Ready=$false}
         }).AddArgument($ctx.Queue).AddArgument($ctx.Stop).AddArgument($ctx.Sync)
         $ctx.Async=$ctx.PowerShell.BeginInvoke()
-        for ($i=0;$i -lt 20 -and -not $ctx.Sync.Ready -and -not $ctx.Async.IsCompleted;$i++) {Start-Sleep -Milliseconds 100}
+        for ($i=0;$i -lt 50 -and -not $ctx.Sync.Ready -and -not $ctx.Async.IsCompleted;$i++) {Start-Sleep -Milliseconds 100}
+        # Only a UI thread that reported ready is a backend; a failed or stuck one is not.
+        if (-not $ctx.Sync.Ready) {
+            $why=if ($ctx.Sync.Error) {$ctx.Sync.Error} else {'the notification thread did not start'}
+            $ctx.LastSubmission='failed'
+            throw $why
+        }
         $ctx.Backend='windows-tray';$ctx.Reason='OS taskbar notification; Windows notification settings control visibility.'
     } catch {
         $ctx.Reason="Desktop initialization failed: $($_.Exception.Message)"
@@ -957,6 +963,31 @@ function Get-TunnelHealth {
 }
 
 # --- Claude settings.json sync (toggle-synced with the proxy) ---------------
+# Write Claude's settings.json: UTF-8 without BOM, from a temp file in the same
+# folder; a symlinked file is written through so the link stays. The first copy
+# before this profile changed it is kept as .claude-proxy.orig; .bak is the copy
+# before the latest change.
+function Write-ClaudeSettingsJson { param([string]$Path, $Object)
+    $json = $Object | ConvertTo-Json -Depth 20
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $tmp = "$Path.tmp.$([guid]::NewGuid().ToString('N'))"
+    [IO.File]::WriteAllText($tmp, $json, $utf8)
+    try {
+        if ([IO.File]::Exists($Path)) {
+            if (-not (Test-Path -LiteralPath "$Path.claude-proxy.orig")) { Copy-Item -LiteralPath $Path "$Path.claude-proxy.orig" -ErrorAction SilentlyContinue }
+            Copy-Item -LiteralPath $Path "$Path.bak" -Force -ErrorAction SilentlyContinue
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.LinkType) { [IO.File]::WriteAllText($Path, $json, $utf8) }
+            else {
+                # Replace() works on .NET Framework (PowerShell 5.1) too; its backup is discarded.
+                $old = "$Path.old.$([guid]::NewGuid().ToString('N'))"
+                [IO.File]::Replace($tmp, $Path, $old); $tmp = $null
+                [IO.File]::Delete($old)
+            }
+        } else { [IO.File]::Move($tmp, $Path); $tmp = $null }
+    } finally { if ($tmp -and [IO.File]::Exists($tmp)) { [IO.File]::Delete($tmp) } }
+}
+
 function _settings-sync-on {
     if ($script:SYNC_SETTINGS -ne 1) { return }
     if (Test-ClaudeSettingsPinned) { return }   # already ours: never rewrite the user's file
@@ -964,7 +995,6 @@ function _settings-sync-on {
     $url = "http://127.0.0.1:$($script:HTTP_PORT)"
     New-Item -ItemType Directory -Force -Path (Split-Path $settings) | Out-Null
     if (Test-Path $settings) {
-        Copy-Item $settings "$settings.bak" -Force -ErrorAction SilentlyContinue
         try { $obj = Get-Content $settings -Raw | ConvertFrom-Json } catch {
             Write-Host "[Warn] $settings is invalid JSON - left it untouched" -ForegroundColor Yellow
             return
@@ -978,7 +1008,7 @@ function _settings-sync-on {
     $obj.env | Add-Member -NotePropertyName HTTPS_PROXY -NotePropertyValue $url -Force
     $obj.env | Add-Member -NotePropertyName HTTP_PROXY  -NotePropertyValue $url -Force
     $obj.env | Add-Member -NotePropertyName NO_PROXY    -NotePropertyValue $script:NO_PROXY_LIST -Force
-    $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
+    Write-ClaudeSettingsJson $settings $obj
     Write-Host "[OK] Proxy written into $settings (env block)" -ForegroundColor Green
 }
 
@@ -986,7 +1016,6 @@ function _settings-sync-off {
     if ($script:SYNC_SETTINGS -ne 1) { return }
     $settings = $script:CLAUDE_SETTINGS
     if (-not (Test-Path $settings)) { return }
-    Copy-Item $settings "$settings.bak" -Force -ErrorAction SilentlyContinue
     try { $obj = Get-Content $settings -Raw | ConvertFrom-Json } catch { return }
     if ($obj.env) {
         foreach ($k in 'HTTPS_PROXY','HTTP_PROXY','NO_PROXY') {
@@ -995,7 +1024,7 @@ function _settings-sync-off {
             }
         }
     }
-    $obj | ConvertTo-Json -Depth 20 | Set-Content $settings -Encoding utf8
+    Write-ClaudeSettingsJson $settings $obj
     Write-Host "[OK] Proxy removed from $settings" -ForegroundColor Green
 }
 
@@ -1534,12 +1563,40 @@ function Add-SshAlias { param([string]$Alias, [string]$NodeHost, [string]$User, 
     Add-Content -Path (Join-Path $sshDir 'config') -Value $entry -Encoding ascii
 }
 
+# Node-list data is untrusted (DNS TXT can be spoofed on the networks this is
+# for): only plain tokens may reach ~\.ssh\config or ~\.ssh\known_hosts.
+function Test-NodeField { param([string]$Kind, [string]$Value)
+    switch ($Kind) {
+        'alias'   { return ($Value -cmatch '^[A-Za-z0-9._][A-Za-z0-9._-]*$') }
+        'host'    { return ($Value -cmatch '^[A-Za-z0-9.:][A-Za-z0-9.:-]*$') }
+        'user'    { return ($Value -cmatch '^([A-Za-z0-9._][A-Za-z0-9._-]*)?$') }
+        'port'    { return ("$Value" -match '^[0-9]{1,5}$' -and [int]$Value -ge 1 -and [int]$Value -le 65535) }
+        'hostkey' { return ($Value -cmatch '^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+) [A-Za-z0-9+/]+={0,2}$') }
+    }
+    return $false
+}
+
 # Pin a node's host key so the first connection never stops at "Are you sure...?".
+# Only for a host that has NO key yet: ssh accepts any key listed for a host, so
+# adding a second one (e.g. from a spoofed node list) would weaken the pin.
 function Add-KnownHost { param([string]$NodeHost, [int]$Port, [string]$HostKey)
-    if (-not $HostKey) { return }
+    if (-not $HostKey -or -not (Test-NodeProvisioned $NodeHost)) { return }
+    if (-not (Test-NodeField host $NodeHost) -or -not (Test-NodeField port $Port) -or -not (Test-NodeField hostkey $HostKey)) {
+        Write-Host "[Warn] Ignoring an invalid host key for '$NodeHost' in the node list." -ForegroundColor Yellow
+        return
+    }
     $kh = Join-Path $HOME '.ssh\known_hosts'
-    if ((Test-Path $kh) -and (Select-String -Path $kh -SimpleMatch $HostKey -Quiet)) { return }
     $entry = if ($Port -eq 22) { $NodeHost } else { "[$NodeHost]:$Port" }
+    if (-not (Get-Command ssh-keygen -ErrorAction SilentlyContinue)) { return }   # ssh asks (accept-new) instead
+    $known = @()
+    if (Test-Path -LiteralPath $kh) { $known = @(& ssh-keygen -F $entry -f $kh 2>$null | Where-Object { $_ -and -not $_.StartsWith('#') }) }
+    if ($known.Count) {
+        foreach ($line in $known) { $f = "$line" -split '\s+'; if ($f.Count -ge 3 -and "$($f[1]) $($f[2])" -ceq $HostKey) { return } }
+        Write-Host "[Warn] The node list has a different host key for $entry than ~\.ssh\known_hosts - kept yours." -ForegroundColor Yellow
+        Write-Host "       If your admin rebuilt that VM: ssh-keygen -R '$entry', then connect once." -ForegroundColor Yellow
+        return
+    }
+    $null = New-Item -ItemType Directory -Force -Path (Split-Path $kh)
     Add-Content -Path $kh -Value "$entry $HostKey" -Encoding ascii
     Write-Host "[OK] Host key for $NodeHost pinned in ~\.ssh\known_hosts" -ForegroundColor Green
 }
@@ -1547,9 +1604,17 @@ function Add-KnownHost { param([string]$NodeHost, [int]$Port, [string]$HostKey)
 # Make sure a catalogue node has an ssh alias (creates it from the catalogue if
 # missing, reusing the active alias's key). $false when the node has no host yet.
 function Confirm-NodeAlias { param($Node)
+    if (-not (Test-NodeField alias $Node.Alias)) {
+        Write-Host "[Err] Node '$($Node.Name)' has an invalid ssh alias in the node list - ask your admin." -ForegroundColor Red
+        return $false
+    }
     if (Test-SshAlias $Node.Alias) { Add-KnownHost $Node.Host $Node.SshPort $Node.HostKey; return $true }
     if (-not (Test-NodeProvisioned $Node.Host)) {
         Write-Host "[Err] Node '$($Node.Name)' has no host in the catalogue yet (not provisioned) - ask your admin, then 'proxy-nodes -Refresh'." -ForegroundColor Red
+        return $false
+    }
+    if (-not (Test-NodeField host $Node.Host) -or -not (Test-NodeField user $Node.User) -or -not (Test-NodeField port $Node.SshPort)) {
+        Write-Host "[Err] Node '$($Node.Name)' has an invalid host, user or SSH port in the node list - nothing was written to ~\.ssh\config. Ask your admin." -ForegroundColor Red
         return $false
     }
     $key = Get-SshIdentity $script:SSH_HOST
@@ -3138,7 +3203,15 @@ function proxy-update {
     $dest = $script:PROFILE_PATH
     try {
         if (Test-Path $dest) { Copy-Item $dest "$dest.bak" -Force }
-        Copy-Item $tmp $dest -Force
+        # Stage beside the profile, then swap: never leave a half-written profile.
+        $staged = "$dest.update.$([guid]::NewGuid().ToString('N'))"
+        try {
+            Copy-Item $tmp $staged -Force
+            if (Test-Path $dest) {
+                $old = "$dest.old.$([guid]::NewGuid().ToString('N'))"
+                [IO.File]::Replace($staged, $dest, $old); [IO.File]::Delete($old)
+            } else { [IO.File]::Move($staged, $dest) }
+        } finally { if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force } }
     } catch {
         Write-Host "[Err] Could not write $dest : $($_.Exception.Message)" -ForegroundColor Red
         Write-Host "       The new version is saved at $tmp - copy it there by hand:  Copy-Item '$tmp' '$dest' -Force" -ForegroundColor Yellow

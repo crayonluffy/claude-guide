@@ -37,7 +37,7 @@ _CLAUDE_PROXY_PLATFORM=linux
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.0"
+CLAUDE_PROXY_VERSION="2.13.1"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -1367,17 +1367,33 @@ _settings_file_pinned() {  # <settings.json>
         '.env.HTTPS_PROXY == $url and .env.HTTP_PROXY == $url and .env.NO_PROXY == $np' "$1" >/dev/null 2>&1
 }
 
+# Replace a JSON settings file with a finished temp file from the same folder.
+# A symlinked file (dotfile managers) is written through, so the link stays.
+# The first copy before this profile ever changed it is kept as .claude-proxy.orig;
+# .bak is the copy before the latest change.
+_settings_file_replace() {  # <settings.json> <temp in the same folder>
+    local f="$1" tmp="$2"
+    if [ -f "$f" ]; then
+        [ -e "$f.claude-proxy.orig" ] || cp -p "$f" "$f.claude-proxy.orig" 2>/dev/null
+        cp -p "$f" "$f.bak" 2>/dev/null
+    fi
+    if [ -L "$f" ]; then
+        cat "$tmp" > "$f" && rm -f "$tmp"
+    else
+        chmod 600 "$tmp" 2>/dev/null
+        mv -f "$tmp" "$f"
+    fi
+}
+
 _settings_file_proxy_on() {  # <settings.json>
-    local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp
+    local f="$1" url="http://127.0.0.1:$CLAUDE_HTTP_PORT" tmp src
     _settings_file_pinned "$f" && return 0
     mkdir -p "$(dirname "$f")"
-    [ -f "$f" ] || echo '{}' > "$f"
-    cp "$f" "${f}.bak" 2>/dev/null
-    tmp=$(mktemp)
-    if jq --arg url "$url" --arg np "$CLAUDE_NO_PROXY" \
+    src=$f; [ -f "$f" ] || src=/dev/null
+    tmp=$(mktemp "$f.tmp.XXXXXX") || return 1
+    if { [ "$src" = /dev/null ] && echo '{}' || cat "$src"; } | jq --arg url "$url" --arg np "$CLAUDE_NO_PROXY" \
         '.env = (.env // {}) | .env.HTTPS_PROXY=$url | .env.HTTP_PROXY=$url | .env.NO_PROXY=$np' \
-        "$f" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$f"
+        > "$tmp" 2>/dev/null && _settings_file_replace "$f" "$tmp"; then
         echo "[OK] Proxy written into $f (env block)"
     else
         rm -f "$tmp"
@@ -1389,11 +1405,9 @@ _settings_file_proxy_on() {  # <settings.json>
 _settings_file_proxy_off() {  # <settings.json>
     local f="$1" tmp
     [ -f "$f" ] || return 0
-    cp "$f" "${f}.bak" 2>/dev/null
-    tmp=$(mktemp)
+    tmp=$(mktemp "$f.tmp.XXXXXX") || return 1
     if jq 'if .env then .env |= del(.HTTPS_PROXY, .HTTP_PROXY, .NO_PROXY) else . end' \
-        "$f" > "$tmp" 2>/dev/null; then
-        mv "$tmp" "$f"
+        "$f" > "$tmp" 2>/dev/null && _settings_file_replace "$f" "$tmp"; then
         echo "[OK] Proxy removed from $f"
     else
         rm -f "$tmp"
@@ -1407,14 +1421,18 @@ _claude_settings_proxy_on() {
         return 0
     fi
     local f
-    for f in $(_settings_targets); do _settings_file_proxy_on "$f"; done
+    while IFS= read -r f; do   # line-wise: Windows user folders can contain spaces
+        [ -z "$f" ] || _settings_file_proxy_on "$f"
+    done <<< "$(_settings_targets)"
 }
 
 _claude_settings_proxy_off() {
     [ "${CLAUDE_SYNC_SETTINGS:-0}" = "1" ] || return 0
     command -v jq >/dev/null 2>&1 || return 0
     local f
-    for f in $(_settings_targets); do _settings_file_proxy_off "$f"; done
+    while IFS= read -r f; do
+        [ -z "$f" ] || _settings_file_proxy_off "$f"
+    done <<< "$(_settings_targets)"
 }
 
 # Anything but an explicit "off" counts as on: a typo must not open a leak.
@@ -1741,15 +1759,41 @@ _ssh_config_add_alias() {  # <alias> <host> <user> <port> <identityfile>
     chmod 600 "$HOME/.ssh/config"
 }
 
+# Node-list data is untrusted (DNS TXT can be spoofed on the networks this is
+# for): only plain tokens may reach ~/.ssh/config or ~/.ssh/known_hosts.
+_node_field_ok() {  # <alias|host|user|port|hostkey> <value>
+    case "$1" in
+        alias)   case "$2" in ''|-*|*[!A-Za-z0-9._-]*) return 1;; esac ;;
+        host)    case "$2" in ''|-*|*[!A-Za-z0-9.:-]*) return 1;; esac ;;
+        user)    case "$2" in -*|*[!A-Za-z0-9._-]*) return 1;; esac ;;
+        port)    case "$2" in ''|*[!0-9]*) return 1;; esac; [ "${#2}" -le 5 ] && [ "$2" -ge 1 ] && [ "$2" -le 65535 ] ;;
+        hostkey) printf '%s\n' "$2" | grep -qxE '(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-[a-z0-9@.-]+) [A-Za-z0-9+/]+={0,2}' ;;
+        *) return 1 ;;
+    esac
+}
+
 # Pin a node's host key so the first connection never stops at "Are you sure...?".
+# Only for a host that has NO key yet: ssh accepts any key listed for a host, so
+# adding a second one (e.g. from a spoofed node list) would weaken the pin.
 _known_hosts_add() {  # <host> <port> <hostkey>
-    local host="$1" port="$2" key="$3" entry
-    [ -n "$key" ] || return 0
+    local host="$1" port="$2" key="$3" entry kh="$HOME/.ssh/known_hosts" known
+    [ -n "$key" ] && _node_provisioned "$host" || return 0
+    if ! _node_field_ok host "$host" || ! _node_field_ok port "$port" || ! _node_field_ok hostkey "$key"; then
+        echo "[Warn] Ignoring an invalid host key for '$host' in the node list." >&2
+        return 0
+    fi
     [ "$port" = "22" ] && entry="$host" || entry="[$host]:$port"
+    command -v ssh-keygen >/dev/null 2>&1 || return 0   # ssh asks (accept-new) instead
     mkdir -p "$HOME/.ssh"
-    grep -qsF "$key" "$HOME/.ssh/known_hosts" && return 0
-    printf '%s %s\n' "$entry" "$key" >> "$HOME/.ssh/known_hosts"
-    chmod 600 "$HOME/.ssh/known_hosts"
+    known=$(ssh-keygen -F "$entry" -f "$kh" 2>/dev/null | grep -v '^#' || :)
+    if [ -n "$known" ]; then
+        printf '%s\n' "$known" | awk '{print $2" "$3}' | grep -qxF "$key" && return 0
+        echo "[Warn] The node list has a different host key for $entry than ~/.ssh/known_hosts - kept yours." >&2
+        echo "       If your admin rebuilt that VM: ssh-keygen -R '$entry', then connect once." >&2
+        return 0
+    fi
+    printf '%s %s\n' "$entry" "$key" >> "$kh"
+    chmod 600 "$kh"
     echo "[OK] Host key for $host pinned in ~/.ssh/known_hosts"
 }
 
@@ -1758,12 +1802,21 @@ _known_hosts_add() {  # <host> <port> <hostkey>
 _node_ensure_alias() {  # <catalogue line>
     local idx name alias host user sport pport region note hostkey key
     IFS='|' read -r idx name alias host user sport pport region note hostkey <<< "$1"
+    if ! _node_field_ok alias "$alias"; then
+        echo "[Err] Node '$name' has an invalid ssh alias in the node list - ask your admin." >&2
+        return 1
+    fi
     if _ssh_config_has_alias "$alias"; then
         _known_hosts_add "$host" "$sport" "$hostkey"
         return 0
     fi
     if ! _node_provisioned "$host"; then
         echo "[Err] Node '$name' has no host in the catalogue yet (not provisioned) - ask your admin, then 'proxy-nodes --refresh'."
+        return 1
+    fi
+    if ! _node_field_ok host "$host" || ! _node_field_ok user "$user" || \
+       { [ -n "$sport" ] && ! _node_field_ok port "$sport"; }; then
+        echo "[Err] Node '$name' has an invalid host, user or SSH port in the node list - nothing was written to ~/.ssh/config. Ask your admin." >&2
         return 1
     fi
     key=$(_ssh_config_identity "$CLAUDE_SSH_HOST")
@@ -3246,15 +3299,23 @@ _conf_set() {
             echo "# Lines you leave out keep the script's built-in default."
         } > "$CLAUDE_PROXY_CONF"
     fi
-    tmp=$(mktemp)
-    if grep -q "^${key}=" "$CLAUDE_PROXY_CONF"; then
-        # Escape the few characters that matter on the sed replacement side.
-        local esc
-        esc=$(printf '%s' "$val" | sed 's/[\/&|]/\\&/g')
-        sed "s|^${key}=.*|${key}=\"${esc}\"|" "$CLAUDE_PROXY_CONF" > "$tmp" && mv "$tmp" "$CLAUDE_PROXY_CONF"
+    _conf_write_line "$CLAUDE_PROXY_CONF" "$key" "$val"
+}
+# The settings file is sourced as shell code: a value is always written inside
+# double quotes with \ " $ ` escaped, and a newline is refused.
+_conf_write_line() {  # <file> <KEY> <value>
+    local file="$1" line tmp
+    case "$3" in *"
+"*) echo "[Err] ${2#CLAUDE_}: a value cannot contain a line break." >&2; return 1;; esac
+    line="$2=\"$(printf '%s' "$3" | sed 's/[\\"$`]/\\&/g')\""
+    tmp=$(mktemp "$file.XXXXXX") || return 1
+    if K="$2=" L="$line" awk '
+        index($0, ENVIRON["K"]) == 1 { if (!done) print ENVIRON["L"]; done = 1; next }
+        { print }
+        END { if (!done) print ENVIRON["L"] }' "$file" > "$tmp"; then
+        mv -f "$tmp" "$file"
     else
-        rm -f "$tmp"
-        printf '%s="%s"\n' "$key" "$val" >> "$CLAUDE_PROXY_CONF"
+        rm -f "$tmp"; return 1
     fi
 }
 
@@ -3646,9 +3707,14 @@ proxy-update() {
     fi
 
     cp "$self" "$self.bak" 2>/dev/null
-    if ! cp "$tmp" "$self"; then
-        rm -f "$tmp"
-        echo "[Err] Could not write $self"
+    # Stage the new profile beside the old one and rename it into place: a full
+    # disk or an interrupted copy must never leave a half-written profile that
+    # breaks every new shell.
+    local staged
+    staged=$(mktemp "$self.update.XXXXXX") || { rm -f "$tmp"; echo "[Err] Could not write next to $self"; return 1; }
+    if ! cat "$tmp" > "$staged" || ! cmp -s "$tmp" "$staged" || ! chmod 644 "$staged" || ! mv -f "$staged" "$self"; then
+        rm -f "$tmp" "$staged"
+        echo "[Err] Could not write $self - the installed profile was not changed."
         return 1
     fi
     rm -f "$tmp"

@@ -25,6 +25,13 @@ window with `. "$HOME\.claude-proxy.ps1"`. `proxy-config edit` opens Notepad.
 If it reports that the file changed in another window, reopen the editor;
 the other window's saved changes have been kept.
 
+## Do it by hand
+
+`cc-manual` prints the exact commands for your setup, without running them:
+the `ssh` tunnel, a `curl` check, and `claude` / `codex` with the proxy set for
+that one start (`cc-manual sg` for node `sg`). Use them when the profile itself
+misbehaves; they also show which step fails. Refer to [the manual page](proxy-manual.md).
+
 ## Start with `proxy-status --fix`
 
 Type `proxy-status --fix`. It examines each part of the setup and shows one line for each part:
@@ -169,6 +176,8 @@ The background recovery cannot ask for a passphrase. Refer to [recovery settings
 | `sg tunnel failed to start`, or *Permission denied (publickey)* | Your key is not on that VM. Ask the admin. To examine it, type `ssh sgvpn`. The `Host sgvpn` block in `~/.ssh/config` uses the same `IdentityFile` as `jpvpn`. |
 | `[Err] <program> (PID n) is on port 8181, which this node's tunnel uses` | A different program uses a port of the node tunnel. Close that program, or move the node ports with the `proxy-config set NODE_…_BASE` command in the message. |
 | `Node '<name>' would use port …, which the default tunnel uses` | The node ports and the main ports are the same. Use the `proxy-config set NODE_…_BASE` command in the message. |
+| `The node list has a different host key for <host> than ~/.ssh/known_hosts - kept yours` | The node list (DNS, VM or this guide) names a different SSH host key than the one your computer already trusts. The profile kept yours and added nothing. If your admin rebuilt that VM, type `ssh-keygen -R <host>` and connect one time. Otherwise tell your admin: the node list can be wrong or forged. |
+| `Node '<name>' has an invalid host, user or SSH port in the node list` | The node list contains a value that is not a plain host name, user or port. The profile wrote nothing to `~/.ssh/config`. Tell your admin. |
 | `proxy-nodes use sg`: `[Node] n session(s) use the default node` | A `cc` or `cx` session uses the default node. It would move to the new node. For one terminal, type `cc --node sg`. To change the default anyway, type `proxy-nodes use sg --force`. |
 | `cc --node sg` worked before, but now the default node does not change | From 2.10, `cc --node` changes only that terminal. To change the default, type `proxy-nodes use sg`. |
 | `<vm> answered, but doesn't serve the node list yet` | That VM runs the old `ForceCommand` of sshu-manager. Admin: install forge `proxynodes-manager` on that VM with `--sshd`. The profile did not change your setup. |
@@ -187,6 +196,16 @@ The background recovery cannot ask for a passphrase. Refer to [recovery settings
 
 ---
 
+## Two accounts on one Mac (shared mode)
+
+| Symptom | Fix |
+|---|---|
+| The second account's `cc` reports that ports `8080` / `1080` are in use | The other account already runs the tunnel. In the second account: `proxy-config set PROXY_MODE shared`. Refer to [shared mode](proxy-profile.md#two-accounts-on-one-mac-shared-mode-2130). |
+| `[Shared] Restart is managed by the proxy owner` (or stop / node change) | In shared mode this account does not control the tunnel. Do it in the account that runs it. |
+| `proxy-status` shows `[SHARED] Tunnel` and `Proxy answers : NO` | The owning account's tunnel is down. Type `cc` (or `proxy-restart`) in that account. |
+
+---
+
 ## How the profile uses Claude's `settings.json`
 
 The profile writes `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` into the `env` block of `~/.claude/settings.json`. Claude reads this file before the settings of your terminal. Thus Claude uses the proxy, also when you start it from an IDE, a desktop application, or a different terminal.
@@ -194,6 +213,7 @@ The profile writes `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` into the `env` blo
 - With the kill switch on (the default), the profile keeps these keys. `cc-stop` and `proxy-off` do not remove them. If the tunnel is down, Claude cannot connect. It does not connect directly. Refer to [Kill switch](proxy-profile.md#kill-switch-290).
 - With the kill switch off (`proxy-config killswitch off`), `cc-stop` and `proxy-off` remove the keys.
 - The profile changes only these three keys. On macOS and Linux, it needs [`jq`](https://jqlang.github.io/jq/). The setup wizard installs `jq`.
+- Before its first change, the profile keeps your file as `settings.json.claude-proxy.orig`. `settings.json.bak` is the copy before the latest change. A `settings.json` that is a symbolic link stays a link.
 - To stop this, type `proxy-config set SYNC_SETTINGS 0`. Then only Claude that you start with `cc` uses the proxy.
 - **Codex** does not read a settings file. It reads only the proxy settings of the terminal. Start it with `cx`, or set `proxy-config set PLAIN_COMMANDS auto`.
 

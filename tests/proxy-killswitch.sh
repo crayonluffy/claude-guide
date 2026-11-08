@@ -40,7 +40,7 @@ exempt '' ''
 echo 'PASS: NO_PROXY entries that would send API traffic direct are found'
 
 # 2) The pin: settings.json keeps the proxy while the kill switch is on.
-fn _settings_targets _settings_file_pinned _settings_file_proxy_on _settings_file_proxy_off _claude_settings_proxy_on \
+fn _settings_targets _settings_file_pinned _settings_file_replace _settings_file_proxy_on _settings_file_proxy_off _claude_settings_proxy_on \
    _claude_settings_proxy_off _killswitch_on _killswitch_pin_state _killswitch_ensure_pin proxy-on proxy-off _count cc-stop
 _is_wsl() { return 1; }
 export CLAUDE_SETTINGS="$scratch/settings.json" CLAUDE_SYNC_SETTINGS=1 CLAUDE_SYNC_WINDOWS_SETTINGS=0
