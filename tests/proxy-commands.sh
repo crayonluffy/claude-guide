@@ -76,6 +76,27 @@ for sh in bash zsh; do
     [ "$(cat "$scratch/clipboard")" = "$(printf '%s\n' "$cmds" | grep '^curl ')" ] || fail "$sh clipboard: $(cat "$scratch/clipboard")"
     run "$sh" 'cc-manual --copy bogus' >/dev/null 2>&1 && fail "$sh bad --copy accepted"
     echo "PASS: $sh - merged commands, renamed names, cc-help and cc-manual"
+
+    # 2.13.9: '--node' with no name stops with a hint. It used to start the
+    # default node without saying so (and zsh printed a shift error).
+    # Stand-ins first on PATH: if the check ever regresses, the real apps must not start.
+    mkdir -p "$scratch/apps"
+    for app in claude codex; do printf '#!/bin/sh\necho STARTED\n' > "$scratch/apps/$app"; chmod +x "$scratch/apps/$app"; done
+    for call in 'cc --node' 'cx --node' 'cc --node=' 'cc --node -c' 'proxy-up --node' 'proxy-up --node='; do
+        stub='tunnel-start() { echo STARTED; }; '
+        case "$call" in proxy-up*) ;; *) stub="$stub"'proxy-up() { echo STARTED; }; ';; esac
+        rc=0; out=$(PATH="$scratch/apps:$PATH" run "$sh" "$stub$call" 2>&1) || rc=$?
+        [ "$rc" -eq 2 ] || fail "$sh '$call': exit $rc, expected 2 ($out)"
+        case "$out" in *"--node needs a node name, for example: ${call%% *} --node sg"*) ;; *) fail "$sh '$call': no hint ($out)";; esac
+        case "$out" in *STARTED*|*shift*) fail "$sh '$call' went on: $out";; esac
+    done
+    # A name is still read in both spellings, and the other arguments reach the app.
+    stub='_node_slot() { echo "node-$1"; }; _node_up() { echo "NODE:$1" >&2; return 1; }; '
+    for call in 'cc --node sg -c' 'cx --node=sg'; do
+        out=$(PATH="$scratch/apps:$PATH" run "$sh" "$stub$call" 2>&1) || :
+        [ "$out" = NODE:sg ] || fail "$sh '$call' did not select node sg: $out"
+    done
+    echo "PASS: $sh - --node needs a node name"
 done
 
 # Shared mode: status and --fix check the shared endpoint instead of telling

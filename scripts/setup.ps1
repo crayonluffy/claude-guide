@@ -467,4 +467,4 @@ if ($needShortcut -and $shortcutOk) {
     Write-Host "(New windows pick it up automatically.)" -ForegroundColor DarkGray
 }
 Write-Host "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)." -ForegroundColor DarkGray
-Write-Host "       'proxy-killswitch' shows how Claude and Codex are kept from going out directly." -ForegroundColor DarkGray
+Write-Host "       'proxy-config killswitch' shows how Claude and Codex are kept from going out directly." -ForegroundColor DarkGray

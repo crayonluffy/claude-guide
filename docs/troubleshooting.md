@@ -16,7 +16,7 @@ Type `proxy-status --fix`. It examines each part of the setup and shows one line
 4. The proxy in Claude's `settings.json`, and the kill switch.
 5. The connection to the API through the proxy.
 
-Find the message or the symptom below. Commands are the same on all platforms; where Windows differs, it is shown in brackets (for example `--force` / `-Force`).
+Find the message or the symptom below. Commands are the same on all platforms; where Windows differs, it is shown in brackets (for example `--force` / `-force`).
 
 ## While Claude or Codex runs
 
@@ -61,7 +61,7 @@ The recovery owner shows a proxy failure. It does not restart SSH again and agai
 | `cc` says `Another user's program is on port 1080` (or 8080) | A program from a different account listens on that port on localhost or on all addresses. Move the tunnel: `proxy-config set SOCKS_PORT 1081` (or `HTTP_PORT`). A program on a LAN address only (`10.0.0.5:1080`) does not count. |
 | `Account 'ming' runs its own proxy tunnel on port 8080` | Two accounts on one computer each run a tunnel on the same ports. In the other account: `cc-stop --force`, then `proxy-config set PROXY_MODE shared` (it then uses your tunnel). Refer to [shared mode](shared-mode.md). |
 | `cc-stop --force` stops ssh, but a new ssh appears seconds later (often on port 8081) | A loop from a very old profile still runs without a terminal (macOS, Linux). 2.13.6+: `proxy-update`, then `cc-stop --force` stops the loop too. Older: `ps -o pid,ppid,tty,command -p $(ps -o ppid= -p <ssh PID>)` shows a `-zsh` with `??` and parent `1`; stop it with `kill -9 <that PID>`. |
-| `cc-stop` refuses: `Claude/Codex session(s) still running` | A different window has `cc` or `cx` open. (Claude from npm shows as `node`.) Close that session. To connect again, type `proxy-restart`. To stop the tunnel anyway, type `cc-stop --force` (`-Force`). |
+| `cc-stop` refuses: `Claude/Codex session(s) still running` | A different window has `cc` or `cx` open. (Claude from npm shows as `node`.) Close that session. To connect again, type `proxy-restart`. To stop the tunnel anyway, type `cc-stop --force` (`-force`). |
 | `cc-stop` does not stop everything | `cc-stop` stops each `ssh` process on the two tunnel ports. It does not stop other programs on these ports; it shows them. If an `ssh` process does not stop, `cc-stop` tells you how to examine it. |
 
 ## Kill switch
@@ -129,7 +129,7 @@ How the kill switch uses Claude's `settings.json`: [Kill switch, recovery and al
 
 | Message or symptom | Fix |
 |---|---|
-| `proxy-nodes` shows *No node catalogue yet* | Type `proxy-nodes --refresh` (`-Refresh`). It downloads from the same GitHub URL as `proxy-update`. If GitHub is blocked, type `proxy-up` first and try again. |
+| `proxy-nodes` shows *No node catalogue yet* | Type `proxy-nodes --refresh` (`-refresh`). It downloads from the same GitHub URL as `proxy-update`. If GitHub is blocked, type `proxy-up` first and try again. |
 | `Unknown node 'sg'` | The node list does not contain this name, and `~/.ssh/config` has no alias with this name. To get the latest node list, type `proxy-nodes --refresh`. Or add a `Host sg` alias to `~/.ssh/config`: from 2.11, a plain alias works as a node. |
 | A node shows `<not provisioned>` | The admin added the node but not its address. You do not have to do anything. |
 | `sg tunnel failed to start`, or *Permission denied (publickey)* | Your key is not on that VM. Ask the admin. To examine it, type `ssh sgvpn`. The `Host sgvpn` block in `~/.ssh/config` uses the same `IdentityFile` as `jpvpn`. |
@@ -143,8 +143,8 @@ How the kill switch uses Claude's `settings.json`: [Kill switch, recovery and al
 | `<vm> has no 'claude-proxy-nodes' command` | forge `proxynodes-manager` is not installed on that VM. Or select a different VM that serves the list: `proxy-nodes --from <other vm>`. |
 | `Could not get the node list from <vm>: …` | The last line is the error from ssh. Type `ssh <vm>` to examine the connection. The list download cannot ask for a passphrase, so load a key with a passphrase into `ssh-agent`. `proxy-nodes --refresh` also tries the other VMs in your list. |
 | `<vm> didn't answer - took the list from <other> instead` | This is for your information only. Your VM did not answer, and a different VM answered. To use that VM permanently, type `proxy-nodes --from <other>`. |
-| `No valid 'v=cp1' TXT records at _claude-proxy.<domain>` | The domain is incorrect, or your admin did not publish the records. To examine them, type `dig +short TXT _claude-proxy.<domain>` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.<domain>`). The profile did not change the saved domain or your node list. To save the domain anyway (for example, before the admin publishes the records), add `--force` (`-Force`). To use the list of this guide again, type `proxy-nodes --domain ''`. |
-| `PROXY_DOMAIN = '--domain' saved` (Windows, profile 2.2.1 or older) | Old Windows profiles know only `-Domain`. Type `proxy-update`. Then type `proxy-nodes -domain ''` to remove the incorrect value. From 2.2.2, `--domain` also works, and the profile refuses incorrect values. |
+| `No valid 'v=cp1' TXT records at _claude-proxy.<domain>` | The domain is incorrect, or your admin did not publish the records. To examine them, type `dig +short TXT _claude-proxy.<domain>` (Windows: `Resolve-DnsName -Type TXT _claude-proxy.<domain>`). The profile did not change the saved domain or your node list. To save the domain anyway (for example, before the admin publishes the records), add `--force` (`-force`). To use the list of this guide again, type `proxy-nodes --domain ''`. |
+| `PROXY_DOMAIN = '--domain' saved` (Windows, profile 2.2.1 or older) | Old Windows profiles know only `-domain`. Type `proxy-update`. Then type `proxy-nodes -domain ''` to remove the incorrect value. From 2.2.2, `--domain` also works, and the profile refuses incorrect values. |
 | `proxy-nodes` shows `jp`, `sg`, `us` as `<not provisioned>` | This was the old example list of this guide (profile 2.2.1 or older). Type `proxy-update` and `proxy-nodes --refresh`. The list of this guide is now empty. Your nodes come from `proxy-nodes --domain <your company domain>`. |
 | `ssh alias 'jpvpn' points to X, the catalogue says Y` | Your alias is older than the domain setup. Change `HostName` in `~/.ssh/config`. Or delete that `Host` block and type `proxy-nodes --refresh`. |
 | `Several nodes share slot(s) …` | Two nodes have the same `slot`. Tell your admin. Until the admin corrects it, do not open Chrome through these two nodes at the same time. |

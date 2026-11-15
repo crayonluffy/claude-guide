@@ -63,7 +63,7 @@ When SSH stops, the owner reads the cause from the error output of SSH. It tells
 | `forward` | `A tunnel port is held by another program` | Type `proxy-status`. |
 | `network` | `Cannot reach <server>` | You do not have to do anything. The owner continues to try (a changed Wi-Fi, sleep mode, or a server that is down). |
 
-Before `cc` and `cx` start the application, an HTTPS connection through the HTTP proxy must work. `--no-verify` / `-NoVerify` does not skip this check. It skips only the optional check of the external IP address. An API error after a good CONNECT and TLS handshake counts as a working connection. The check does not send API credentials.
+Before `cc` and `cx` start the application, an HTTPS connection through the HTTP proxy must work. `--no-verify` / `-noverify` does not skip this check. It skips only the optional check of the external IP address. An API error after a good CONNECT and TLS handshake counts as a working connection. The check does not send API credentials.
 
 If a different program uses a tunnel port, the profile reports a `conflict`. The recovery waits. It does not change the port and it does not stop the other program. If a different program takes a proxy port **while the tunnel is down**, Claude or Codex can send traffic to that program. Thus the owner shows one special alert in each open session, in the log, and on the desktop: `Another program (<name>, PID <pid>) took proxy port <port> while the tunnel was down ... exit this session now; nothing was stopped.` The owner does not stop that program. When the port is free, the recovery continues automatically.
 
@@ -93,7 +93,7 @@ proxy-test recover --fast
 proxy-test prolonged --fast
 ```
 
-PowerShell also accepts `-Fast`. Each line shows `[SIMULATION]`. 60 simulated seconds take six real seconds. The demonstration uses only data in memory. It does not touch the real SSH, an application, the settings, or the files of the owner. `Ctrl+C` stops it without an effect on real sessions. Without `--fast`, the demonstration uses the normal times.
+PowerShell also accepts `-fast`. Each line shows `[SIMULATION]`. 60 simulated seconds take six real seconds. The demonstration uses only data in memory. It does not touch the real SSH, an application, the settings, or the files of the owner. `Ctrl+C` stops it without an effect on real sessions. Without `--fast`, the demonstration uses the normal times.
 
 `proxy-status` shows the status of each provider, the duration of an outage, and the number of tries. It also shows the ports, the sessions, and the locations of the logs. Bash also writes events to `CLAUDE_TUNNEL_LOG`. PowerShell writes `events.log` in its recovery folder, and the SSH errors in `ssh.err`. These records stay available if the application covers a warning on the screen. The recovery state is private. It is in `${XDG_STATE_HOME:-$HOME/.local/state}/claude-proxy/recovery/main` (Bash) and `$HOME/.claude-proxy/recovery/main` (PowerShell). The folder contains the tunnel record, the last SSH errors (`ssh.err`) and one entry for each open session.
 
@@ -171,7 +171,7 @@ To see the three alerts without a real outage:
 proxy-test prolonged --fast --desktop
 ```
 
-PowerShell also accepts `-Fast -Desktop`. These alerts show **[SIMULATION]**. This command sends real desktop alerts, but all proxy, network and session actions are simulated. Windows waits ten more seconds for the last alert before it removes the test icon. `Ctrl+C` stops only the notifier of the demonstration. Without `--desktop`, the simulation sends no desktop alerts and does not touch the owner.
+PowerShell also accepts `-fast -desktop`. These alerts show **[SIMULATION]**. This command sends real desktop alerts, but all proxy, network and session actions are simulated. Windows waits ten more seconds for the last alert before it removes the test icon. `Ctrl+C` stops only the notifier of the demonstration. Without `--desktop`, the simulation sends no desktop alerts and does not touch the owner.
 
 ### Settings and updating an existing owner
 

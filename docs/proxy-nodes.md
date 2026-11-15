@@ -6,8 +6,8 @@ From **2.1**, the profile can use more than one VM. The list of VMs is the **nod
 
 | Source | Who can read the list | Command to select it |
 |---|---|---|
-| 🔒 **One of your VMs, over SSH** (2.3+, **recommended**) | Only persons who can log in to that VM | `proxy-nodes --from jpvpn` (Windows: `-From jpvpn`) |
-| 🌐 The **public DNS** of your company (2.2+) | All persons who know the name | `proxy-nodes --domain example.com` (Windows: `-Domain`) |
+| 🔒 **One of your VMs, over SSH** (2.3+, **recommended**) | Only persons who can log in to that VM | `proxy-nodes --from jpvpn` (Windows: `-from jpvpn`) |
+| 🌐 The **public DNS** of your company (2.2+) | All persons who know the name | `proxy-nodes --domain example.com` (Windows: `-domain`) |
 | The `nodes.json` of this guide (default) | All persons. Thus it is **empty**. | `proxy-nodes --from ''` |
 
 **Why SSH is recommended:** DNS is public. A public list of your proxy VMs makes them easy to find and to block. Over SSH, your key gives access to the list, the list goes through the encrypted connection, and **you select the VM that gives the list**. If that VM is removed, type `proxy-nodes --from sgvpn` to use a different VM. If your VM does not answer, `proxy-nodes --refresh` asks the other VMs in your list (your setting does not change). For the admin part, refer to [For admins](admin-nodes.md#the-private-list-over-ssh-recommended) and [forge `proxynodes-manager`](https://github.com/crayonluffy/forge/tree/main/proxynodes-manager).
@@ -22,9 +22,9 @@ The commands are the same for all sources:
 | Stop the tunnel of **one node** (the other nodes continue) | `cc-stop sg` |
 | Use a VM that is **only an alias** in `~/.ssh/config` (not in the node list) | `cc --node devbox` (any command above works with the alias) |
 | Open a **Chrome window** through a specific VM, without a change to `cc`, and with more VMs open at the same time | `chrome-proxy sg` |
-| Open a **different Chrome profile** (different logins) through the **same** VM | `chrome-proxy jp --profile work` (Windows: `-Profile work`) |
+| Open a **different Chrome profile** (different logins) through the **same** VM | `chrome-proxy jp --profile work` (Windows: `-profile work`) |
 | See the Chrome profiles | `chrome-proxy --list` |
-| Get the node list (privately) from one of your VMs | `proxy-nodes --from jpvpn` (Windows: `-From jpvpn`). Use a VM that gives the list. |
+| Get the node list (privately) from one of your VMs | `proxy-nodes --from jpvpn` (Windows: `-from jpvpn`). Use a VM that gives the list. |
 
 If you use only one node, nothing changes: `cc`, `cx` and `chrome-proxy` work as before.
 
@@ -56,8 +56,8 @@ proxy-nodes --from jpvpn           # from now on, get the list privately from VM
 proxy-nodes --from sgvpn           # ...or from a different VM that gives the list (for example, the old VM is removed)
 proxy-nodes --domain example.com   # ...or from the PUBLIC DNS of example.com                       (Windows: -domain)
 proxy-nodes --from ''              # use the (empty) list of this guide again
-# The profile saves a new source only when it answers; --force (-Force) saves it anyway. Only one source at a time:
-# --from removes --domain, and --domain removes --from. The two spellings work on all systems (--from / -From, ...).
+# The profile saves a new source only when it answers; --force (-force) saves it anyway. Only one source at a time:
+# --from removes --domain, and --domain removes --from. The two spellings work on all systems (--from / -from, ...).
 
 proxy-nodes use                         # show the active node
 proxy-nodes use jp2                     # make jp2 the default (saved; restarts the tunnel; refuses while sessions use it - --force)
@@ -68,7 +68,7 @@ cc --node devbox                   # a plain ssh alias, not in the node list, wo
 
 chrome-proxy                       # Chrome through the ACTIVE node (main tunnel; the profile starts it if necessary)
 chrome-proxy jp2                   # Chrome through the tunnel of jp2, with its own data folder (no change to the main tunnel)
-chrome-proxy jp --profile work     # ...as the Chrome profile 'work' (made at the first use)   (Windows: -Profile work, or -p work)
+chrome-proxy jp --profile work     # ...as the Chrome profile 'work' (made at the first use)   (Windows: -profile work, or -p work)
 chrome-proxy us -p shop https://x  # ...and open a URL there (all other arguments go to Chrome)
 chrome-proxy --list                    # the profiles of all nodes (chrome-proxy --list jp: only the profiles of jp)
 ```

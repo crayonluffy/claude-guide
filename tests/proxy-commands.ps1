@@ -36,6 +36,25 @@ try {
     chrome-proxy --list jp; chrome-proxy -list; proxy-config killswitch on; proxy-config killswitch
     $expected='doctor,doctor,use:sg:True,use:sg:False,list:jp,list:,ks:on,ks:status'
     Assert (($script:Trace -join ',') -eq $expected) "new spellings: $($script:Trace -join ',')"
+    # 2.13.9: '-node' with no name stops with a hint. It used to start the default
+    # node without saying so. Nothing may be looked up or started.
+    $script:Started=@()
+    function Get-AppCommand { param($Name) $script:Started+="app:$Name"; $null }
+    function tunnel-start { $script:Started+='tunnel' }
+    foreach ($call in @({cc -node},{cx -node},{cc --node},{cc -node=},{cc -node -c},{proxy-up --node})) {
+        $said=(& $call 6>&1 | Out-String)
+        Assert ($said -match '-node needs a node name, for example: (cc|cx|proxy-up) -node sg') "'$call' gave no hint: $said"
+    }
+    Assert ($script:Started.Count -eq 0) "-node without a name went on: $($script:Started -join ',')"
+    $o=_split-launch-args @('-node','sg','-c')
+    Assert ($o.Node -eq 'sg' -and -not $o.NodeMissing -and ($o.App -join ' ') -eq '-c') 'a node name is no longer read'
+    $o=_split-launch-args @('--node=sg')
+    Assert ($o.Node -eq 'sg' -and -not $o.NodeMissing) '--node=sg is no longer read'
+    foreach ($name in 'Get-AppCommand','tunnel-start') {   # the real ones, for the cases below
+        Invoke-Expression ($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name},$false)[0].Extent.Text)
+    }
+    'PASS: -node needs a node name'
+
     $script:Trace=@()
     function cc { $script:Trace+="cc:$($args -join ' ')" }
     function cx { $script:Trace+="cx:$($args -join ' ')" }
