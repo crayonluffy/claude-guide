@@ -27,19 +27,25 @@ CONF="$HOME/.claude-proxy.conf"
 UPDATE_ONLY=0
 DOMAIN_ARG="${CLAUDE_PROXY_DOMAIN:-}"
 WANT_VERSION="${CLAUDE_PROXY_INSTALL_VERSION:-}"
+usage() {
+    echo "usage: setup.sh [--update] [--domain <domain>] [--version X.Y.Z]"
+    echo "  --update            keep the existing settings and only refresh ~/.claude-proxy.sh"
+    echo "  --domain <domain>   take the proxy nodes from that domain's DNS (TXT _claude-proxy.<domain>)"
+    echo "  --version X.Y.Z     install that release (default: the latest release)"
+}
+# A mistyped option stops here, before anything is installed or asked: it used
+# to be ignored, and the wizard then ran without it.
 while [ $# -gt 0 ]; do
     case "$1" in
         --update|-u) UPDATE_ONLY=1 ;;
-        --domain)    shift; DOMAIN_ARG="${1:-}" ;;
+        --domain|--version)
+            [ $# -ge 2 ] || { echo "[Err] $1 needs a value." >&2; usage >&2; exit 2; }
+            if [ "$1" = --domain ]; then DOMAIN_ARG="$2"; else WANT_VERSION="$2"; fi
+            shift ;;
         --domain=*)  DOMAIN_ARG="${1#--domain=}" ;;
-        --version)   shift; WANT_VERSION="${1:-}" ;;
         --version=*) WANT_VERSION="${1#--version=}" ;;
-        -h|--help)
-            echo "usage: setup.sh [--update] [--domain <domain>] [--version X.Y.Z]"
-            echo "  --update            keep the existing settings and only refresh ~/.claude-proxy.sh"
-            echo "  --domain <domain>   take the proxy nodes from that domain's DNS (TXT _claude-proxy.<domain>)"
-            echo "  --version X.Y.Z     install that release (default: the latest release)"
-            exit 0 ;;
+        -h|--help)   usage; exit 0 ;;
+        *)           echo "[Err] Unknown option '$1'." >&2; usage >&2; exit 2 ;;
     esac
     shift
 done
@@ -164,6 +170,9 @@ ensure_deps() {
     fi
 
     echo "[Deps] Installing: ${missing[*]}"
+    # Already root (a container, a root login on a VPS): such hosts often have no sudo.
+    local sudo=sudo
+    [ "$(id -u)" -ne 0 ] || sudo=''
     if [ "$(uname)" = "Darwin" ]; then
         if command -v brew >/dev/null 2>&1; then
             brew install "${missing[@]}"
@@ -171,11 +180,11 @@ ensure_deps() {
             echo "[Warn] Homebrew not found - install manually: brew install ${missing[*]}"
         fi
     elif command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get update -qq && sudo apt-get install -y "${missing[@]}"
+        $sudo apt-get update -qq && $sudo apt-get install -y "${missing[@]}"
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y "${missing[@]}"
+        $sudo dnf install -y "${missing[@]}"
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -S --noconfirm "${missing[@]}"
+        $sudo pacman -S --noconfirm "${missing[@]}"
     else
         echo "[Warn] No known package manager - install these manually: ${missing[*]}"
     fi
@@ -500,5 +509,5 @@ echo "    source ${RC:-~/.zshrc}"
 echo "    cc"
 echo ""
 echo "Later: 'cc-install' updates Node.js / Claude / Codex, 'proxy-update' updates this setup (settings kept)."
-echo "       'proxy-killswitch' shows how Claude and Codex are kept from going out directly."
+echo "       'proxy-config killswitch' shows how Claude and Codex are kept from going out directly."
 echo ""

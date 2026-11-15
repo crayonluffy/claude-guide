@@ -35,7 +35,7 @@
 param([switch]$RecoveryWorker, [string]$RecoveryDescriptor)
 $script:RECOVERY_PROFILE = $PSCommandPath
 
-$script:PROFILE_VERSION = '2.13.8'
+$script:PROFILE_VERSION = '2.13.9'
 $script:REPO_RAW     = 'https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts'
 $script:PROXY_CONF   = Join-Path $HOME '.claude-proxy.conf.psd1'
 $script:PROFILE_PATH = Join-Path $HOME '.claude-proxy.ps1'   # where proxy-update writes
@@ -835,7 +835,7 @@ function Stop-RecoveryDesktopContext {
 }
 
 function proxy-notify {
-    param([string]$Action='status')
+    param([string]$action='status')
     if ($Action -notin @('status','test') -or $args.Count) {throw 'usage: proxy-notify [status|test]'}
     $null=Use-RecoveryRecord   # use the live owner's tunnel, not stale settings
     $ctx=New-RecoveryDesktopContext
@@ -924,7 +924,7 @@ function Stop-RecoverySubscriber {
 
 function Wait-RecoveryDemo { param([double]$Seconds) Start-Sleep -Milliseconds ([int]($Seconds*1000)) }
 function proxy-test {
-    param([string]$Scenario,[switch]$fast,[switch]$Desktop)
+    param([string]$scenario,[switch]$fast,[switch]$desktop)
     $usage='usage: proxy-test <recover|prolonged> [--fast] [--desktop]'
     if ($Scenario -notin @('recover','prolonged')) {throw $usage}
     foreach ($a in $args) {switch ($a) {'--fast' {$Fast=$true} '--desktop' {$Desktop=$true} default {throw $usage}}}
@@ -2228,6 +2228,7 @@ function proxy-up {
     $rest = @($args)
     if ("$Node" -like '-*') { $rest = @("$Node") + $rest; $Node = '' }
     $o = _split-launch-args $rest
+    if ($o.NodeMissing) { Write-NodeArgMissing proxy-up; return $false }
     if ($o.NoVerify) { $NoVerify = $true }
     if ($o.Node) { $Node = $o.Node }
     if ($o.App.Count) { Write-Host "[Err] Unknown argument(s): $($o.App -join ' ')   usage: proxy-up [-noverify] [-node <name>]" -ForegroundColor Red; return $false }
@@ -2287,9 +2288,13 @@ function proxy-up {
 # Split wrapper flags (-Safe / -NoVerify, any dash style) from app arguments.
 # Everything else is passed straight to the app, so 'cc -c', 'cc -r',
 # 'cc --resume <id>', 'cx resume' ... all work.
+function Write-NodeArgMissing { param([string]$command)
+    Write-Host "[Err] -node needs a node name, for example: $command -node sg   ('proxy-nodes' lists the nodes)" -ForegroundColor Red
+}
+
 function _split-launch-args {
     param($ArgList)
-    $r = @{ Safe = $false; NoVerify = $false; Node = ''; App = @() }
+    $r = @{ Safe = $false; NoVerify = $false; Node = ''; NodeMissing = $false; App = @() }
     # (an empty argument list can arrive as $null - never treat that as an argument)
     $list = @($ArgList | Where-Object { $null -ne $_ })
     for ($i = 0; $i -lt $list.Count; $i++) {
@@ -2297,8 +2302,9 @@ function _split-launch-args {
         switch -Regex ($a) {
             '^-{1,2}safe$'       { $r.Safe = $true }
             '^-{1,2}no-?verify$' { $r.NoVerify = $true }
-            '^-{1,2}node$'       { $i++; $r.Node = "$($list[$i])" }
-            '^-{1,2}node=(.+)$'  { $r.Node = $Matches[1] }
+            # '-node' with no name used to mean the default node, without saying so.
+            '^-{1,2}node$'       { $i++; $r.Node = "$($list[$i])"; if (-not $r.Node -or $r.Node.StartsWith('-')) { $r.NodeMissing = $true } }
+            '^-{1,2}node=(.*)$'  { $r.Node = $Matches[1]; if (-not $r.Node) { $r.NodeMissing = $true } }
             default              { $r.App += $a }
         }
     }
@@ -2308,6 +2314,7 @@ function _split-launch-args {
 function cc {
     if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'cc' -ExtraArguments $args; return }
     $o = _split-launch-args $args
+    if ($o.NodeMissing) { Write-NodeArgMissing cc; return }
     $exe = Get-AppCommand claude   # the real program, not a plain-command function
     if (-not $exe) {
         Write-Host "[Err] 'claude' not found - install it first: npm install -g @anthropic-ai/claude-code" -ForegroundColor Red
@@ -2366,6 +2373,7 @@ function cc {
 function cx {
     if (-not (Test-RecoveryOperation)) { Invoke-RecoveryOperation -Operation 'cx' -ExtraArguments $args; return }
     $o = _split-launch-args $args
+    if ($o.NodeMissing) { Write-NodeArgMissing cx; return }
 
     # Locate codex first, so we don't bring the tunnel up only to find it missing.
     $exe = Get-AppCommand codex   # the real program, not a plain-command function
@@ -3112,7 +3120,7 @@ function Edit-ProxyConfig {
 }
 
 function proxy-config {
-    param([string]$Action = 'show', [string]$Key, [string]$Value)
+    param([string]$action = 'show', [string]$key, [string]$value)
     switch ($Action.ToLower()) {
         'killswitch' { Set-ProxyKillswitch $(if ($Key) { $Key } else { 'status' }) }
         'show' {
@@ -3854,7 +3862,7 @@ function chrome-profiles  { Write-ProxyRenamed chrome-profiles 'chrome-proxy -li
 function proxy-killswitch { Write-ProxyRenamed proxy-killswitch 'proxy-config killswitch'; Set-ProxyKillswitch @args }
 
 function cc-help {
-    param([string]$Topic)
+    param([string]$topic)
     $mainDir=Join-Path (Get-RecoveryRoot) 'main'
     $tunnel=if (Test-RecoverySharedProxy) { 'shared (served by another account)' }
         elseif (Test-RecoveryOwner $mainDir) { 'running' } else { 'not running (cc starts it)' }

@@ -2,6 +2,28 @@
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.9: `proxy-config edit` on older bash, a missing node name
+
+- **`proxy-config edit` saves your changes on bash 5.2 and older** (Ubuntu
+  22.04 and 24.04, Debian 12, WSL with those). Since 2.13.0 it showed
+  `[OK] Saved settings to ...original.XXXXXX` there and the changes were lost;
+  in that window, later `proxy-config set` calls wrote to that temporary name
+  too. zsh and bash 5.3 were not affected. If a setting you edited did not
+  apply, run `proxy-config edit` again after this update.
+- **`cc --node` / `cx --node` without a node name stops with a hint.** Before,
+  it started the default node without saying so (zsh also printed a `shift`
+  error). The same for `proxy-up --node`, and on Windows for `-node`.
+- **Windows:** tab completion offers the last parameters in lowercase too
+  (`proxy-test -desktop`, `proxy-config -key`). 2.13.8 missed them.
+- **Installer (macOS, Linux, WSL):** a mistyped option (for example `--domian`)
+  stops with the usage line; before, it was ignored and the wizard ran without
+  it. `--domain` and `--version` need a value. As `root` (a container, or a
+  server without `sudo`) it installs `jq` and `lsof` without `sudo`.
+- Both installers end with `proxy-config killswitch`; they still named the old
+  `proxy-killswitch`.
+- Guide: the Windows flags that 2.13.8 left capitalised are lowercase
+  (`-force`, `-check`, `-copy`, `-from`, ...).
+
 ### 2.13.8: Windows flags in lowercase
 
 - Every Windows command flag is now shown in lowercase, in the help, the

@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.8"
+CLAUDE_PROXY_VERSION="2.13.9"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -2429,6 +2429,11 @@ _node_up() {  # <node> <provider>
     echo "$http $socks $dir"
 }
 
+# '--node' with no name used to mean the default node, without saying so.
+_node_arg_missing() {  # <command>
+    echo "[Err] --node needs a node name, for example: $1 --node sg   ('proxy-nodes' lists the nodes)" >&2
+}
+
 proxy-up() {
     if ! _proxy_operation_owned; then _proxy_operation_run proxy-up "$@"; return; fi
     case "${CLAUDE_PROXY_MODE:-managed}" in managed|shared) :;; *) echo '[Err] PROXY_MODE must be managed or shared.' >&2; return 1;; esac
@@ -2445,8 +2450,12 @@ proxy-up() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --no-verify) no_verify=1 ;;
-            --node)      shift; node="${1:-}" ;;
-            --node=*)    node="${1#--node=}" ;;
+            --node)
+                case "${2:-}" in ''|-*) _node_arg_missing proxy-up; return 2;; esac
+                node="$2"; shift ;;
+            --node=*)
+                node="${1#--node=}"
+                [ -n "$node" ] || { _node_arg_missing proxy-up; return 2; } ;;
         esac
         shift
     done
@@ -2519,15 +2528,20 @@ _launch_via_proxy() {
     if ! _proxy_operation_owned; then _proxy_operation_run _launch_via_proxy "$@"; return; fi
     local label="$1" bin="$2" hint="$3" skip_flag="$4"
     shift 4
-    local safe=0 quiet=0 node='' no_verify=0
+    local safe=0 quiet=0 node='' no_verify=0 cmd=cc
     local up_args=() app_args=() pre_args=()
+    [ "$bin" != codex ] || cmd=cx
     while [ $# -gt 0 ]; do
         case "$1" in
             --safe)      safe=1 ;;
             --quiet)     quiet=1 ;;
             --no-verify) up_args+=(--no-verify); no_verify=1 ;;
-            --node)      node="${2:-}"; shift ;;
-            --node=*)    node="${1#--node=}" ;;
+            --node)
+                case "${2:-}" in ''|-*) _node_arg_missing "$cmd"; return 2;; esac
+                node="$2"; shift ;;
+            --node=*)
+                node="${1#--node=}"
+                [ -n "$node" ] || { _node_arg_missing "$cmd"; return 2; } ;;
             *)           app_args+=("$1") ;;
         esac
         shift
@@ -3315,9 +3329,15 @@ _conf_commit_edit() {
     _conf_after_save
 }
 _conf_edit_run() {
-    local key value editor="${VISUAL:-${EDITOR:-nano}}" rc node_section=''
+    local key value editor="${VISUAL:-${EDITOR:-nano}}" rc node_section='' conf="$CLAUDE_PROXY_CONF"
     local editor_args=()
-    CLAUDE_PROXY_CONF="$original" _conf_reload >/dev/null 2>&1 || :
+    # Load the snapshot, then name the real file again. Not 'VAR=value function':
+    # the profile exports CLAUDE_PROXY_CONF, and bash 5.2 and older then keep the
+    # temporary value after the call - the edit was saved into the snapshot file,
+    # which is deleted, and the window kept that path.
+    CLAUDE_PROXY_CONF="$original"
+    _conf_reload >/dev/null 2>&1 || :
+    CLAUDE_PROXY_CONF="$conf"
     node_section=$(_node_ports_editor_section) || node_section=''
     {
         echo '# BEGIN CLAUDE PROXY PORT STATUS'
