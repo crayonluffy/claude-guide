@@ -33,7 +33,7 @@ The installer asks a few questions:
 | Use this key? | Press **Enter**. The installer found the key in Downloads. |
 | Any other question | Press **Enter**. The text in `[…]` is the recommended answer. |
 
-It also installs Node.js, Claude Code and Codex if they are missing. Windows can ask for permission, and a Mac for your password. When it shows **Done!**, close the window.
+It also installs Node.js, Claude Code and Codex if they are missing. On an older Mac (macOS 12 or older) it installs the versions that still run there. Windows can ask for permission, and a Mac for your password. When it shows **Done!**, close the window.
 
 ## 2. Use it
 

@@ -1,6 +1,6 @@
 # Old Macs: Node.js 20 / 22 and a Claude Code that still runs (plan, 2026-11-15)
 
-Status: research done, **nothing implemented yet**. Target release: 2.13.10.
+Status: implemented in 2.13.10 (tests: `tests/proxy-tools-legacy.sh`). Still to do: try it on a real old Mac.
 
 ## Problem
 

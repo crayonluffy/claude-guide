@@ -66,6 +66,8 @@ _linux_chrome_launch() {
     return 0
 }
 
+_linux_node_max() { :; }                 # no limit known: the newest LTS
+_linux_claude_legacy() { return 1; }
 _linux_install_node() {
     local ver tmp
     if command -v apt-get >/dev/null 2>&1; then

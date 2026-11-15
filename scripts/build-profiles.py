@@ -6,7 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 APIS = ("port_bound", "uptime", "process_start", "desktop_backend", "is_wsl", "ssh_options",
-        "chrome_base", "chrome_launch", "install_node", "install_hint")
+        "chrome_base", "chrome_launch", "install_node", "install_hint", "node_max", "claude_legacy")
 
 
 def render(target):

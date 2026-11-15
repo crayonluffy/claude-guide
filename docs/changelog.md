@@ -2,6 +2,23 @@
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
+### 2.13.10 (macOS): older Macs
+
+- **`cc-install` and the installer work on an older Mac.** Before, they tried
+  to install the newest Node.js, which does not run on an older macOS. Now
+  they install the newest Node.js that the macOS version can run: Node.js 22
+  on macOS 11 to 13.4, Node.js 20 on macOS 10.15, from the official installer
+  (or with `nvm`). macOS 13.5 and newer get the newest LTS, as before.
+- **macOS 12 and older get Claude Code 2.1.112.** From 2.1.113, Claude Code is
+  a program that needs macOS 13; 2.1.112 is the last version that runs on
+  Node.js only. `cc-install` installs that version, repairs an installation
+  that updated itself to a newer one, and turns the automatic updates off
+  (`DISABLE_AUTOUPDATER` in `~/.claude/settings.json`; `cc` also starts Claude
+  Code with it). This version gets no more updates.
+- Codex is not changed: the newest Codex runs on these Macs.
+- macOS older than 10.15 is not possible; `cc-install` says so and installs
+  nothing. Details: [An older Mac](install-claude.md#an-older-mac-macos-12-or-older).
+
 ### 2.13.9: `proxy-config edit` on older bash, a missing node name
 
 - **`proxy-config edit` saves your changes on bash 5.2 and older** (Ubuntu
