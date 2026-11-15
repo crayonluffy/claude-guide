@@ -125,7 +125,12 @@ class ConfigChecks:
     def test_reopening_editor_refreshes_snapshot_without_duplicate_sections(self):
         self.node_catalogue()
         self.editor(":")
-        self.assertEqual(self.run_shell("proxy-config edit").returncode, 0)
+        # The edit must land in the settings file itself and the shell must still
+        # name it afterwards (bash 5.2 and older kept the snapshot's path).
+        result = self.run_shell('proxy-config edit; printf "CONF=%s\\n" "$CLAUDE_PROXY_CONF"')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f"Saved settings to {self.conf}. Running", result.stdout)
+        self.assertIn(f"CONF={self.conf}\n", result.stdout)
         record = self.root / "state/claude-proxy/recovery/node-sg/tunnel.rec"
         record.write_text(record.read_text().replace("http=8181", "http=8191"))
         self.assertEqual(self.run_shell("proxy-config edit").returncode, 0)

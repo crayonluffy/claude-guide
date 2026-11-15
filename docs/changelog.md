@@ -2,8 +2,14 @@
 
 From 2.8.0, each version has one tag, `v<version>`, and a [GitHub release](https://github.com/crayonluffy/claude-guide/releases) with its release notes.
 
-### 2.13.9: a missing node name, installer options
+### 2.13.9: `proxy-config edit` on older bash, a missing node name
 
+- **`proxy-config edit` saves your changes on bash 5.2 and older** (Ubuntu
+  22.04 and 24.04, Debian 12, WSL with those). Since 2.13.0 it showed
+  `[OK] Saved settings to ...original.XXXXXX` there and the changes were lost;
+  in that window, later `proxy-config set` calls wrote to that temporary name
+  too. zsh and bash 5.3 were not affected. If a setting you edited did not
+  apply, run `proxy-config edit` again after this update.
 - **`cc --node` / `cx --node` without a node name stops with a hint.** Before,
   it started the default node without saying so (zsh also printed a `shift`
   error). The same for `proxy-up --node`, and on Windows for `-node`.

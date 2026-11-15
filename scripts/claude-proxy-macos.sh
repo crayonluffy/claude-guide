@@ -3601,9 +3601,15 @@ _conf_commit_edit() {
     _conf_after_save
 }
 _conf_edit_run() {
-    local key value editor="${VISUAL:-${EDITOR:-nano}}" rc node_section=''
+    local key value editor="${VISUAL:-${EDITOR:-nano}}" rc node_section='' conf="$CLAUDE_PROXY_CONF"
     local editor_args=()
-    CLAUDE_PROXY_CONF="$original" _conf_reload >/dev/null 2>&1 || :
+    # Load the snapshot, then name the real file again. Not 'VAR=value function':
+    # the profile exports CLAUDE_PROXY_CONF, and bash 5.2 and older then keep the
+    # temporary value after the call - the edit was saved into the snapshot file,
+    # which is deleted, and the window kept that path.
+    CLAUDE_PROXY_CONF="$original"
+    _conf_reload >/dev/null 2>&1 || :
+    CLAUDE_PROXY_CONF="$conf"
     node_section=$(_node_ports_editor_section) || node_section=''
     {
         echo '# BEGIN CLAUDE PROXY PORT STATUS'
