@@ -57,6 +57,23 @@ node --version
 npm --version
 ```
 
+#### An older Mac (macOS 12 or older)
+
+The newest Node.js and the current Claude Code do not run on an older macOS. `cc-install` knows this and installs what runs. To do it by hand, use this table. To see your macOS version, open the Apple menu and click **About This Mac**.
+
+| Your macOS | Node.js | Claude Code |
+|---|---|---|
+| 13.5 or newer | The newest LTS | The newest |
+| 13.0 to 13.4 | 22 | The newest |
+| 11 or 12 | 22 | 2.1.112 |
+| 10.15 | 20 | 2.1.112 |
+| Older than 10.15 | Not possible | Not possible |
+
+- **Node.js 20 or 22:** do not use Homebrew (it has no ready package for an old macOS). Download the macOS installer (`.pkg`) of that version from [nodejs.org/dist/latest-v22.x](https://nodejs.org/dist/latest-v22.x/) or [nodejs.org/dist/latest-v20.x](https://nodejs.org/dist/latest-v20.x/) and open it.
+- **Claude Code 2.1.112:** from 2.1.113, Claude Code is a program that needs macOS 13. Version 2.1.112 is the last one that runs on Node.js only. In step 2, type `npm install -g @anthropic-ai/claude-code@2.1.112`. This version gets no more updates.
+- **Automatic updates must be off.** An update installs a newer version, and that version does not start on your Mac. `cc-install` turns the updates off in `~/.claude/settings.json` (`"DISABLE_AUTOUPDATER": "1"` in the `env` block), and `cc` starts Claude Code with them off. If `claude` stops working after an update, type `cc-install claude`.
+- **Codex** needs no old version. The newest Codex runs on these Macs.
+
 ### Linux
 
 NodeSource publishes current packages. For a specific release, replace `lts` with the release (for example `22.x`). Refer to [github.com/nodesource/distributions](https://github.com/nodesource/distributions).
@@ -89,6 +106,8 @@ Use this command on all operating systems:
 ```bash
 npm install -g @anthropic-ai/claude-code
 ```
+
+On a Mac with macOS 12 or older, install version 2.1.112 instead (refer to [An older Mac](#an-older-mac-macos-12-or-older)).
 
 > **`npm install` stops, or shows a timeout?** Your network also blocks the npm registry. In this terminal, type `proxy-up` first (from the [proxy setup](proxy-profile.md)). npm uses the proxy settings that `proxy-up` sets. Then try again.
 

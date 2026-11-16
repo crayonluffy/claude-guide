@@ -119,6 +119,9 @@ How the kill switch uses Claude's `settings.json`: [Kill switch, recovery and al
 | Message | Fix |
 |---|---|
 | `Node.js vXX is too old (Claude Code needs 22 or newer)` | Answer **Y**. `cc-install` installs the current LTS version. Windows: winget or the official installer. macOS: Homebrew or the official installer. Linux: nvm or NodeSource. |
+| `The current Claude Code needs macOS 13 or newer; this Mac has an older macOS` | No error. On macOS 12 or older, `cc-install` installs Node.js 22 (Node.js 20 on macOS 10.15) and Claude Code 2.1.112, the last version that runs there, and turns its automatic updates off. Refer to [An older Mac](install-claude.md#an-older-mac-macos-12-or-older). |
+| On an older Mac, `claude` or `cc` stops with `Symbol not found`, `dyld`, or `built for macOS 13` | Claude Code updated itself to a version that needs macOS 13. Type `cc-install claude`. It installs version 2.1.112 again and turns the automatic updates off. |
+| `This version of the operating system can run Node.js 20 at most, but Claude Code and Codex need 22 or newer` | The Mac is too old for the Node.js that the tools need. On macOS 10.15 this shows only if `cc-install` could not find the old Claude Code version; check the proxy (`proxy-status --fix`) and try again. |
 | `'node' is still vXX in this window`, or `isn't found in this window yet` | The new program is installed, but this window started before the installation. Open a **new** window and type `cc-install` again. |
 | `Global npm packages go to /usr, which needs sudo` (Linux) | Answer **Y**. This is the fix that npm recommends: packages go to `~/.npm-global`, and the profile adds it to your PATH. |
 | `… wasn't installed with npm - update it with: claude update` | A different installer installed Claude or Codex (the native installer or Homebrew). Use the command in the message. Then you do not get two copies. |

@@ -31,7 +31,7 @@
 # in can read it, and you choose (and can change) which VM serves it.
 # ============================================================
 
-CLAUDE_PROXY_VERSION="2.13.9"
+CLAUDE_PROXY_VERSION="2.13.10"
 # Where proxy-update fetches from (override in the conf file to use a mirror/fork).
 CLAUDE_PROXY_REPO_RAW="${CLAUDE_PROXY_REPO_RAW:-https://raw.githubusercontent.com/crayonluffy/claude-guide/main/scripts}"
 
@@ -2603,6 +2603,8 @@ _launch_via_proxy() {
     # TELEMETRY=off: Claude only, this process only (no telemetry, error reports or auto-update).
     local app_env=()
     [ "$bin" != claude ] || [ "${CLAUDE_TELEMETRY:-on}" != off ] || app_env=(CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1)
+    # An old Mac runs a pinned Claude Code (cc-install): it must not update itself.
+    if [ "$bin" = claude ] && _platform_claude_legacy; then app_env+=(DISABLE_AUTOUPDATER=1); fi
     if [ -n "$url" ]; then
         if env http_proxy="$url" HTTP_PROXY="$url" https_proxy="$url" HTTPS_PROXY="$url" \
                no_proxy="$CLAUDE_NO_PROXY" NO_PROXY="$CLAUDE_NO_PROXY" ${app_env[@]+"${app_env[@]}"} \
@@ -3878,6 +3880,14 @@ _chrome_profiles() {
 # blocked network too. Nothing is changed without asking (unless -y).
 
 CLAUDE_TOOLS_MIN_NODE_FALLBACK=22   # used when the npm registry can't be asked
+# Older Macs (before macOS 13) cannot start the current Claude Code: since
+# 2.1.113 it is a native program that needs macOS 13. They get the last release
+# that is plain JavaScript (Node.js 18 or newer), and it must not update itself.
+CLAUDE_LEGACY_CLAUDE_VERSION=2.1.112
+CLAUDE_LEGACY_MIN_NODE_FALLBACK=18
+_tools_claude_version() {
+    if _platform_claude_legacy; then echo "$CLAUDE_LEGACY_CLAUDE_VERSION"; else echo latest; fi
+}
 
 _tools_ask() {  # <question> [Y|N] - honours $_TOOLS_YES / $_TOOLS_CHECK
     [ "${_TOOLS_CHECK:-0}" = 1 ] && return 1
@@ -3900,14 +3910,15 @@ _tools_older() {  # <a> <b> : true when version a < b
 }
 
 # The Node.js major version Claude Code (and Codex) need, from their npm metadata.
-_tools_min_node() {
-    local m best=0 pkg
-    for pkg in @anthropic-ai/claude-code @openai/codex; do
-        m=$(curl -fsS --max-time 8 "https://registry.npmjs.org/$pkg/latest" 2>/dev/null |
+_tools_min_node() {  # [Claude Code version to install: latest (default) or a pinned one]
+    local m best=0 spec fallback=$CLAUDE_TOOLS_MIN_NODE_FALLBACK
+    [ "${1:-latest}" = latest ] || fallback=$CLAUDE_LEGACY_MIN_NODE_FALLBACK
+    for spec in "@anthropic-ai/claude-code/${1:-latest}" @openai/codex/latest; do
+        m=$(curl -fsS --max-time 8 "https://registry.npmjs.org/$spec" 2>/dev/null |
             sed -n 's/.*"engines":{[^}]*"node":"[^0-9]*\([0-9][0-9]*\).*/\1/p' | head -1)
         [ -n "$m" ] && [ "$m" -gt "$best" ] && best=$m
     done
-    [ "$best" -gt 0 ] || best=$CLAUDE_TOOLS_MIN_NODE_FALLBACK
+    [ "$best" -gt 0 ] || best=$fallback
     echo "$best"
 }
 
@@ -3917,36 +3928,61 @@ _tools_node_lts() {
         tr '{' '\n' | grep -m1 '"lts":"' | sed -n 's/.*"version":"\(v[0-9.]*\)".*/\1/p'
 }
 
+# Newest release of one Node.js line, e.g. 22 -> v22.23.5 ("" if unreachable).
+_tools_node_latest() {  # <major>
+    curl -fsS --max-time 10 https://nodejs.org/dist/index.json 2>/dev/null |
+        tr '{' '\n' | grep -m1 "\"version\":\"v$1\\." | sed -n 's/.*"version":"\(v[0-9.]*\)".*/\1/p'
+}
+
 _tools_node_version() { command -v node >/dev/null 2>&1 && node --version 2>/dev/null; }
 
-# Install / upgrade Node.js to the current LTS with whatever this machine uses.
-_tools_install_node() {
-    local ver tmp
+# Install / upgrade Node.js with whatever this machine uses: the current LTS,
+# or the newest release of line <major> when the system cannot run newer ones.
+_tools_install_node() {  # [major]
+    local major="${1:-}"
     if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+        if [ -n "$major" ]; then
+            echo "[Tools] Using nvm: nvm install $major"
+            # shellcheck disable=SC1090,SC1091
+            . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm install "$major" && nvm alias default "$major"
+            return
+        fi
         echo "[Tools] Using nvm: nvm install --lts"
         # shellcheck disable=SC1090,SC1091
         . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" && nvm install --lts && nvm alias default 'lts/*'
         return
     fi
-    _platform_install_node
+    _platform_install_node "$major"
 }
 
 _tools_node() {  # <min major>
-    local min="$1" cur major
+    local min="$1" cur major cap
     cur=$(_tools_node_version)
     major=$(_tools_major "$cur")
     if [ -n "$major" ] && [ "$major" -ge "$min" ]; then
         echo "[OK]  Node.js $cur (needs $min or newer)"
         return 0
     fi
+    # An older system (an old Mac) cannot run the newest Node.js: take the
+    # newest line it can run, when that is new enough.
+    cap=$(_platform_node_max)
+    if [ "$cap" = 0 ]; then
+        echo "[Err] This version of the operating system is too old for Node.js $min or newer (on a Mac: Node.js 20 needs macOS 10.15, Node.js 22 needs macOS 11)."
+        return 1
+    fi
+    if [ -n "$cap" ] && [ "$cap" -lt "$min" ]; then
+        echo "[Err] This version of the operating system can run Node.js $cap at most, but Claude Code and Codex need $min or newer."
+        return 1
+    fi
     if [ -z "$cur" ]; then
         echo "[..]  Node.js is not installed (Claude Code needs version $min or newer)"
-        _tools_ask "Install Node.js LTS now?" Y || { _tools_skip "Claude Code and Codex can't be installed without it."; return 1; }
+        _tools_ask "Install Node.js ${cap:-LTS} now?" Y || { _tools_skip "Claude Code and Codex can't be installed without it."; return 1; }
     else
         echo "[..]  Node.js $cur is too old (Claude Code needs $min or newer)"
-        _tools_ask "Upgrade Node.js to the current LTS now?" Y || { _tools_skip; return 1; }
+        _tools_ask "Upgrade Node.js to ${cap:-the current LTS} now?" Y || { _tools_skip; return 1; }
     fi
-    _tools_install_node || { echo "[Err] Node.js installation failed (see above)."; return 1; }
+    [ -z "$cap" ] || echo "[Tools] Node.js $cap is the newest line that runs on this version of the operating system."
+    _tools_install_node "$cap" || { echo "[Err] Node.js installation failed (see above)."; return 1; }
     hash -r 2>/dev/null
     cur=$(_tools_node_version); major=$(_tools_major "$cur")
     if [ -n "$major" ] && [ "$major" -ge "$min" ]; then
@@ -3977,36 +4013,55 @@ _tools_npm_prefix() {
     echo "[OK]  npm global prefix: ~/.npm-global (PATH added to $rc)"
 }
 
-_tools_pkg() {  # <label> <command> <npm package> <update hint when not installed by npm>
-    local label="$1" bin="$2" pkg="$3" hint="$4" latest cur
+_tools_pkg() {  # <label> <command> <npm package> <update hint when not installed by npm> [launch command] [pinned version]
+    local label="$1" bin="$2" pkg="$3" hint="$4" pin="${6:-}" latest cur target=latest
     latest=$(npm view "$pkg" version 2>/dev/null)
+    if [ -n "$pin" ]; then
+        # A pinned release (an old Mac): that exact version, never a newer one.
+        target=$pin
+        [ -z "$latest" ] || latest=$pin
+    fi
     if command -v "$bin" >/dev/null 2>&1; then
         cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
-        if [ -z "$latest" ]; then
-            echo "[OK]  $label ${cur:-(version unknown)} installed (npm registry not reachable - can't check for updates)"
-            return 0
+        if [ -n "$pin" ]; then
+            if [ "$cur" = "$pin" ]; then
+                echo "[OK]  $label $cur (the newest release that runs on this version of the operating system)"
+                return 0
+            fi
+            if [ -z "$latest" ]; then
+                echo "[Err] $label ${cur:-is installed but does not start}; this system needs $label $pin, and the npm registry can't be reached (is the proxy up? try 'proxy-up')."
+                return 1
+            fi
+            echo "[..]  $label ${cur:-is installed but does not start}; this system needs $label $pin (newer releases do not start here)"
+            _tools_ask "Install $label $pin now?" Y || { _tools_skip; return 0; }
+        else
+            if [ -z "$latest" ]; then
+                echo "[OK]  $label ${cur:-(version unknown)} installed (npm registry not reachable - can't check for updates)"
+                return 0
+            fi
+            if ! _tools_older "$cur" "$latest"; then
+                echo "[OK]  $label ${cur:-?} (latest: $latest)"
+                return 0
+            fi
+            if ! npm ls -g "$pkg" --depth=0 >/dev/null 2>&1; then
+                echo "[..]  $label $cur is older than $latest, but wasn't installed with npm - update it with: $hint"
+                return 0
+            fi
+            echo "[..]  $label $cur is out of date (latest: $latest)"
+            _tools_ask "Update $label to $latest now?" Y || { _tools_skip; return 0; }
         fi
-        if ! _tools_older "$cur" "$latest"; then
-            echo "[OK]  $label ${cur:-?} (latest: $latest)"
-            return 0
-        fi
-        if ! npm ls -g "$pkg" --depth=0 >/dev/null 2>&1; then
-            echo "[..]  $label $cur is older than $latest, but wasn't installed with npm - update it with: $hint"
-            return 0
-        fi
-        echo "[..]  $label $cur is out of date (latest: $latest)"
-        _tools_ask "Update $label to $latest now?" Y || { _tools_skip; return 0; }
     else
         if [ -z "$latest" ]; then
             echo "[Err] $label is not installed and the npm registry can't be reached (is the proxy up? try 'proxy-up')."
             return 1
         fi
-        echo "[..]  $label is not installed (latest: $latest)"
+        if [ -n "$pin" ]; then echo "[..]  $label is not installed (this system gets version $pin)"
+        else echo "[..]  $label is not installed (latest: $latest)"; fi
         _tools_ask "Install $label now?" Y || { _tools_skip; return 0; }
     fi
     _tools_npm_prefix || { echo "[Err] Can't install without a writable npm prefix."; return 1; }
-    echo "[Tools] npm install -g $pkg@latest"
-    npm install -g "$pkg@latest" || { echo "[Err] npm install failed (see above)."; return 1; }
+    echo "[Tools] npm install -g $pkg@$target"
+    npm install -g "$pkg@$target" || { echo "[Err] npm install failed (see above)."; return 1; }
     hash -r 2>/dev/null
     cur=$(_tools_semver "$(command "$bin" --version 2>/dev/null)")
     if [ -n "$cur" ]; then
@@ -4016,8 +4071,35 @@ _tools_pkg() {  # <label> <command> <npm package> <update hint when not installe
     fi
 }
 
+# A pinned Claude Code must not update itself: the newer release it would fetch
+# does not start on this system. cc also starts it with DISABLE_AUTOUPDATER=1;
+# the settings file covers plain 'claude' and the IDE extensions.
+_tools_claude_no_autoupdate() {
+    local f="$CLAUDE_SETTINGS" tmp
+    [ "${CLAUDE_SYNC_SETTINGS:-0}" = 1 ] || return 0
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[Info] jq is missing: cc starts Claude Code with automatic updates off, plain 'claude' does not. Install jq and run cc-install again."
+        return 0
+    fi
+    jq -e '.env.DISABLE_AUTOUPDATER == "1"' "$f" >/dev/null 2>&1 && return 0
+    if [ "${_TOOLS_CHECK:-0}" = 1 ]; then
+        echo "[..]  Automatic updates of Claude Code are still on in $f - cc-install turns them off"
+        return 0
+    fi
+    mkdir -p "$(dirname "$f")" || return 1
+    tmp=$(mktemp "$f.tmp.XXXXXX") || return 1
+    if { if [ -s "$f" ]; then cat "$f"; else echo '{}'; fi; } |
+        jq '.env = (.env // {}) | .env.DISABLE_AUTOUPDATER = "1"' > "$tmp" 2>/dev/null &&
+        [ -s "$tmp" ] && _settings_file_replace "$f" "$tmp"; then
+        echo "[OK]  Automatic updates of Claude Code are off ($f): a newer release would not start on this system"
+    else
+        rm -f "$tmp"
+        echo "[Warn] Could not update $f (invalid JSON?) - left it untouched. Add \"DISABLE_AUTOUPDATER\": \"1\" to its env block."
+    fi
+}
+
 cc-install() {
-    local want="" a node_ok=1 min rc=0
+    local want="" a node_ok=1 min rc=0 claude_ver
     _TOOLS_YES=0 _TOOLS_CHECK=0
     local proxy=1
     for a in "$@"; do
@@ -4042,14 +4124,22 @@ cc-install() {
         proxy-up --no-verify >/dev/null 2>&1 && echo "[OK]  Proxy is up" ||
             echo "[Warn] Proxy didn't start - trying the internet directly ('proxy-status --fix' explains why)"
     fi
-    min=$(_tools_min_node)
+    claude_ver=$(_tools_claude_version)
+    if [ "$claude_ver" != latest ]; then
+        echo "[Info] The current Claude Code needs macOS 13 or newer; this Mac has an older macOS."
+        echo "       It gets Claude Code $claude_ver, the last release that runs here. That release gets no more updates."
+    fi
+    min=$(_tools_min_node "$claude_ver")
     case "$want" in *node*) _tools_node "$min" || { node_ok=0; rc=1; } ;; esac
     if [ $node_ok = 1 ] && ! command -v npm >/dev/null 2>&1; then
         echo "[Err] npm is missing - it comes with Node.js; reinstall Node.js (cc-install node)."
         node_ok=0; rc=1
     fi
     if [ $node_ok = 1 ]; then
-        case "$want" in *claude*) _tools_pkg "Claude Code" claude @anthropic-ai/claude-code "claude update" cc || rc=1 ;; esac
+        case "$want:$claude_ver" in
+            *claude*:latest) _tools_pkg "Claude Code" claude @anthropic-ai/claude-code "claude update" cc || rc=1 ;;
+            *claude*) { _tools_pkg "Claude Code" claude @anthropic-ai/claude-code "claude update" cc "$claude_ver" && _tools_claude_no_autoupdate; } || rc=1 ;;
+        esac
         case "$want" in *codex*)  _tools_pkg "Codex" codex @openai/codex "brew upgrade codex (or your package manager)" cx || rc=1 ;; esac
     else
         case "$want" in *claude*|*codex*) echo "[..]  Claude Code / Codex skipped - they need Node.js $min or newer first." ;; esac
