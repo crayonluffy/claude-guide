@@ -364,7 +364,12 @@ function Get-RecoveryStatus {
 function Test-RecoveryProcess {
     param([int]$ProcessId,[string]$Started)
     $p = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
-    return ($p -and $Started -and "$($p.StartTime.ToUniversalTime().Ticks)" -eq $Started)
+    if (-not $p -or -not $Started) { return $false }
+    # A stale PID may now belong to a protected process, or exit during the check.
+    try {
+        $startTime = $p.StartTime
+        return ($null -ne $startTime -and "$($startTime.ToUniversalTime().Ticks)" -eq $Started)
+    } catch { return $false }
 }
 function Stop-RecoveryProcess {
     param([int]$ProcessId,[string]$Started)
